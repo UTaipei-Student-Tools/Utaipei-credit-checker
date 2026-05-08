@@ -1,3 +1,13 @@
+---
+title: UTaipei Credit Audit
+emoji: 🎓
+colorFrom: teal
+colorTo: cyan
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # utaipei-credit-audit
 
 臺北市立大學畢業學分審核工具。預設支援地球環境暨生物資源學系非師培主修，並支援物化系應用化學組雙主修與資訊科學系雙主修。
@@ -42,4 +52,3 @@ Create a private GitHub repo named `utaipei-credit-audit`. Add these GitHub Secr
 - `HF_SPACE_REPO`: target Space repo, for example `username/utaipei-credit-audit`.
 
 The workflow runs tests and Docker build, then syncs the repo to the Hugging Face Space.
-
