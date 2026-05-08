@@ -21,6 +21,7 @@ def audit(
     earth_bio_domain: str = typer.Option("earth_environment", help="earth_environment or life_science"),
     include_chem_double_major: bool = True,
     include_cs_double_major: bool = True,
+    include_cs_minor: bool = False,
 ):
     courses = []
     if transcript:
@@ -31,6 +32,7 @@ def audit(
         earth_bio_domain=earth_bio_domain,
         include_chem_double_major=include_chem_double_major,
         include_cs_double_major=include_cs_double_major,
+        include_cs_minor=include_cs_minor,
     )
     typer.echo(json.dumps([result.model_dump() for result in audit_all(courses, request)], ensure_ascii=False, indent=2))
 
@@ -49,4 +51,3 @@ def fetch(
 
 if __name__ == "__main__":
     app()
-

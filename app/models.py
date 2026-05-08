@@ -52,5 +52,5 @@ class AuditResult(BaseModel):
 class AuditRequest(BaseModel):
     include_chem_double_major: bool = True
     include_cs_double_major: bool = True
+    include_cs_minor: bool = False
     earth_bio_domain: str = "earth_environment"
-

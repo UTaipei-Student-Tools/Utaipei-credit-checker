@@ -62,6 +62,7 @@ async def audit_login(
     password: Annotated[str, Form()],
     include_chem_double_major: Annotated[bool, Form()] = True,
     include_cs_double_major: Annotated[bool, Form()] = True,
+    include_cs_minor: Annotated[bool, Form()] = False,
     earth_bio_domain: Annotated[str, Form()] = "earth_environment",
 ):
     try:
@@ -83,6 +84,7 @@ async def audit_login(
     request = AuditRequest(
         include_chem_double_major=include_chem_double_major,
         include_cs_double_major=include_cs_double_major,
+        include_cs_minor=include_cs_minor,
         earth_bio_domain=earth_bio_domain,
     )
     return {"results": [result.model_dump() for result in audit_all(courses, request)]}
@@ -95,6 +97,7 @@ async def audit_upload(
     selection_html_text: Annotated[str, Form()] = "",
     include_chem_double_major: Annotated[bool, Form()] = True,
     include_cs_double_major: Annotated[bool, Form()] = True,
+    include_cs_minor: Annotated[bool, Form()] = False,
     earth_bio_domain: Annotated[str, Form()] = "earth_environment",
 ):
     courses: list[CourseRecord] = []
@@ -111,6 +114,7 @@ async def audit_upload(
     request = AuditRequest(
         include_chem_double_major=include_chem_double_major,
         include_cs_double_major=include_cs_double_major,
+        include_cs_minor=include_cs_minor,
         earth_bio_domain=earth_bio_domain,
     )
     return {"results": [result.model_dump() for result in audit_all(courses, request)]}
@@ -156,6 +160,7 @@ HTML = """
       <div class="checks">
         <label><input type="checkbox" name="include_chem_double_major" checked> 物化系應用化學組雙主修</label>
         <label><input type="checkbox" name="include_cs_double_major" checked> 資訊科學系雙主修</label>
+        <label><input type="checkbox" name="include_cs_minor"> 資訊科學系輔系</label>
       </div>
       <button>查詢並審核</button>
     </form>
@@ -174,6 +179,7 @@ HTML = """
       <div class="checks">
         <label><input type="checkbox" name="include_chem_double_major" checked> 物化系應用化學組雙主修</label>
         <label><input type="checkbox" name="include_cs_double_major" checked> 資訊科學系雙主修</label>
+        <label><input type="checkbox" name="include_cs_minor"> 資訊科學系輔系</label>
       </div>
       <button>上傳並審核</button>
     </form>
@@ -188,7 +194,7 @@ async function submitForm(form, url) {
   const output = document.querySelector("#output");
   output.textContent = "處理中...";
   const data = new FormData(form);
-  for (const name of ["include_chem_double_major", "include_cs_double_major"]) {
+  for (const name of ["include_chem_double_major", "include_cs_double_major", "include_cs_minor"]) {
     if (!data.has(name)) data.set(name, "false");
   }
   const res = await fetch(url, { method: "POST", body: data });
@@ -205,4 +211,3 @@ document.querySelector("#uploadForm").addEventListener("submit", event => {
 </body>
 </html>
 """
-

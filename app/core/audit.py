@@ -4,7 +4,7 @@ from collections import defaultdict
 
 from app.core.normalize import course_key
 from app.models import AuditRequest, AuditResult, CourseRecord, CourseStatus, RequirementResult
-from app.rules.catalog import CS_DOUBLE_MAJOR, CHEM_DOUBLE_MAJOR, NamedRequirement, ProgramRule, earth_bio_major_rule
+from app.rules.catalog import CS_DOUBLE_MAJOR, CS_MINOR, CHEM_DOUBLE_MAJOR, NamedRequirement, ProgramRule, earth_bio_major_rule
 
 
 PASSING_GRADES = {"抵免", "通過", "及格", "P", "PASS"}
@@ -134,4 +134,6 @@ def audit_all(courses: list[CourseRecord], request: AuditRequest) -> list[AuditR
         rules.append(CHEM_DOUBLE_MAJOR)
     if request.include_cs_double_major:
         rules.append(CS_DOUBLE_MAJOR)
+    if request.include_cs_minor:
+        rules.append(CS_MINOR)
     return [audit_program(courses, rule) for rule in rules]

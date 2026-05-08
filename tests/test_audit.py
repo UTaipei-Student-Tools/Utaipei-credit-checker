@@ -60,3 +60,26 @@ def test_invalid_and_in_progress_not_counted():
     assert len(result.in_progress) == 1
     assert len(result.needs_review) == 1
 
+
+def test_cs_minor_requirements():
+    courses = [
+        CourseRecord(name="計算機概論", credits=3),
+        CourseRecord(name="C 程式設計", credits=3),
+        CourseRecord(name="Java 程式設計", credits=3),
+        CourseRecord(name="資料結構", credits=3),
+        CourseRecord(name="演算法", credits=3),
+        CourseRecord(name="資料庫系統", credits=3),
+        CourseRecord(name="資訊安全", credits=3),
+    ]
+    results = audit_all(
+        courses,
+        AuditRequest(
+            include_chem_double_major=False,
+            include_cs_double_major=False,
+            include_cs_minor=True,
+        ),
+    )
+    minor = results[1]
+    assert minor.profile == "資訊科學系輔系"
+    assert minor.requirements[0].missing_credits == 0
+    assert minor.requirements[1].missing_credits == 0

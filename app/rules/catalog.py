@@ -289,3 +289,18 @@ CS_DOUBLE_MAJOR = ProgramRule(
     ),
 )
 
+CS_MINOR = ProgramRule(
+    key="cs_minor",
+    title="資訊科學系輔系",
+    total_required_credits=20,
+    requirements=(
+        NamedRequirement("cs_minor_required", "資訊系輔系必修", 6, ("計算機概論", "C 程式設計")),
+        NamedRequirement(
+            "cs_minor_other",
+            "資訊系其他開設課程",
+            14,
+            pool_names=CS_OTHER_POOL + CS_DOUBLE_REQUIRED,
+            warnings=("若輔系必修已於所屬學系修過，需經本系同意後改修本系其他課補足。",),
+        ),
+    ),
+)
