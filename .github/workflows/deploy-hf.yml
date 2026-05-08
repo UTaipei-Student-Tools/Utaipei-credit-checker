@@ -1,0 +1,44 @@
+name: Test and deploy to Hugging Face
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run tests
+        run: pytest
+      - name: Docker build
+        run: docker build -t utaipei-credit-audit .
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+        run: |
+          test -n "$HF_TOKEN"
+          test -n "$HF_SPACE_REPO"
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git remote add hf "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
+          git push --force hf HEAD:main
+

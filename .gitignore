@@ -1,0 +1,28 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Personal and generated artifacts
+downloads/
+reports/
+tmp/
+*.trace.zip
+*.har
+*歷年成績*.pdf
+*成績單*.pdf
+U[0-9]*.pdf
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
