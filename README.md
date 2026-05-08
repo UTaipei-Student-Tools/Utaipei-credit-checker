@@ -1,8 +1,8 @@
 ---
 title: UTaipei Credit Audit
 emoji: 🎓
-colorFrom: teal
-colorTo: cyan
+colorFrom: green
+colorTo: blue
 sdk: docker
 app_port: 7860
 pinned: false
