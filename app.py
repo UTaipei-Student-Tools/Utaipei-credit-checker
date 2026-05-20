@@ -5,10 +5,12 @@ UTaipei Graduation Credit Checker - Premium Streamlit Web Application
 
 import streamlit as st
 import os
+import json
 import pandas as pd
 from scraper import crawl_transcript_pdf
 from pdf_parser import parse_transcript_pdf
 from credit_engine import evaluate_graduation
+from handbook_rules import get_rules_meta
 
 # Set page configuration with premium tab title and favicon
 st.set_page_config(
@@ -178,6 +180,18 @@ def draw_premium_progress(label, completed, required, ip=0.0, bar_color="#4facfe
 
 # ----------------- APP SIDEBAR -----------------
 with st.sidebar:
+    # Rules version info
+    rules_meta = get_rules_meta()
+    rules_version = rules_meta.get('version', 'N/A')
+    rules_updated = rules_meta.get('last_updated', 'N/A')
+    st.markdown(f"""
+    <div style="background: rgba(79,172,254,0.08); border:1px solid rgba(79,172,254,0.2); border-radius:10px; padding:10px 14px; margin-bottom:8px;">
+        <div style="font-size:11px; color:#94a3b8; margin-bottom:2px;">📋 目前規則版本</div>
+        <div style="font-size:15px; font-weight:700; color:#4facfe;">{rules_version} 學年度手冊</div>
+        <div style="font-size:11px; color:#64748b;">最後更新：{rules_updated}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("### 🎓 北市大校務整合")
     
     # Selection logic for student major configuration
@@ -225,7 +239,6 @@ with st.sidebar:
             st.session_state["offline_demo"] = False
             with st.spinner("正在登入校務系統並抓取成績單..."):
                 try:
-                    # Scratch download path inside conversation/scratch structure
                     scr_dir = os.path.dirname(os.path.abspath(__file__))
                     pdf_path = crawl_transcript_pdf(student_id, student_pwd, scr_dir)
                     st.session_state["transcript_pdf_path"] = pdf_path
@@ -244,11 +257,83 @@ with st.sidebar:
             else:
                 st.error("找不到本機快取的 student_transcript.pdf 檔案！")
 
+    # ── 管理員規則更新介面 ──────────────────────
+    st.markdown("---")
+    with st.expander("⚙️ 管理員：更新畢業規則", expanded=False):
+        st.markdown("""
+        <div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">
+        輸入管理員密碼後，可直接在此貼上新學年度的 <code>rules_config.json</code> 內容並儲存。
+        儲存完畢後重新整理頁面即可套用新規則。
+        </div>
+        """, unsafe_allow_html=True)
+        
+        admin_pwd = st.text_input("管理員密碼", type="password", key="admin_pwd",
+                                  placeholder="輸入管理員密碼...")
+        
+        # The admin password — change this to something private
+        # To change: edit ADMIN_PASSWORD value below and re-deploy
+        ADMIN_PASSWORD = "utaipei-admin-2024"
+        
+        if admin_pwd == ADMIN_PASSWORD:
+            st.success("✅ 已驗證身分，可進行規則更新")
+            
+            # Show current rules_config.json content
+            scr_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(scr_dir, "rules_config.json")
+            current_json = ""
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    current_json = f.read()
+            
+            new_json_text = st.text_area(
+                "貼上新的 rules_config.json 內容",
+                value=current_json,
+                height=300,
+                key="admin_json_editor"
+            )
+            
+            col_validate, col_save = st.columns(2)
+            
+            with col_validate:
+                if st.button("🔍 驗證 JSON 格式", use_container_width=True):
+                    try:
+                        parsed = json.loads(new_json_text)
+                        # Check required top-level keys
+                        required_keys = ["_meta", "university_common", "earth_life_major", "apc_rules", "cs_rules"]
+                        missing = [k for k in required_keys if k not in parsed]
+                        if missing:
+                            st.warning(f"⚠️ JSON 有效，但缺少以下必要欄位：{missing}")
+                        else:
+                            ver = parsed.get("_meta", {}).get("version", "未知")
+                            st.success(f"✅ JSON 格式正確！偵測到學年度版本：{ver}")
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ JSON 格式錯誤：{str(e)}")
+            
+            with col_save:
+                if st.button("💾 儲存並套用規則", use_container_width=True, type="primary"):
+                    try:
+                        # Validate before saving
+                        parsed = json.loads(new_json_text)
+                        required_keys = ["_meta", "university_common", "earth_life_major", "apc_rules", "cs_rules"]
+                        missing = [k for k in required_keys if k not in parsed]
+                        if missing:
+                            st.error(f"❌ 儲存失敗：缺少必要欄位 {missing}")
+                        else:
+                            with open(config_path, "w", encoding="utf-8") as f:
+                                f.write(new_json_text)
+                            st.success("✅ 已成功儲存新規則！請重新整理頁面讓新規則生效。")
+                            st.balloons()
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ JSON 格式錯誤，儲存失敗：{str(e)}")
+                        
+        elif admin_pwd and admin_pwd != ADMIN_PASSWORD:
+            st.error("❌ 密碼錯誤，請重新輸入。")
+
 # ----------------- MAIN PANEL -----------------
-st.markdown("""
+st.markdown(f"""
 <div class="header-card">
     <div class="header-title">🎓 臺北市立大學 歷年畢業學分自我審查系統</div>
-    <div class="header-subtitle">114學年度 理學院 大學部學術審查工具 (地生系主修 / 跨系輔雙審查版)</div>
+    <div class="header-subtitle">{rules_version}學年度 理學院 大學部學術審查工具 (地生系主修 / 跨系輔雙審查版)</div>
 </div>
 """, unsafe_allow_html=True)
 
