@@ -237,14 +237,17 @@ with st.sidebar:
     with col_scrape:
         if st.button("🚀 實時抓取", use_container_width=True, help="直接登入校務系統抓取歷年成績單PDF"):
             st.session_state["offline_demo"] = False
-            with st.spinner("正在登入校務系統並抓取成績單..."):
-                try:
-                    scr_dir = os.path.dirname(os.path.abspath(__file__))
-                    pdf_path = crawl_transcript_pdf(student_id, student_pwd, scr_dir)
-                    st.session_state["transcript_pdf_path"] = pdf_path
-                    st.success("動態歷年成績抓取成功！")
-                except Exception as e:
-                    st.error(f"抓取失敗: {str(e)}")
+            if not student_id.strip() or not student_pwd:
+                st.error("⚠️ 請先輸入您的學號與校務系統密碼！在輸入完畢後，請按 Enter 鍵確認或點選輸入框外，然後再點擊「實時抓取」。")
+            else:
+                with st.spinner("正在登入校務系統並抓取成績單..."):
+                    try:
+                        scr_dir = os.path.dirname(os.path.abspath(__file__))
+                        pdf_path = crawl_transcript_pdf(student_id.strip(), student_pwd, scr_dir)
+                        st.session_state["transcript_pdf_path"] = pdf_path
+                        st.success("動態歷年成績抓取成功！")
+                    except Exception as e:
+                        st.error(f"抓取失敗: {str(e)}")
                     
     with col_demo:
         if st.button("📂 載入 Demo", use_container_width=True, help="一鍵載入本機快取之歷年成績單PDF進行展示"):
