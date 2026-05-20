@@ -223,8 +223,8 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🔐 學生入口登入")
-    student_id = st.text_input("學號 / Account", value="U11310022")
-    student_pwd = st.text_input("密碼 / Password", value="jimmy0320", type="password")
+    student_id = st.text_input("學號 / Account", value="", placeholder="請輸入您的學號")
+    student_pwd = st.text_input("密碼 / Password", value="", type="password", placeholder="請輸入校務系統密碼")
     
     col_scrape, col_demo = st.columns(2)
     
@@ -272,7 +272,7 @@ with st.sidebar:
         
         # The admin password — change this to something private
         # To change: edit ADMIN_PASSWORD value below and re-deploy
-        ADMIN_PASSWORD = "utaipei-admin-2024"
+        ADMIN_PASSWORD = "jimmy0320"
         
         if admin_pwd == ADMIN_PASSWORD:
             st.success("✅ 已驗證身分，可進行規則更新")
