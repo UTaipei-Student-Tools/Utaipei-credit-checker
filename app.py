@@ -385,8 +385,8 @@ else:
         </div>
         """, unsafe_allow_html=True)
         
-        # 3. Main Metrics Grid
-        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        # 3. Main Metrics Grid (6 columns)
+        col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
         
         with col_m1:
             st.markdown(f"""
@@ -400,7 +400,7 @@ else:
         with col_m2:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-label">🏫 校共同學分</div>
+                <div class="metric-label">🏫 校共同+通識</div>
                 <div class="metric-value" style="color: #4facfe;">{summary['common_completed']:g}</div>
                 <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">應修至少 28 / 修讀中 {summary['common_ip']:g}</div>
             </div>
@@ -426,16 +426,32 @@ else:
                 <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">應修 {target_req:g} / 修讀中 {summary['target_ip']:g}</div>
             </div>
             """, unsafe_allow_html=True)
-            
+
         with col_m5:
+            pe_data = report["pe"]
+            pe_comp = pe_data["semesters_completed"]
+            pe_ip   = pe_data["semesters_ip"]
+            pe_req  = pe_data["semesters_required"]
+            pe_ok   = pe_comp >= pe_req
+            pe_color = "#00cd98" if pe_ok else ("#4facfe" if (pe_comp + pe_ip) >= pe_req else "#ff3860")
+            pe_label = "✅ 已修滿" if pe_ok else f"{pe_comp}/{pe_req} 學期"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">🎽 體育課程</div>
+                <div class="metric-value" style="color: {pe_color}; font-size:28px;">{pe_label}</div>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 5px;">修讀中 {pe_ip} / 需修 {pe_req} 學期</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        with col_m6:
             grad_text = "🎉 已達畢業標準" if summary['graduation_ready'] else "⚠️ 未達畢業標準"
             grad_bg = "rgba(0, 205, 152, 0.15)" if summary['graduation_ready'] else "rgba(255, 56, 96, 0.15)"
             grad_color = "#00cd98" if summary['graduation_ready'] else "#ff3860"
             st.markdown(f"""
             <div class="metric-card" style="background-color: {grad_bg}; border-color: {grad_color};">
                 <div class="metric-label" style="color: {grad_color}; font-weight:700;">✨ 審查結果</div>
-                <div class="metric-value" style="color: {grad_color}; font-size: 24px; margin-top: 15px;">{grad_text}</div>
-                <div style="font-size: 11px; color: #cbd5e1; margin-top: 10px;">含通識/系專必修/輔雙試算</div>
+                <div class="metric-value" style="color: {grad_color}; font-size: 22px; margin-top: 15px;">{grad_text}</div>
+                <div style="font-size: 11px; color: #cbd5e1; margin-top: 10px;">含通識/體育/系專/輔雙試算</div>
             </div>
             """, unsafe_allow_html=True)
             
@@ -489,9 +505,31 @@ else:
 
         # --- TAB 2: COMMON & MAJOR DETAILED ANALYSIS ---
         with tab2:
-            st.markdown(f"### 🏫 2.1 全校共同必修課稽核 (已得: {report['common']['compulsory_completed']:g} 學分)")
-            
-            # Common Compulsory Courses list
+            # ── 2.1 體育課 ────────────────────────────────────────────────
+            pe_data = report["pe"]
+            pe_c, pe_r, pe_ip_count = pe_data["semesters_completed"], pe_data["semesters_required"], pe_data["semesters_ip"]
+            pe_status_color = "#00cd98" if pe_c >= pe_r else ("#4facfe" if (pe_c + pe_ip_count) >= pe_r else "#ff3860")
+            pe_status_text  = "✅ 已修滿" if pe_c >= pe_r else (f"修讀中 ({pe_c + pe_ip_count}/{pe_r} 學期)" if (pe_c + pe_ip_count) >= pe_r else f"尚差 {pe_r - pe_c} 學期")
+            st.markdown(f"""### 🏃 2.1 體育課追蹤 (應修 {pe_r} 學期，已完成 <b style='color:{pe_status_color}'>{pe_c}</b> 學期 — <b style='color:{pe_status_color}'>{pe_status_text}</b>)""", unsafe_allow_html=True)
+            if pe_data["courses"]:
+                pe_list = []
+                for c in pe_data["courses"]:
+                    for sem, score in [("第一學期", c["sem1_score"]), ("第二學期", c["sem2_score"])]:
+                        if score and score != "--":
+                            if score == "未":
+                                badge = "<span class='status-badge status-ip'>在修中</span>"
+                            elif score in ("F", "停", "W"):
+                                badge = "<span class='status-badge status-missing'>未通過</span>"
+                            else:
+                                badge = "<span class='status-badge status-completed'>已修畢</span>"
+                            pe_list.append({"課程": c["name"], "學期": sem, "成績": score, "狀態": badge})
+                st.write(pd.DataFrame(pe_list).to_html(escape=False, index=False), unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ 目前無體育課程修課紀錄。")
+
+            st.markdown("---")
+            # ── 2.2 校共同必修 (英文、國文 10學分) ──────────────────────────
+            st.markdown(f"### 📖 2.2 校共同必修課稽核 (英文+國文，應修 10 學分，已得: {report['common']['compulsory_completed']:g} 學分)")
             common_comp_list = []
             for c in report["common"]["compulsory_courses"]:
                 status = "<span class='status-badge status-completed'>已修畢</span>" if c["is_completed"] else "<span class='status-badge status-ip'>修讀中</span>"
