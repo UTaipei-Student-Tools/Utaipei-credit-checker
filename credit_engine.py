@@ -290,11 +290,11 @@ def evaluate_graduation(courses, config):
             report["major"]["domain_compulsory_missing"].append({"name": name, "credit": req_cred})
 
     # ── PHASE 7: 專業領域選修（至少20學分）──────────────────────────────────
-    domain_elective_keywords = EARTH_LIFE_MAJOR["domain_electives"][domain]
+    domain_elective_keywords = [normalize_course_name(kw) for kw in EARTH_LIFE_MAJOR["domain_electives"][domain]]
     for c in courses:
         c_idx = id(c)
         if c_idx not in consumed:
-            if c["name"] in domain_elective_keywords or any(kw == c["name"] for kw in domain_elective_keywords):
+            if c["name"] in domain_elective_keywords:
                 comp_c, ip_c = get_course_credits(c)
                 report["major"]["domain_elective_courses"].append(c)
                 report["major"]["domain_elective_completed"] += comp_c
@@ -303,14 +303,14 @@ def evaluate_graduation(courses, config):
 
     # ── PHASE 8: 系共同選修（其他27學分）─────────────────────────────────────
     other_domain = "生命科學" if domain == "地球環境" else "地球環境"
-    other_domain_keywords = EARTH_LIFE_MAJOR["domain_electives"][other_domain]
-    common_elective_keywords = EARTH_LIFE_MAJOR["domain_electives"]["common_electives"]
+    other_domain_keywords = [normalize_course_name(kw) for kw in EARTH_LIFE_MAJOR["domain_electives"][other_domain]]
+    common_elective_keywords = [normalize_course_name(kw) for kw in EARTH_LIFE_MAJOR["domain_electives"]["common_electives"]]
     all_major_electives = set(other_domain_keywords + common_elective_keywords)
 
     for c in courses:
         c_idx = id(c)
         if c_idx not in consumed:
-            if c["name"] in all_major_electives or any(kw == c["name"] for kw in all_major_electives):
+            if c["name"] in all_major_electives:
                 comp_c, ip_c = get_course_credits(c)
                 report["major"]["other_elective_courses"].append(c)
                 report["major"]["other_elective_completed"] += comp_c
