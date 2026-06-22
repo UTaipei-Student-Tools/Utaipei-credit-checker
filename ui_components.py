@@ -54,21 +54,21 @@ def inject_theme_css():
             @import url('https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@300;400;700&family=Outfit:wght@300;400;600;700&display=swap');
             html, body, [class*="css"] {
                 font-family: 'LXGW WenKai TC', 'Outfit', sans-serif;
-                color: #111827;
+                color: var(--text-color, #111827);
                 font-size: 18px !important;
             }
             .stMarkdown p, .stMarkdown li, .stMarkdown div {
                 font-size: 18px !important;
             }
             .stApp {
-                background: linear-gradient(180deg, #F8FAFC 0%, #E2E8F0 100%);
+                background: var(--background-color, linear-gradient(180deg, #F8FAFC 0%, #E2E8F0 100%));
                 min-height: 100vh;
             }
             .stApp, .stApp div, .stApp p, .stApp span, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp a, .stApp label {
-                color: #111827 !important;
+                color: var(--text-color, #111827) !important;
             }
             .stMarkdown {
-                color: #111827 !important;
+                color: var(--text-color, #111827) !important;
             }
             .header-card {
                 background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(14, 165, 233, 0.03));
@@ -89,13 +89,15 @@ def inject_theme_css():
             }
             .header-subtitle {
                 font-size: 16px;
-                color: #334155;
+                color: var(--text-color, #334155) !important;
+                opacity: 0.85;
                 letter-spacing: .6px;
                 line-height: 1.6;
             }
             .metric-card {
-                background: #ffffff;
-                border: 1px solid rgba(226, 232, 240, 0.8);
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.8)) !important;
+                color: var(--text-color, #111827) !important;
                 border-radius: 20px;
                 padding: 22px 20px;
                 text-align: left;
@@ -104,7 +106,7 @@ def inject_theme_css():
             }
             .metric-card:hover {
                 transform: translateY(-3px);
-                border-color: rgba(14, 165, 233, 0.35);
+                border-color: rgba(14, 165, 233, 0.35) !important;
             }
             .metric-value {
                 font-size: 34px;
@@ -113,7 +115,8 @@ def inject_theme_css():
             }
             .metric-label {
                 font-size: 13px;
-                color: #475569;
+                color: var(--text-color, #475569) !important;
+                opacity: 0.85;
                 font-weight: 600;
             }
             .status-badge {
@@ -128,19 +131,19 @@ def inject_theme_css():
                 white-space: nowrap;
             }
             .status-completed {
-                background-color: rgba(16, 185, 129, 0.12);
-                color: #0f766e;
-                border: 1px solid rgba(16, 185, 129, 0.2);
+                background-color: rgba(16, 185, 129, 0.15) !important;
+                color: #10b981 !important;
+                border: 1px solid rgba(16, 185, 129, 0.3) !important;
             }
             .status-ip {
-                background-color: rgba(59, 130, 246, 0.12);
-                color: #1d4ed8;
-                border: 1px solid rgba(59, 130, 246, 0.2);
+                background-color: rgba(59, 130, 246, 0.15) !important;
+                color: #3b82f6 !important;
+                border: 1px solid rgba(59, 130, 246, 0.3) !important;
             }
             .status-missing {
-                background-color: rgba(249, 115, 22, 0.12);
-                color: #c2410c;
-                border: 1px solid rgba(249, 115, 22, 0.2);
+                background-color: rgba(249, 115, 22, 0.15) !important;
+                color: #f97316 !important;
+                border: 1px solid rgba(249, 115, 22, 0.3) !important;
             }
             .progress-container {
                 margin-bottom: 16px;
@@ -150,15 +153,16 @@ def inject_theme_css():
                 justify-content: space-between;
                 font-size: 13px;
                 margin-bottom: 8px;
-                color: #334155;
+                color: var(--text-color, #334155) !important;
+                opacity: 0.85;
             }
             .progress-bar-bg {
-                background-color: rgba(226, 232, 240, 0.95);
+                background-color: var(--border-color, rgba(226, 232, 240, 0.95));
                 border-radius: 999px;
                 height: 14px;
                 width: 100%;
                 overflow: hidden;
-                border: 1px solid rgba(226, 232, 240, 0.9);
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.9));
             }
             .progress-bar-fill {
                 height: 100%;
@@ -166,17 +170,24 @@ def inject_theme_css():
                 transition: width 0.8s ease-in-out;
             }
             .card-panel {
-                background: #ffffff;
-                border: 1px solid rgba(226, 232, 240, 0.85);
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.85)) !important;
+                color: var(--text-color, #0f172a) !important;
                 border-radius: 24px;
                 padding: 24px;
                 box-shadow: 0 18px 36px rgba(15, 23, 42, 0.05);
+            }
+            .card-panel * {
+                color: var(--text-color, #0f172a) !important;
+            }
+            .card-panel button, .card-panel button * {
+                color: inherit !important;
             }
             .section-heading {
                 font-size: 18px;
                 font-weight: 700;
                 margin-bottom: 14px;
-                color: #0f172a;
+                color: var(--text-color, #0f172a) !important;
             }
             .table-container {
                 overflow-x: auto;
@@ -189,12 +200,12 @@ def inject_theme_css():
             }
             .table-container th, .table-container td {
                 padding: 10px 12px;
-                border-bottom: 1px solid rgba(226, 232, 240, 0.9);
-                color: #0f172a;
+                border-bottom: 1px solid var(--border-color, rgba(226, 232, 240, 0.9)) !important;
+                color: var(--text-color, #0f172a) !important;
                 white-space: nowrap;
             }
             .table-container th {
-                background: rgba(226, 232, 240, 0.7);
+                background: var(--secondary-background-color, rgba(226, 232, 240, 0.7)) !important;
                 font-weight: 700;
             }
             .stDownloadButton>button {
@@ -206,10 +217,10 @@ def inject_theme_css():
                 border-radius: 18px;
                 padding: 18px 22px;
                 margin-bottom: 18px;
-                color: #0f172a;
+                color: var(--text-color, #0f172a) !important;
             }
             .hero-callout strong {
-                color: #0c4a6e;
+                color: var(--text-color, #0c4a6e) !important;
             }
             /* Streamlit Tabs Stretch & Enlarge */
             button[data-baseweb="tab"] {
@@ -234,17 +245,20 @@ def inject_theme_css():
                 justify-content: space-between;
             }
             .info-card {
-                background: #ffffff;
-                border: 1px solid rgba(148,163,184,0.16);
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(148,163,184,0.16)) !important;
                 border-radius: 20px;
                 padding: 18px 22px;
                 box-shadow: 0 18px 40px rgba(15,23,42,0.05);
                 flex: 1;
                 min-width: 250px;
             }
+            .info-card * {
+                color: var(--text-color, #111827) !important;
+            }
             .info-card-highlight {
-                background: linear-gradient(135deg, rgba(14,165,233,0.14), rgba(6,182,212,0.05));
-                border: 1px solid rgba(14,165,233,0.18);
+                background: linear-gradient(135deg, rgba(14,165,233,0.14), rgba(6,182,212,0.05)) !important;
+                border: 1px solid rgba(14,165,233,0.18) !important;
             }
             .overview-grid {
                 display: grid;
@@ -252,11 +266,38 @@ def inject_theme_css():
                 gap: 16px;
                 align-items: stretch;
             }
+            .overview-grid > div {
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.8)) !important;
+            }
+            .overview-grid > div > div {
+                color: var(--text-color, #111827) !important;
+            }
+            .overview-grid > div > div:first-child {
+                color: var(--text-color, #475569) !important;
+                opacity: 0.8;
+            }
+            .overview-grid > div > div:last-child {
+                color: var(--text-color, #64748b) !important;
+                opacity: 0.7;
+            }
             .metric-grid {
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                 gap: 16px;
                 align-items: stretch;
+            }
+            .metric-grid > div {
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.8)) !important;
+            }
+            .metric-grid > div > div:first-child {
+                color: var(--text-color, #475569) !important;
+                opacity: 0.8;
+            }
+            .metric-grid > div > div:last-child {
+                color: var(--text-color, #64748b) !important;
+                opacity: 0.7;
             }
             .course-row {
                 display: grid;
@@ -264,19 +305,23 @@ def inject_theme_css():
                 gap: 12px;
                 padding: 16px;
                 align-items: center;
-                background: #ffffff;
-                border: 1px solid rgba(226, 232, 240, 0.9);
+                background: var(--secondary-background-color, #ffffff) !important;
+                border: 1px solid var(--border-color, rgba(226, 232, 240, 0.9)) !important;
                 border-radius: 18px;
+            }
+            .course-row * {
+                color: var(--text-color, #111827) !important;
             }
             .course-header {
                 display: grid;
                 grid-template-columns: 3fr 1fr 0.8fr 0.8fr 1fr;
                 gap: 12px;
                 padding: 14px 16px;
-                color: #475569;
+                color: var(--text-color, #475569) !important;
+                opacity: 0.8;
                 font-size: 13px;
                 font-weight: 700;
-                background: #f8fafc;
+                background: var(--secondary-background-color, #f8fafc) !important;
                 border-radius: 18px;
             }
 
@@ -304,7 +349,8 @@ def inject_theme_css():
                 .course-row > div::before {
                     content: attr(data-label);
                     font-weight: bold;
-                    color: #475569;
+                    color: var(--text-color, #475569) !important;
+                    opacity: 0.8;
                     margin-right: 12px;
                     white-space: nowrap;
                     flex-shrink: 0;
@@ -314,7 +360,7 @@ def inject_theme_css():
                     font-weight: 700;
                     font-size: 16px !important;
                     justify-content: flex-start !important;
-                    color: #111827;
+                    color: var(--text-color, #111827) !important;
                     margin-bottom: 4px;
                     text-align: left !important;
                     word-break: break-word;
@@ -360,8 +406,8 @@ def draw_premium_progress(label, completed, required, ip=0.0):
         f"""
         <div class="progress-container">
             <div class="progress-label-row">
-                <span style="font-weight:600; color:#121212;">{label}</span>
-                <span style="color:#1f2937;">
+                <span style="font-weight:600; color:var(--text-color, #121212);">{label}</span>
+                <span style="color:var(--text-color, #1f2937);">
                     已得 <b style="color:#0f766e;">{completed:g}</b> 學分 {f'| 修讀中 <b style="color:#2563eb;">{ip:g}</b>' if ip > 0 else ''} / 應修 <b>{required:g}</b> 學分
                 </span>
             </div>
