@@ -306,6 +306,7 @@ def parse_transcript_pdf(pdf_path):
                     best, best_total = alt, alt_total
             parsed_courses = best
 
+    parsed_courses = split_two_semester_courses(parsed_courses)
     return student_info, parsed_courses
 
 def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academic_year):
@@ -402,6 +403,116 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
         "is_zero_credit": is_zero_credit
     }
 
+def split_two_semester_courses(courses):
+    split_targets = ["普通生物學", "地球科學"]
+    new_courses = []
+    
+    def get_sem_status(score, cred_str):
+        if not cred_str or cred_str == "--" or cred_str == "":
+            return False, False, False
+        try:
+            c_val = float(cred_str)
+        except ValueError:
+            c_val = 0.0
+        if c_val <= 0.0:
+            return False, False, False
+            
+        if not score or score == "--":
+            return True, False, True
+        if score == "未":
+            return True, False, True
+        if score in ("P", "抵", "免"):
+            return True, True, False
+        if score in ("F", "停", "W"):
+            return True, False, False
+        try:
+            val = float(score)
+            return True, val >= 60.0, False
+        except ValueError:
+            return True, False, False
+
+    for c in courses:
+        if c.get("name") in split_targets:
+            s1_active, s1_done, s1_ip = get_sem_status(c.get("sem1_score"), c.get("sem1_credit"))
+            s2_active, s2_done, s2_ip = get_sem_status(c.get("sem2_score"), c.get("sem2_credit"))
+            
+            if s1_active or s2_active:
+                if s1_active:
+                    try:
+                        cred = float(c["sem1_credit"])
+                    except ValueError:
+                        cred = 3.0
+                    new_courses.append({
+                        "name": f"{c['name']}(上)",
+                        "raw_name": f"{c['raw_name']}(上)",
+                        "type": c.get("type", "必"),
+                        "academic_year": c.get("academic_year", ""),
+                        "sem1_credit": c.get("sem1_credit", ""),
+                        "sem1_score": c.get("sem1_score", ""),
+                        "sem2_credit": "",
+                        "sem2_score": "",
+                        "total_credit": cred,
+                        "completed_credit": cred if s1_done else 0.0,
+                        "is_completed": s1_done,
+                        "is_in_progress": s1_ip,
+                        "is_zero_credit": False
+                    })
+                if s2_active:
+                    try:
+                        cred = float(c["sem2_credit"])
+                    except ValueError:
+                        cred = 3.0
+                    new_courses.append({
+                        "name": f"{c['name']}(下)",
+                        "raw_name": f"{c['raw_name']}(下)",
+                        "type": c.get("type", "必"),
+                        "academic_year": c.get("academic_year", ""),
+                        "sem1_credit": "",
+                        "sem1_score": "",
+                        "sem2_credit": c.get("sem2_credit", ""),
+                        "sem2_score": c.get("sem2_score", ""),
+                        "total_credit": cred,
+                        "completed_credit": cred if s2_done else 0.0,
+                        "is_completed": s2_done,
+                        "is_in_progress": s2_ip,
+                        "is_zero_credit": False
+                    })
+            else:
+                half_credit = c["total_credit"] / 2.0
+                new_courses.append({
+                    "name": f"{c['name']}(上)",
+                    "raw_name": f"{c['raw_name']}(上)",
+                    "type": c.get("type", "必"),
+                    "academic_year": c.get("academic_year", ""),
+                    "sem1_credit": str(half_credit),
+                    "sem1_score": "P" if c.get("is_completed") else ("未" if c.get("is_in_progress") else ""),
+                    "sem2_credit": "",
+                    "sem2_score": "",
+                    "total_credit": half_credit,
+                    "completed_credit": half_credit if c.get("is_completed") else 0.0,
+                    "is_completed": c.get("is_completed", False),
+                    "is_in_progress": c.get("is_in_progress", False),
+                    "is_zero_credit": False
+                })
+                new_courses.append({
+                    "name": f"{c['name']}(下)",
+                    "raw_name": f"{c['raw_name']}(下)",
+                    "type": c.get("type", "必"),
+                    "academic_year": c.get("academic_year", ""),
+                    "sem1_credit": "",
+                    "sem1_score": "",
+                    "sem2_credit": str(half_credit),
+                    "sem2_score": "P" if c.get("is_completed") else ("未" if c.get("is_in_progress") else ""),
+                    "total_credit": half_credit,
+                    "completed_credit": half_credit if c.get("is_completed") else 0.0,
+                    "is_completed": c.get("is_completed", False),
+                    "is_in_progress": c.get("is_in_progress", False),
+                    "is_zero_credit": False
+                })
+        else:
+            new_courses.append(c)
+    return new_courses
+
 if __name__ == "__main__":
     import sys
     # Reconfigure stdout to use utf-8 to prevent CP950 encoding errors on rare characters like '亘'
@@ -477,5 +588,6 @@ def load_courses_from_csv(csv_path):
             }
             courses.append(course)
 
+    courses = split_two_semester_courses(courses)
     return student_info, courses
 
