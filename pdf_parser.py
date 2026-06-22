@@ -78,7 +78,7 @@ def parse_transcript_pdf(pdf_path):
             left_has_credit = any(re.match(r"^(?:\d+|--|P|抵|免|未)$", w[4]) for w in left_words if w[0] > 180)
 
             # 如果當前行左側沒有課程屬性標記(必/選)，且有文字內容，且不是學期標題等，嘗試與下一行合併
-            if left_text and not left_has_type and not left_has_credit and not any(term in left_text for term in ["學年", "累計學分", "實得學分", "附註"]) and i + 1 < len(rows):
+            if left_text and not left_has_type and not left_has_credit and not any(term in left_text for term in ["學年", "累計學分", "實得學分", "附註", "學分分數", "科科科科", "第一學期", "第二學期", "學分", "分數"]) and i + 1 < len(rows):
                 next_row = rows[i + 1]
                 next_left_words = [w for w in next_row["words"] if w[0] < col_x]
                 next_left_text = "".join([w[4] for w in sorted(next_left_words, key=lambda w: w[0])]).strip()
@@ -101,7 +101,7 @@ def parse_transcript_pdf(pdf_path):
             right_has_credit = any(re.match(r"^(?:\d+|--|P|抵|免|未)$", w[4]) for w in right_words if w[0] > 470)
 
             # 如果當前行右側沒有課程屬性標記(必/選)，且有文字內容，且不是學期標題等，嘗試與下一行合併
-            if right_text and not right_has_type and not right_has_credit and not any(term in right_text for term in ["學年", "累計學分", "實得學分", "附註"]) and i + 1 < len(rows):
+            if right_text and not right_has_type and not right_has_credit and not any(term in right_text for term in ["學年", "累計學分", "實得學分", "附註", "學分分數", "科科科科", "第一學期", "第二學期", "學分", "分數"]) and i + 1 < len(rows):
                 next_row = rows[i + 1]
                 next_right_words = [w for w in next_row["words"] if w[0] >= col_x]
                 next_right_text = "".join([w[4] for w in sorted(next_right_words, key=lambda w: w[0])]).strip()
