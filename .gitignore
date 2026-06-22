@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+venv/
+.venv/
+
+# Streamlit
+.streamlit/
+
+# macOS
+.DS_Store
+
+# Byte-compiled / optimized / DLL files
+*.egg-info/
+.eggs/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# temporary files
+*.tmp
+*.temp
+
+# Hugging Face
+*.hf
+
+# Duplicate local files
+README (1).md
+app (1).py
+gitattributes (1)
+gitattributes.txt
+gitignore

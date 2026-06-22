@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地科系 & 雙主修學分全地圖 (V24 實驗未抵免修正版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .status-btn { transition: all 0.2s; }
+        .progress-bar { transition: width 0.5s ease-in-out; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+
+    <!-- Header -->
+    <header class="bg-slate-800 text-white sticky top-0 z-50 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-3">
+            <div class="flex flex-col md:flex-row justify-between items-center">
+                <h1 class="text-xl font-bold mb-2 md:mb-0"><i class="fas fa-map mr-2"></i>學分全地圖 (地科 x 應化)</h1>
+                <div class="flex space-x-4 text-sm items-center">
+                    <div class="bg-slate-700 px-3 py-1 rounded border border-slate-600">
+                        <span class="text-gray-400">畢業門檻 (128+40)</span>
+                        <span class="font-bold text-white text-lg ml-1">168</span>
+                    </div>
+                    <div class="bg-emerald-700 px-3 py-1 rounded border border-emerald-600">
+                        <span class="text-emerald-200">目前累計</span>
+                        <span class="font-bold text-white text-lg ml-1" id="grand-total">0</span>
+                    </div>
+                    <div class="bg-blue-600 px-3 py-1 rounded cursor-pointer hover:bg-blue-500 transition" onclick="resetData()">
+                        <i class="fas fa-undo mr-1"></i>重置
+                    </div>
+                </div>
+            </div>
+            <!-- Global Progress -->
+            <div class="mt-3 w-full bg-slate-600 rounded-full h-2.5 relative">
+                <div id="total-progress" class="bg-emerald-400 h-2.5 rounded-full progress-bar relative" style="width: 0%"></div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-4 gap-6">
+
+        <!-- Left Column: Summary & Status (Fixed width) -->
+        <div class="lg:col-span-1 space-y-6">
+            
+            <!-- Summary Card -->
+            <div class="bg-white rounded-lg shadow p-5 border-l-4 border-emerald-500 sticky top-24">
+                <h2 class="text-lg font-bold mb-4 text-gray-700">學分分佈總覽</h2>
+                <div id="summary-container" class="space-y-3">
+                    <!-- Javascript will populate this -->
+                </div>
+
+                <div class="mt-6 pt-4 border-t border-gray-100">
+                     <h3 class="font-bold mb-2 text-gray-600 text-sm">狀態說明</h3>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-emerald-500 mr-2"></span>✅ 已修畢</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-blue-500 mr-2"></span>🔄 修習中</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-amber-500 mr-2"></span>📅 預排</div>
+                        <div class="flex items-center"><span class="w-3 h-3 rounded-full bg-gray-300 mr-2"></span>❌ 未修</div>
+                    </div>
+                </div>
+
+                <!-- Advice Box -->
+                <div class="mt-4 bg-blue-50 rounded-lg p-3 border border-blue-100 text-xs text-blue-800">
+                    <h4 class="font-bold mb-1"><i class="fas fa-vial mr-1"></i>更新日誌 (V24)</h4>
+                    <ul class="list-disc list-inside space-y-1">
+                        <li><strong>修正</strong>：雙主修之「普物實驗(一)」與「普化實驗(一)」因無法抵免，已恢復為未修狀態，需安排補修。</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: Course Lists (Expanded) -->
+        <div class="lg:col-span-3 space-y-6">
+            
+            <!-- Strategic Roadmap Section -->
+            <div class="bg-white rounded-xl shadow-lg border-2 border-gray-500 overflow-hidden" id="roadmap-section">
+                <div class="bg-gray-700 text-white p-4 flex justify-between items-center">
+                    <h2 class="text-lg font-bold"><i class="fas fa-tasks mr-2"></i>剩餘必修課程清單</h2>
+                </div>
+                <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4 bg-gray-50">
+                    <!-- Year 3 Sem 1 -->
+                    <div class="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
+                        <h3 class="font-bold text-gray-800 border-b border-gray-100 pb-2 mb-2">大三上</h3>
+                        <ul id="roadmap-3-1" class="space-y-1 text-sm text-gray-600 min-h-[50px]">
+                            <!-- JS Generated -->
+                        </ul>
+                    </div>
+                    <!-- Year 3 Sem 2 -->
+                    <div class="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
+                        <h3 class="font-bold text-gray-800 border-b border-gray-100 pb-2 mb-2">大三下</h3>
+                        <ul id="roadmap-3-2" class="space-y-1 text-sm text-gray-600 min-h-[50px]">
+                            <!-- JS Generated -->
+                        </ul>
+                    </div>
+                    <!-- Year 4 -->
+                    <div class="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
+                        <h3 class="font-bold text-gray-800 border-b border-gray-100 pb-2 mb-2">大四</h3>
+                        <ul id="roadmap-4" class="space-y-1 text-sm text-gray-600 min-h-[50px]">
+                            <!-- JS Generated -->
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="space-y-8" id="categories-container">
+                <!-- Categories will be injected here via JS -->
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        // --- Data Structure (V24 - Labs Not Waived) ---
+        // Status: 0=Not Taken, 1=Planned, 2=In Progress, 3=Completed
+        // Term: "3-1", "3-2", "4-1", "4-2"
+        
+        const TOTAL_THRESHOLD = 168;
+
+        const initialData = [
+            {
+                id: "school_common",
+                title: "一、校共同課程",
+                required: 28,
+                color: "slate",
+                courses: [
+                    { name: "國文 (I)", credit: 2, status: 3 },
+                    { name: "國文 (II)", credit: 2, status: 3 },
+                    { name: "英文 (I)", credit: 2, status: 3 },
+                    { name: "英文 (II)", credit: 2, status: 3 },
+                    { name: "英文 (III)", credit: 2, status: 3 },
+                    { name: "通識: 環境變遷與永續", credit: 2, status: 3 },
+                    { name: "通識: 太空看地球", credit: 2, status: 3 },
+                    { name: "通識: 室內設計法規", credit: 2, status: 3 },
+                    { name: "通識: 文藝寫作", credit: 2, status: 3 },
+                    { name: "通識: 性別平等教育", credit: 2, status: 3 },
+                    { name: "通識: 文物藝術與自然關懷", credit: 2, status: 2 },
+                    { name: "通識: 文化創意思維品牌與行銷", credit: 2, status: 2 },
+                    { name: "體育: 游泳", credit: 0, status: 3 },
+                    { name: "體育: 網球", credit: 0, status: 3 },
+                    { name: "體育: 桌球", credit: 0, status: 3 }
+                ]
+            },
+            {
+                id: "dept_required",
+                title: "二、系共同必修",
+                required: 24,
+                color: "blue",
+                courses: [
+                    { name: "普通生物學 (I)", credit: 3, status: 3 },
+                    { name: "普通生物學 (II)", credit: 3, status: 3 },
+                    { name: "普通生物學實驗 (I)", credit: 1, status: 3 },
+                    { name: "普通生物學實驗 (II)", credit: 0, status: 3 },
+                    { name: "地球科學 (I)", credit: 3, status: 3 },
+                    { name: "地球科學 (II)", credit: 3, status: 3 },
+                    { name: "地球科學實驗 (I)", credit: 1, status: 3 },
+                    { name: "地球科學實驗 (II)", credit: 0, status: 3 },
+                    { name: "資料處理與分析", credit: 3, status: 3 },
+                    { name: "服務學習 (I)", credit: 0, status: 3 },
+                    { name: "服務學習 (II)", credit: 0, status: 3 },
+                    { name: "3R 基礎生態學", credit: 3, status: 0, term: "3-1" },
+                    { name: "3R 環境影響評估", credit: 2, status: 0, term: "3-2" },
+                    { name: "4R 書報討論 (I)", credit: 1, status: 0, term: "4-1" },
+                    { name: "4R 書報討論 (II)", credit: 1, status: 0, term: "4-2" }
+                ]
+            },
+            {
+                id: "prof_required",
+                title: "三、專業必修 (地球環境)",
+                required: 14,
+                color: "cyan",
+                courses: [
+                    { name: "2R 地質學", credit: 3, status: 3 },
+                    { name: "2R 氣象學", credit: 3, status: 3 },
+                    { name: "2R 地球環境變遷", credit: 2, status: 2 },
+                    { name: "2R 衛星遙測學", credit: 2, status: 2 },
+                    { name: "3R 海洋學", credit: 2, status: 0, term: "3-1" },
+                    { name: "3R 地球歷史", credit: 2, status: 0, term: "3-1" }
+                ]
+            },
+            {
+                id: "prof_elective",
+                title: "四、專業選修",
+                required: 20,
+                color: "sky",
+                courses: [
+                    { name: "地球物理通論", credit: 3, status: 3 },
+                    { name: "火山學", credit: 2, status: 3 },
+                    { name: "地震學", credit: 3, status: 2 },
+                    { name: "礦物與岩石學", credit: 3, status: 2 },
+                    { name: "野外地質學", credit: 3, status: 2 },
+                    { name: "2E 地形學", credit: 3, status: 0 },
+                    { name: "2E 環境地質學", credit: 3, status: 0 },
+                    { name: "2E 氣候學", credit: 3, status: 0 },
+                    { name: "2E 古生物學", credit: 2, status: 0 },
+                    { name: "2E 水文地質學", credit: 2, status: 0 },
+                    { name: "2E 海洋地質概論", credit: 2, status: 0 },
+                    { name: "2E 天文學", credit: 2, status: 0 },
+                    { name: "2E 沈積學", credit: 2, status: 0 },
+                    { name: "3E 構造地質學", credit: 3, status: 0 },
+                    { name: "3E 工程地質", credit: 3, status: 0 },
+                    { name: "3E 地球化學導論", credit: 3, status: 0 },
+                    { name: "3E 地層學", credit: 3, status: 0 },
+                    { name: "3E 大氣動力學", credit: 2, status: 0 },
+                    { name: "3E 大氣化學", credit: 2, status: 0 },
+                    { name: "3E 地球科學文獻導讀", credit: 2, status: 0 },
+                    { name: "3E 台灣區域地質與調查", credit: 2, status: 0 },
+                    { name: "4E 第四紀環境變遷", credit: 2, status: 0 },
+                    { name: "4E 大臺北都會區應用地質", credit: 2, status: 0 }
+                ]
+            },
+            {
+                id: "dept_other",
+                title: "五、其他本系課程",
+                required: 27,
+                color: "emerald",
+                courses: [
+                    { name: "微積分 (I)", credit: 3, status: 3 },
+                    { name: "環境化學", credit: 2, status: 2 },
+                    { name: "自然保育概論", credit: 2, status: 3 },
+                    { name: "普通物理學(含實) (I)", credit: 0, status: 3, note: "轉至雙主修抵免正課" },
+                    { name: "普通化學(含實) (I)", credit: 0, status: 3, note: "轉至雙主修抵免正課" },
+                    { name: "地理資訊系統 (GIS)", credit: 3, status: 3 },
+                    { name: "環境教育", credit: 2, status: 3 },
+                    { name: "全球環境變遷", credit: 2, status: 3 },
+                    { name: "自然體驗", credit: 2, status: 3 },
+                    { name: "Python程式設計", credit: 3, status: 0 },
+                    { name: "有機化學 (地科系選修版)", credit: 3, status: 0 }
+                ]
+            },
+            {
+                id: "double_major",
+                title: "🧪 雙主修：應用化學",
+                required: 40,
+                color: "amber",
+                courses: [
+                    { name: "普通化學 (一)", credit: 3, status: 3, note: "地科普化抵免" },
+                    { name: "普通化學實驗 (一)", credit: 1, status: 0, term: "3-1", note: "需補修" },
+                    { name: "普通化學 (二)", credit: 3, status: 0, term: "3-2" },
+                    { name: "普通化學實驗 (二)", credit: 1, status: 2 },
+                    { name: "普通物理 (一)", credit: 3, status: 3, note: "地科普物抵免" },
+                    { name: "普通物理實驗 (一)", credit: 1, status: 0, term: "3-1", note: "需補修" },
+                    { name: "普通物理 (二)", credit: 3, status: 2 },
+                    { name: "普通物理實驗 (二)", credit: 1, status: 0, term: "3-2" },
+                    { name: "材料科學", credit: 3, status: 3 },
+                    { name: "分析化學 (一)", credit: 3, status: 1, term: "3-1" },
+                    { name: "分析化學 (二)", credit: 3, status: 0, term: "3-2" },
+                    { name: "分析化學實驗 (二)", credit: 1, status: 0, term: "3-2" },
+                    { name: "有機化學 (一)", credit: 3, status: 0, term: "3-1" },
+                    { name: "有機化學 (二)", credit: 3, status: 0, term: "3-2" },
+                    { name: "有機化學實驗 (二)", credit: 1, status: 0, term: "3-2" },
+                    { name: "化學數學", credit: 3, status: 0, term: "3-2" },
+                    { name: "生物化學 (一)", credit: 3, status: 0, term: "4-1" }
+                ]
+            },
+            {
+                id: "free_elective",
+                title: "六、自由選修",
+                required: 15,
+                color: "pink",
+                courses: [
+                    { name: "C程式語言設計", credit: 3, status: 2 },
+                    { name: "教育心理學", credit: 3, status: 3 },
+                    { name: "教學原理", credit: 2, status: 3 },
+                    { name: "國音及說話", credit: 2, status: 3 },
+                    { name: "學校行政(實務)", credit: 2, status: 2 },
+                    { name: "天文微課程", credit: 1, status: 2 },
+                    { name: "普通數學", credit: 0, status: 3, note: "已抵免" }
+                ]
+            }
+        ];
+
+        // Using v24 key to force update
+        let appData = JSON.parse(localStorage.getItem('myCreditData_v24')) || initialData;
+
+        // --- Logic Functions ---
+
+        function renderRoadmap() {
+            const list3_1 = document.getElementById('roadmap-3-1');
+            const list3_2 = document.getElementById('roadmap-3-2');
+            const list4 = document.getElementById('roadmap-4');
+            
+            list3_1.innerHTML = '';
+            list3_2.innerHTML = '';
+            list4.innerHTML = '';
+
+            let hasItems = false;
+
+            const requiredCats = [1, 2, 5]; 
+            
+            requiredCats.forEach(catIndex => {
+                const cat = appData[catIndex];
+                cat.courses.forEach(course => {
+                    if (course.status === 0 || course.status === 1) {
+                        if (course.term) {
+                            hasItems = true;
+                            const li = document.createElement('li');
+                            li.className = "flex items-start";
+                            li.innerHTML = `<span class="text-xs mr-1 mt-1 text-gray-400">●</span> <span>${course.name} <span class="text-xs text-gray-400">(${course.credit})</span></span>`;
+                            
+                            if (course.term === "3-1") list3_1.appendChild(li);
+                            else if (course.term === "3-2") list3_2.appendChild(li);
+                            else if (course.term === "4-1" || course.term === "4-2") list4.appendChild(li);
+                        }
+                    }
+                });
+            });
+
+            if(!hasItems) {
+                 list3_1.innerHTML = '<li class="text-gray-400 italic text-xs">無剩餘必修</li>';
+            }
+        }
+
+        function render() {
+            const container = document.getElementById('categories-container');
+            const summaryContainer = document.getElementById('summary-container');
+            container.innerHTML = '';
+            summaryContainer.innerHTML = '';
+
+            let grandTotal = 0;
+            let grandTotalPlanned = 0;
+
+            appData.forEach((cat, catIndex) => {
+                let currentCredits = 0;
+                let plannedCredits = 0;
+                
+                cat.courses.forEach(c => {
+                    if (c.status === 3 || c.status === 2) { 
+                        currentCredits += c.credit;
+                        grandTotal += c.credit;
+                    }
+                    if (c.status === 1) { 
+                        plannedCredits += c.credit;
+                        grandTotalPlanned += c.credit;
+                    }
+                });
+
+                const percent = Math.min(100, Math.round((currentCredits / cat.required) * 100));
+                
+                summaryContainer.innerHTML += `
+                    <div>
+                        <div class="flex justify-between text-sm mb-1">
+                            <span>${cat.title.split('(')[0]}</span>
+                            <span class="font-medium">${currentCredits}/${cat.required}</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div class="bg-${cat.color}-500 h-2 rounded-full" style="width: ${percent}%"></div>
+                        </div>
+                    </div>
+                `;
+
+                // Render Card
+                const cardHtml = `
+                    <div class="bg-white rounded-lg shadow-md overflow-hidden border-t-4 border-${cat.color}-500 transition hover:shadow-lg">
+                        <div class="p-4 bg-${cat.color}-50 border-b border-${cat.color}-100 flex justify-between items-center cursor-pointer" onclick="toggleCard('${catIndex}')">
+                            <div>
+                                <h3 class="font-bold text-gray-800">${cat.title}</h3>
+                                <div class="text-xs text-gray-600 mt-1">
+                                    目標: ${cat.required} | 目前: <span class="font-bold text-${cat.color}-700 text-lg">${currentCredits}</span>
+                                    ${plannedCredits > 0 ? `<span class="text-amber-600 ml-1">(+${plannedCredits} 預排)</span>` : ''}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-2" id="card-body-${catIndex}">
+                            <table class="w-full text-sm">
+                                <tbody class="divide-y divide-gray-100">
+                                    ${cat.courses.map((course, courseIndex) => `
+                                        <tr class="hover:bg-gray-50 transition group">
+                                            <td class="p-3">
+                                                <div class="font-medium text-gray-800 group-hover:text-${cat.color}-700 transition">${course.name}</div>
+                                                ${course.note ? `<div class="text-xs text-gray-400">${course.note}</div>` : ''}
+                                            </td>
+                                            <td class="p-3 text-center font-bold text-gray-600">${course.credit}</td>
+                                            <td class="p-3 text-right">
+                                                <div class="inline-flex bg-gray-100 rounded-lg p-0.5">
+                                                    <button onclick="setStatus(${catIndex}, ${courseIndex}, 0)" class="status-btn px-2 py-1 rounded ${course.status === 0 ? 'bg-white shadow text-gray-500' : 'text-gray-400 hover:text-gray-600'}" title="未修"><i class="fas fa-times"></i></button>
+                                                    <button onclick="setStatus(${catIndex}, ${courseIndex}, 1)" class="status-btn px-2 py-1 rounded ${course.status === 1 ? 'bg-amber-100 shadow text-amber-600' : 'text-gray-400 hover:text-amber-500'}" title="預排"><i class="far fa-calendar-alt"></i></button>
+                                                    <button onclick="setStatus(${catIndex}, ${courseIndex}, 2)" class="status-btn px-2 py-1 rounded ${course.status === 2 ? 'bg-blue-100 shadow text-blue-600' : 'text-gray-400 hover:text-blue-500'}" title="修習中"><i class="fas fa-spinner fa-pulse"></i></button>
+                                                    <button onclick="setStatus(${catIndex}, ${courseIndex}, 3)" class="status-btn px-2 py-1 rounded ${course.status === 3 ? 'bg-emerald-100 shadow text-emerald-600' : 'text-gray-400 hover:text-emerald-500'}" title="已修畢"><i class="fas fa-check"></i></button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += cardHtml;
+            });
+
+            document.getElementById('grand-total').innerText = grandTotal;
+            const totalPercent = Math.min(100, Math.round((grandTotal / TOTAL_THRESHOLD) * 100));
+            document.getElementById('total-progress').style.width = `${totalPercent}%`;
+            
+            localStorage.setItem('myCreditData_v24', JSON.stringify(appData));
+            
+            renderRoadmap();
+        }
+
+        function setStatus(catIndex, courseIndex, status) {
+            appData[catIndex].courses[courseIndex].status = status;
+            render();
+            renderRoadmap();
+        }
+
+        function resetData() {
+            if(confirm('確定要重置所有資料回到預設狀態嗎？')) {
+                appData = JSON.parse(JSON.stringify(initialData)); 
+                localStorage.removeItem('myCreditData_v24');
+                render();
+            }
+        }
+        
+        function toggleCard(index) {
+        }
+
+        render();
+
+    </script>
+</body>
+</html>
