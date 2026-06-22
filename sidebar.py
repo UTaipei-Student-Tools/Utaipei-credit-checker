@@ -46,10 +46,10 @@ def _render_rules_meta_card(rules_meta):
     rules_updated = rules_meta.get("last_updated", "N/A")
     st.sidebar.markdown(
         f"""
-        <div style="background: rgba(79,172,254,0.08); border:1px solid rgba(79,172,254,0.2); border-radius:10px; padding:10px 14px; margin-bottom:8px;">
-            <div style="font-size:11px; color:#94a3b8; margin-bottom:2px;">📋 目前規則版本</div>
+        <div style="background: rgba(79,172,254,0.12); border:1px solid rgba(79,172,254,0.3); border-radius:10px; padding:10px 14px; margin-bottom:8px;">
+            <div style="font-size:11px; color: var(--text-color, #94a3b8); opacity: 0.8; margin-bottom:2px;">📋 目前規則版本</div>
             <div style="font-size:15px; font-weight:700; color:#4facfe;">{rules_version} 學年度手冊</div>
-            <div style="font-size:11px; color:#64748b;">最後更新：{rules_updated}</div>
+            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">最後更新：{rules_updated}</div>
         </div>
         """,
         unsafe_allow_html=True,
