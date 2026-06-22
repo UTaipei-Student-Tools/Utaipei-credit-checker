@@ -322,10 +322,12 @@ def evaluate_graduation(courses, config):
                 else:
                     report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
+            apc_electives = set(normalize_course_name(name) for name in APC_RULES.get("electives", []))
             for c in courses:
                 c_idx = id(c)
                 if c_idx not in consumed:
-                    if "微積分" in c["name"]:
+                    c_norm = normalize_course_name(c["name"])
+                    if (c_norm in apc_electives or "微積分" in c["name"]) and c_norm not in _MAJOR_COMPULSORY_SET:
                         comp_c, ip_c = get_course_credits(c)
                         report["target"]["elective_courses"].append(c)
                         report["target"]["elective_completed"] += comp_c
