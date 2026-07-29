@@ -113,6 +113,24 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
 def _render_tabs(courses, report, summary, major_domain, program_type, target_dept, requirements):
     st.markdown("### 🎯 畢業進度總覽")
 
+    schedule_courses = [
+        course for course in courses if course.get("source") == "schedule" and course.get("is_in_progress")
+    ]
+    if schedule_courses:
+        schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
+        terms = sorted(
+            {
+                f"{course.get('academic_year', '')}-{course.get('semester', '')}"
+                for course in schedule_courses
+                if course.get("academic_year") and course.get("semester")
+            }
+        )
+        term_label = "、".join(terms) if terms else "已公布"
+        st.info(
+            f"📅 已納入 {term_label} 課表：{len(schedule_courses)} 門、{schedule_credits:g} 學分；"
+            "以下進度條的藍色區段代表這些修讀中學分。"
+        )
+
     major_target = requirements["total"]
     target_req = requirements["target_total"]
     target_completed = summary["target_completed"]

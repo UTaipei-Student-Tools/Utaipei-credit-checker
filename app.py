@@ -8,6 +8,7 @@ from credit_engine import evaluate_graduation
 from handbook_rules import get_rules_meta
 from pdf_parser import parse_transcript_pdf
 from report_renderer import render_report
+from schedule_parser import merge_schedule_courses
 from sidebar import render_sidebar
 from ui_components import (
     collapse_sidebar_if_needed,
@@ -37,6 +38,13 @@ def main():
 
     try:
         student_info, courses = parse_transcript_pdf(transcript_source)
+        courses, added_schedule_courses = merge_schedule_courses(
+            courses,
+            st.session_state.get("schedule_courses", []),
+        )
+        if added_schedule_courses:
+            credits = sum(float(course.get("total_credit") or 0.0) for course in added_schedule_courses)
+            st.toast(f"已將課表中的 {len(added_schedule_courses)} 門、{credits:g} 學分納入修讀中進度。")
         report = evaluate_graduation(
             courses,
             {
@@ -45,27 +53,6 @@ def main():
                 "target_dept": target_dept,
             },
         )
-        # Merge next semester schedule courses if available in session state
-        schedule_courses = st.session_state.get("schedule_courses", [])
-        if schedule_courses:
-            existing_names = {c["name"] for c in courses if c.get("is_completed") or c.get("is_in_progress")}
-            added_count = 0
-            for sc in schedule_courses:
-                if sc["name"] not in existing_names:
-                    courses.append(sc)
-                    existing_names.add(sc["name"])
-                    added_count += 1
-            if added_count > 0:
-                st.toast(f"已成功自選課系統合併下學期 {added_count} 門課程！")
-                # Re-evaluate graduation with the new merged courses
-                report = evaluate_graduation(
-                    courses,
-                    {
-                        "domain": major_domain,
-                        "program": program_type,
-                        "target_dept": target_dept,
-                    },
-                )
         render_report(student_info, courses, report, major_domain, program_type, target_dept, source_label)
     except Exception as exc:
         st.error(f"無法完成學分審查：{exc!s}")

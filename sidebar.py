@@ -168,7 +168,11 @@ def _render_login_section():
     if st.sidebar.button("🗓️ 抓取並更新下學期課表", use_container_width=True, help="僅登入抓取所選學期之選課課表並合併"):
         _attempt_schedule_crawl()
     if st.session_state.get("schedule_courses"):
-        st.sidebar.caption(f"已載入 {len(st.session_state['schedule_courses'])} 門規劃中課程。")
+        schedule_courses = st.session_state["schedule_courses"]
+        schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
+        st.sidebar.caption(
+            f"已載入 {len(schedule_courses)} 門課表課程、共 {schedule_credits:g} 學分，將以修讀中納入進度條。"
+        )
 
 
 def _render_portal_discovery_section():
@@ -225,9 +229,13 @@ def _attempt_live_scrape():
             st.session_state["schedule_html"] = schedule_html
             parsed_courses = parse_schedule_html(schedule_html, academic_year=year, semester=semester)
             st.session_state["schedule_courses"] = parsed_courses
-            st.sidebar.success(
-                f"動態歷年成績抓取成功！並已自動自 {year}-{semester} 課表合併 {len(parsed_courses)} 門新課程！"
-            )
+            if parsed_courses:
+                credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
+                st.sidebar.success(
+                    f"歷年成績抓取成功；另找到 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分。"
+                )
+            else:
+                st.sidebar.info(f"歷年成績抓取成功；{year}-{semester} 課表目前沒有可納入的課程。")
         except Exception as schedule_exc:
             st.session_state["schedule_courses"] = []
             st.sidebar.warning(f"動態歷年成績抓取成功！但自動抓取 {year}-{semester} 課表失敗：{schedule_exc!s}")
@@ -251,7 +259,10 @@ def _attempt_schedule_crawl():
         st.session_state["schedule_courses"] = parsed_courses
 
         if parsed_courses:
-            st.sidebar.success(f"成功抓取並解析 {year}-{semester} 學期共 {len(parsed_courses)} 門課程！")
+            credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
+            st.sidebar.success(
+                f"成功解析 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分，已納入修讀中進度。"
+            )
         else:
             st.sidebar.warning(f"已抓取 {year}-{semester} 頁面，但未解析出任何選課。可能是該學期尚無選課紀錄。")
     except Exception as exc:
