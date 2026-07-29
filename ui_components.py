@@ -1,7 +1,8 @@
-# -*- coding: utf-8 -*-
 """
 UI helper functions for the UTaipei graduation credit check Streamlit app.
 """
+
+from html import escape
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -12,7 +13,7 @@ def setup_page():
         page_title="北市大畢業學分審查系統 | UTaipei Credit Checker",
         page_icon="🎓",
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state="expanded",
     )
     inject_theme_css()
 
@@ -42,7 +43,7 @@ def collapse_sidebar_if_needed():
             </script>
             """,
             height=0,
-            width=0
+            width=0,
         )
         st.session_state["collapse_sidebar_flag"] = False
 
@@ -51,14 +52,13 @@ def inject_theme_css():
     st.markdown(
         """
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@300;400;700&family=Outfit:wght@300;400;600;700&display=swap');
             html, body, [class*="css"] {
-                font-family: 'LXGW WenKai TC', 'Outfit', sans-serif;
+                font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, -apple-system, sans-serif;
                 color: var(--text-color, #111827);
-                font-size: 18px !important;
+                font-size: 16px !important;
             }
             .stMarkdown p, .stMarkdown li, .stMarkdown div {
-                font-size: 18px !important;
+                font-size: 16px !important;
             }
             .stApp {
                 background: var(--background-color, linear-gradient(180deg, #F8FAFC 0%, #E2E8F0 100%));
@@ -93,6 +93,17 @@ def inject_theme_css():
                 opacity: 0.85;
                 letter-spacing: .6px;
                 line-height: 1.6;
+            }
+            .source-badge {
+                display: inline-flex;
+                align-items: center;
+                background: rgba(14, 165, 233, 0.12);
+                border: 1px solid rgba(14, 165, 233, 0.25);
+                color: #0369a1 !important;
+                padding: 5px 10px;
+                border-radius: 999px;
+                font-size: 13px !important;
+                font-weight: 700;
             }
             .metric-card {
                 background: var(--secondary-background-color, #ffffff) !important;
@@ -392,7 +403,8 @@ def inject_theme_css():
                 }
             }
         </style>
-        """, unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -406,9 +418,9 @@ def draw_premium_progress(label, completed, required, ip=0.0):
         f"""
         <div class="progress-container">
             <div class="progress-label-row">
-                <span style="font-weight:600; color:var(--text-color, #121212);">{label}</span>
+                <span style="font-weight:600; color:var(--text-color, #121212);">{escape(str(label))}</span>
                 <span style="color:var(--text-color, #1f2937);">
-                    已得 <b style="color:#0f766e;">{completed:g}</b> 學分 {f'| 修讀中 <b style="color:#2563eb;">{ip:g}</b>' if ip > 0 else ''} / 應修 <b>{required:g}</b> 學分
+                    已得 <b style="color:#0f766e;">{completed:g}</b> 學分 {f'| 修讀中 <b style="color:#2563eb;">{ip:g}</b>' if ip > 0 else ""} / 應修 <b>{required:g}</b> 學分
                 </span>
             </div>
             <div class="progress-bar-bg">
@@ -418,7 +430,8 @@ def draw_premium_progress(label, completed, required, ip=0.0):
                 </div>
             </div>
         </div>
-        """, unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -426,10 +439,11 @@ def render_header_card(title, subtitle):
     st.markdown(
         f"""
         <div class="header-card">
-            <div class="header-title">{title}</div>
-            <div class="header-subtitle">{subtitle}</div>
+            <div class="header-title">{escape(str(title))}</div>
+            <div class="header-subtitle">{escape(str(subtitle))}</div>
         </div>
-        """, unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -437,10 +451,10 @@ def render_landing_message():
     st.markdown(
         """
         <div class='hero-callout'>
-        <b>📌 使用說明</b><br>
-        請在此單一頁面完成專業領域、修課身分與成績單載入設定。<br>
-        點擊「實時抓取」可直接登入校務系統下載成績單 PDF。<br>
-        點擊「載入 Demo」可快速載入示範成績單，立即呈現審查結果。
+        <b>📌 三種開始方式</b><br>
+        建議直接上傳歷年成績單 PDF；檔案只在目前工作階段中分析。<br>
+        也可以登入校務系統即時抓取成績單與指定學期課表。<br><br>
+        <small>本工具提供自我檢查，不取代教務處或系所的正式畢業資格審核。</small>
         </div>
         """,
         unsafe_allow_html=True,

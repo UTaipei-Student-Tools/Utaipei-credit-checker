@@ -1,22 +1,22 @@
-# -*- coding: utf-8 -*-
 """
 Graduation Credit Evaluation Engine — v2
 新增：體育追蹤、通識/校必修分離、自由選修正確溢流
 """
 
-from handbook_rules import (
-    normalize_course_name,
-    UNIVERSITY_COMMON,
-    EARTH_LIFE_MAJOR,
-    APC_RULES,
-    CS_RULES
-)
-
 import re
-import logging
+
+from handbook_rules import (
+    APC_RULES,
+    CS_RULES,
+    EARTH_LIFE_MAJOR,
+    UNIVERSITY_COMMON,
+    get_credit_requirements,
+    normalize_course_name,
+)
 
 # 匹配除錯開關：出問題時可打開以取得匹配決策輸出
 DEBUG_MATCHING = False
+
 
 def dbg(msg):
     if DEBUG_MATCHING:
@@ -75,6 +75,7 @@ def _collect_major_names():
         pass
     return names
 
+
 _MAJOR_NAMES_SET = _collect_major_names()
 
 
@@ -91,6 +92,7 @@ def _collect_major_compulsory():
         pass
     return names
 
+
 _MAJOR_COMPULSORY_SET = _collect_major_compulsory()
 
 
@@ -104,15 +106,33 @@ def _is_in_program_rules(name_norm, raw_norm):
             return True
     return False
 
+
 # 體育課名稱關鍵字（0學分但須追蹤修讀狀態）
-PE_KEYWORDS = ["體育", "桌球", "網球", "羽球", "籃球", "排球", "游泳", "武術",
-               "跆拳道", "有氧", "高爾夫", "棒球", "壘球", "足球", "乒乓"]
+PE_KEYWORDS = [
+    "體育",
+    "桌球",
+    "網球",
+    "羽球",
+    "籃球",
+    "排球",
+    "游泳",
+    "武術",
+    "跆拳道",
+    "有氧",
+    "高爾夫",
+    "棒球",
+    "壘球",
+    "足球",
+    "乒乓",
+]
+
 
 def _is_pe_course(c):
     for kw in PE_KEYWORDS:
         if kw in c["name"] or kw in c["raw_name"]:
             return True
     return False
+
 
 ZERO_CREDIT_OVERRIDE_NAMES = [
     "普通數學",
@@ -121,12 +141,7 @@ ZERO_CREDIT_OVERRIDE_NAMES = [
 ]
 
 # 某些名稱包含「環境」但實際上為系內選修，列在此處以避免被誤判為通識
-MAJOR_ELECTIVE_OVERRIDE = [
-    "全球環境變遷",
-    "環境教育",
-    "環境政策",
-    "環境倫理"
-]
+MAJOR_ELECTIVE_OVERRIDE = ["全球環境變遷", "環境教育", "環境政策", "環境倫理"]
 
 
 def _is_exempt_course(c):
@@ -149,8 +164,15 @@ def evaluate_graduation(courses, config):
     domain = config.get("domain", "地球環境")
     program = config.get("program", "單主修")
     target_dept = config.get("target_dept", "物化系化學組")
+    if domain not in EARTH_LIFE_MAJOR.get("domains", {}):
+        raise ValueError(f"不支援的主修專業領域：{domain}")
+    if program not in {"單主修", "雙主修", "輔系"}:
+        raise ValueError(f"不支援的修課身分：{program}")
+
+    requirements = get_credit_requirements(program, target_dept)
 
     report = {
+        "requirements": requirements,
         "summary": {
             "total_completed": 0.0,
             "total_ip": 0.0,
@@ -162,7 +184,7 @@ def evaluate_graduation(courses, config):
             "free_ip": 0.0,
             "common_completed": 0.0,
             "common_ip": 0.0,
-            "graduation_ready": False
+            "graduation_ready": False,
         },
         "common": {
             # 校共同必修（英文、國文 10學分）
@@ -171,14 +193,16 @@ def evaluate_graduation(courses, config):
             "compulsory_missing": [],
             "compulsory_courses": [],
             # 通識分類選修（四大領域 16學分）
-            "categories": {k: {"completed": 0.0, "ip": 0.0, "courses": []} for k in UNIVERSITY_COMMON["category_domains"].keys()},
+            "categories": {
+                k: {"completed": 0.0, "ip": 0.0, "courses": []} for k in UNIVERSITY_COMMON["category_domains"].keys()
+            },
             "category_overflow": {k: [] for k in UNIVERSITY_COMMON["category_domains"].keys()},
             "category_completed": 0.0,
             "category_ip": 0.0,
             # 通識共同選修（2學分）
             "common_elective_completed": 0.0,
             "common_elective_ip": 0.0,
-            "common_elective_courses": []
+            "common_elective_courses": [],
         },
         "major": {
             "dept_compulsory_completed": 0.0,
@@ -194,7 +218,7 @@ def evaluate_graduation(courses, config):
             "domain_elective_courses": [],
             "other_elective_completed": 0.0,
             "other_elective_ip": 0.0,
-            "other_elective_courses": []
+            "other_elective_courses": [],
         },
         "target": {
             "basic_core_completed": 0.0,
@@ -209,22 +233,22 @@ def evaluate_graduation(courses, config):
             "elective_ip": 0.0,
             "elective_courses": [],
             "total_completed": 0.0,
-            "total_ip": 0.0
+            "total_ip": 0.0,
         },
         "pe": {
             # 體育（每學期 0學分必修，共需修 4 學期）
             "courses": [],
             "semesters_completed": 0,
-            "semesters_required": 4,
-            "semesters_ip": 0
+            "semesters_required": requirements["pe_semesters"],
+            "semesters_ip": 0,
         },
         "free": {
             "completed": 0.0,
             "ip": 0.0,
             "courses": [],
             "science_college_cross_credits": 0.0,
-            "science_college_cross_courses": []
-        }
+            "science_college_cross_courses": [],
+        },
     }
 
     consumed = set()
@@ -334,8 +358,14 @@ def evaluate_graduation(courses, config):
                         report["target"]["elective_ip"] += ip_c
                         consumed.add(c_idx)
 
-            report["target"]["total_completed"] = report["target"]["basic_core_completed"] + report["target"]["compulsory_completed"] + report["target"]["elective_completed"]
-            report["target"]["total_ip"] = report["target"]["basic_core_ip"] + report["target"]["compulsory_ip"] + report["target"]["elective_ip"]
+            report["target"]["total_completed"] = (
+                report["target"]["basic_core_completed"]
+                + report["target"]["compulsory_completed"]
+                + report["target"]["elective_completed"]
+            )
+            report["target"]["total_ip"] = (
+                report["target"]["basic_core_ip"] + report["target"]["compulsory_ip"] + report["target"]["elective_ip"]
+            )
 
         elif "資科系" in target_dept:
             rules = CS_RULES["double_major"] if program == "雙主修" else CS_RULES["minor"]
@@ -365,14 +395,22 @@ def evaluate_graduation(courses, config):
                         consumed.add(c_idx)
                     # 模糊判定：如果符合關鍵字匹配，且完全不是本系的課（不屬於 _MAJOR_NAMES_SET），歸入輔系
                     elif c_norm not in _MAJOR_NAMES_SET:
-                        if "資訊" in c["name"] or "程式設計" in c["name"] or "資料結構" in c["name"] or "演算法" in c["name"] or "計算機" in c["name"]:
+                        if (
+                            "資訊" in c["name"]
+                            or "程式設計" in c["name"]
+                            or "資料結構" in c["name"]
+                            or "演算法" in c["name"]
+                            or "計算機" in c["name"]
+                        ):
                             comp_c, ip_c = get_course_credits(c)
                             report["target"]["elective_courses"].append(c)
                             report["target"]["elective_completed"] += comp_c
                             report["target"]["elective_ip"] += ip_c
                             consumed.add(c_idx)
 
-            report["target"]["total_completed"] = report["target"]["compulsory_completed"] + report["target"]["elective_completed"]
+            report["target"]["total_completed"] = (
+                report["target"]["compulsory_completed"] + report["target"]["elective_completed"]
+            )
             report["target"]["total_ip"] = report["target"]["compulsory_ip"] + report["target"]["elective_ip"]
 
     # ── PHASE 2: 校共同必修（英文、國文）─────────────────────────────────────
@@ -399,7 +437,9 @@ def evaluate_graduation(courses, config):
                 # 使用 normalized 版本做匹配，避免全形／半形、額外空白或標點造成漏抓
                 raw_norm = normalize_course_name(raw_name)
                 name_norm = normalize_course_name(name)
-                dbg(f"PHASE3: checking course id={c_idx} name='{name_norm}' raw_norm='{raw_norm}' for category '{cat_name}'")
+                dbg(
+                    f"PHASE3: checking course id={c_idx} name='{name_norm}' raw_norm='{raw_norm}' for category '{cat_name}'"
+                )
                 # 嚴格參考 rules_config.json：若此課已在任何系/雙主修/輔系規則中列出，則不應被歸為通識
                 if _is_in_program_rules(name_norm, raw_norm):
                     dbg(f"PHASE3: skipped (in program rules) id={c_idx} name='{name_norm}' raw_norm='{raw_norm}'")
@@ -486,13 +526,38 @@ def evaluate_graduation(courses, config):
 
             if assigned:
                 continue
-            if "通選" in raw_norm or "通識" in raw_norm or "共同選修" in raw_norm or any(kw in name_norm or kw in raw_norm for kw in [
-                "藝術", "美感", "人文", "文化", "社會", "公民", "自然", "生命", "科技", "環境", "歷史", "哲學", "科學", "資訊", "文藝"
-            ]):
+            if (
+                "通選" in raw_norm
+                or "通識" in raw_norm
+                or "共同選修" in raw_norm
+                or any(
+                    kw in name_norm or kw in raw_norm
+                    for kw in [
+                        "藝術",
+                        "美感",
+                        "人文",
+                        "文化",
+                        "社會",
+                        "公民",
+                        "自然",
+                        "生命",
+                        "科技",
+                        "環境",
+                        "歷史",
+                        "哲學",
+                        "科學",
+                        "資訊",
+                        "文藝",
+                    ]
+                )
+            ):
                 comp_c, ip_c = get_course_credits(c)
-                ge_common_req = UNIVERSITY_COMMON.get("ge_common_elective_req", 2)
+                ge_common_req = requirements["ge_common_elective"]
                 # 溢出處理：如果通識共同選修已滿，溢出到自由選修
-                if report["common"]["common_elective_completed"] + report["common"]["common_elective_ip"] >= ge_common_req:
+                if (
+                    report["common"]["common_elective_completed"] + report["common"]["common_elective_ip"]
+                    >= ge_common_req
+                ):
                     report["free"]["courses"].append(c)
                     report["free"]["completed"] += comp_c
                     report["free"]["ip"] += ip_c
@@ -571,15 +636,17 @@ def evaluate_graduation(courses, config):
                 # 理學院院內跨系選修判定
                 cross_keywords = ["物理", "化學", "資訊", "數學", "計算機", "離散數學", "微積分"]
                 if any(kw in c["name"] for kw in cross_keywords):
-                    if c["name"] not in EARTH_LIFE_MAJOR["common_compulsory"] and \
-                       c["name"] not in EARTH_LIFE_MAJOR["domain_electives"][domain]:
+                    if (
+                        c["name"] not in EARTH_LIFE_MAJOR["common_compulsory"]
+                        and c["name"] not in EARTH_LIFE_MAJOR["domain_electives"][domain]
+                    ):
                         report["free"]["science_college_cross_courses"].append(c)
                         report["free"]["science_college_cross_credits"] += comp_c
                 consumed.add(c_idx)
 
     # ── PHASE 9.5: 超額選修學分溢流至自由選修（避免主修/輔系超額學分未計入自由選修而影響畢業判定） ──────────────────────
     # 1. 專業選修超額 (超過 20 學分的部分) -> 溢流到 其他本系選修
-    domain_req = 20.0
+    domain_req = requirements["domain_elective"]
     accumulated = 0.0
     new_domain_courses = []
     overflow_to_other = []
@@ -592,7 +659,9 @@ def evaluate_graduation(courses, config):
             accumulated += comp_c
     report["major"]["domain_elective_courses"] = new_domain_courses
     report["major"]["domain_elective_completed"] = sum(c["completed_credit"] for c in new_domain_courses)
-    report["major"]["domain_elective_ip"] = sum(c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_domain_courses)
+    report["major"]["domain_elective_ip"] = sum(
+        c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_domain_courses
+    )
 
     # 將超出的專業選修併入其他本系選修
     for c in overflow_to_other:
@@ -602,7 +671,7 @@ def evaluate_graduation(courses, config):
         report["major"]["other_elective_ip"] += ip_c
 
     # 2. 其他本系選修超額 (超過 27 學分的部分) -> 溢流到 自由選修
-    other_req = 27.0
+    other_req = requirements["major_other_elective"]
     accumulated = 0.0
     new_other_courses = []
     overflow_to_free = []
@@ -615,7 +684,9 @@ def evaluate_graduation(courses, config):
             accumulated += comp_c
     report["major"]["other_elective_courses"] = new_other_courses
     report["major"]["other_elective_completed"] = sum(c["completed_credit"] for c in new_other_courses)
-    report["major"]["other_elective_ip"] = sum(c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_other_courses)
+    report["major"]["other_elective_ip"] = sum(
+        c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_other_courses
+    )
 
     # 將超出的其他選修併入自由選修
     for c in overflow_to_free:
@@ -625,7 +696,7 @@ def evaluate_graduation(courses, config):
         report["free"]["ip"] += ip_c
 
     # 3. 雙主修/輔系選修超額 (輔系超過 20 或雙主修超過 40 學分的部分) -> 溢流到 自由選修
-    target_req = 40.0 if program == "雙主修" else (20.0 if program == "輔系" else 0.0)
+    target_req = requirements["target_total"]
     if target_req > 0.0:
         comp_total = report["target"]["compulsory_completed"] + report["target"].get("basic_core_completed", 0.0)
         allowed_elective_req = max(0.0, target_req - comp_total)
@@ -642,48 +713,48 @@ def evaluate_graduation(courses, config):
 
         report["target"]["elective_courses"] = new_target_electives
         report["target"]["elective_completed"] = sum(c["completed_credit"] for c in new_target_electives)
-        report["target"]["elective_ip"] = sum(c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_target_electives)
+        report["target"]["elective_ip"] = sum(
+            c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_target_electives
+        )
 
         for c in overflow_target_to_free:
             report["free"]["courses"].append(c)
             comp_c, ip_c = get_course_credits(c)
             report["free"]["completed"] += comp_c
             report["free"]["ip"] += ip_c
-            
+
         report["target"]["total_completed"] = (
-            report["target"]["compulsory_completed"] +
-            report["target"].get("basic_core_completed", 0.0) +
-            report["target"]["elective_completed"]
+            report["target"]["compulsory_completed"]
+            + report["target"].get("basic_core_completed", 0.0)
+            + report["target"]["elective_completed"]
         )
         report["target"]["total_ip"] = (
-            report["target"]["compulsory_ip"] +
-            report["target"].get("basic_core_ip", 0.0) +
-            report["target"]["elective_ip"]
+            report["target"]["compulsory_ip"]
+            + report["target"].get("basic_core_ip", 0.0)
+            + report["target"]["elective_ip"]
         )
 
     # ── PHASE 10: 匯總計算 ───────────────────────────────────────────────
     report["summary"]["common_completed"] = (
-        report["common"]["compulsory_completed"] +
-        report["common"]["category_completed"] +
-        report["common"]["common_elective_completed"]
+        report["common"]["compulsory_completed"]
+        + report["common"]["category_completed"]
+        + report["common"]["common_elective_completed"]
     )
     report["summary"]["common_ip"] = (
-        report["common"]["compulsory_ip"] +
-        report["common"]["category_ip"] +
-        report["common"]["common_elective_ip"]
+        report["common"]["compulsory_ip"] + report["common"]["category_ip"] + report["common"]["common_elective_ip"]
     )
 
     report["summary"]["major_completed"] = (
-        report["major"]["dept_compulsory_completed"] +
-        report["major"]["domain_compulsory_completed"] +
-        report["major"]["domain_elective_completed"] +
-        report["major"]["other_elective_completed"]
+        report["major"]["dept_compulsory_completed"]
+        + report["major"]["domain_compulsory_completed"]
+        + report["major"]["domain_elective_completed"]
+        + report["major"]["other_elective_completed"]
     )
     report["summary"]["major_ip"] = (
-        report["major"]["dept_compulsory_ip"] +
-        report["major"]["domain_compulsory_ip"] +
-        report["major"]["domain_elective_ip"] +
-        report["major"]["other_elective_ip"]
+        report["major"]["dept_compulsory_ip"]
+        + report["major"]["domain_compulsory_ip"]
+        + report["major"]["domain_elective_ip"]
+        + report["major"]["other_elective_ip"]
     )
 
     report["summary"]["target_completed"] = report["target"]["total_completed"]
@@ -693,43 +764,40 @@ def evaluate_graduation(courses, config):
     report["summary"]["free_ip"] = report["free"]["ip"]
 
     report["summary"]["total_completed"] = (
-        report["summary"]["common_completed"] +
-        report["summary"]["major_completed"] +
-        report["summary"]["target_completed"] +
-        report["summary"]["free_completed"]
+        report["summary"]["common_completed"]
+        + report["summary"]["major_completed"]
+        + report["summary"]["target_completed"]
+        + report["summary"]["free_completed"]
     )
     report["summary"]["total_ip"] = (
-        report["summary"]["common_ip"] +
-        report["summary"]["major_ip"] +
-        report["summary"]["target_ip"] +
-        report["summary"]["free_ip"]
+        report["summary"]["common_ip"]
+        + report["summary"]["major_ip"]
+        + report["summary"]["target_ip"]
+        + report["summary"]["free_ip"]
     )
 
     # 額外計算：將已取得 + 正在修習的學分一起顯示（以便學生查看含修讀中學分的總和）
     report["summary"]["total_with_ip"] = report["summary"]["total_completed"] + report["summary"]["total_ip"]
 
     # 畢業審查
-    has_enough = report["summary"]["total_completed"] >= 128.0
-    has_common = report["summary"]["common_completed"] >= 28.0
-    has_major  = report["summary"]["major_completed"] >= 85.0
-    has_free   = report["summary"]["free_completed"] >= 15.0
-    has_pe     = report["pe"]["semesters_completed"] >= 4
+    has_enough = report["summary"]["total_completed"] >= requirements["total"]
+    has_common = report["summary"]["common_completed"] >= requirements["common_total"]
+    has_major = report["summary"]["major_completed"] >= requirements["major_total"]
+    has_free = report["summary"]["free_completed"] >= requirements["free_elective"]
+    has_pe = report["pe"]["semesters_completed"] >= requirements["pe_semesters"]
 
     no_missing = (
-        len(report["common"]["compulsory_missing"]) == 0 and
-        len(report["major"]["dept_compulsory_missing"]) == 0 and
-        len(report["major"]["domain_compulsory_missing"]) == 0
+        len(report["common"]["compulsory_missing"]) == 0
+        and len(report["major"]["dept_compulsory_missing"]) == 0
+        and len(report["major"]["domain_compulsory_missing"]) == 0
     )
 
     target_satisfied = True
-    if program == "雙主修":
-        target_satisfied = report["target"]["total_completed"] >= 40.0
-    elif program == "輔系":
-        target_satisfied = report["target"]["total_completed"] >= 20.0
+    if requirements["target_total"] > 0:
+        target_satisfied = report["target"]["total_completed"] >= requirements["target_total"]
 
     report["summary"]["graduation_ready"] = (
-        has_enough and has_common and has_major and has_free and
-        has_pe and no_missing and target_satisfied
+        has_enough and has_common and has_major and has_free and has_pe and no_missing and target_satisfied
     )
 
     return report
@@ -782,7 +850,9 @@ def find_and_consume_course(courses, rule_name, consumed_set):
                         c_name_norm = normalize_course_name(c.get("name", "") or "")
                         if c_name_norm == norm_alias or norm_alias in c_name_norm:
                             consumed_set.add(c_idx)
-                            dbg(f"find_and_consume: fuzzy alias match id={c_idx} rule='{norm_rule_name}' alias='{norm_alias}' course='{c_name_norm}'")
+                            dbg(
+                                f"find_and_consume: fuzzy alias match id={c_idx} rule='{norm_rule_name}' alias='{norm_alias}' course='{c_name_norm}'"
+                            )
                             return c
 
     # 額外寬鬆匹配：若規則名稱包含冒號（如 "國文(一):閱讀與思辨"），嘗試只用冒號前段比對
@@ -801,19 +871,23 @@ def find_and_consume_course(courses, rule_name, consumed_set):
     for c in courses:
         c_idx = id(c)
         if c_idx not in consumed_set:
-            raw = (c.get("raw_name") or "")
+            raw = c.get("raw_name") or ""
             raw_norm = normalize_course_name(raw)
             if raw_norm:
                 if ":" in norm_rule_name:
                     head = norm_rule_name.split(":", 1)[0]
                     if head in raw_norm or norm_rule_name in raw_norm:
                         consumed_set.add(c_idx)
-                        dbg(f"find_and_consume: raw_name match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'")
+                        dbg(
+                            f"find_and_consume: raw_name match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'"
+                        )
                         return c
                 else:
                     if norm_rule_name in raw_norm or raw_norm in norm_rule_name:
                         consumed_set.add(c_idx)
-                        dbg(f"find_and_consume: raw_name contains match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'")
+                        dbg(
+                            f"find_and_consume: raw_name contains match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'"
+                        )
                         return c
 
     return None

@@ -1,12 +1,13 @@
-import streamlit as st
-import pandas as pd
 import json
+
+import pandas as pd
+import streamlit as st
 
 DEFAULT_SCHEDULE_DATA = """
 {
   "version": 1,
   "school": "臺北市立大學",
-  "semester": "114-2",
+  "semester": "115-1",
   "timeConfig": {
     "name": "臺北市立大學",
     "periods": [
@@ -30,23 +31,30 @@ DEFAULT_SCHEDULE_DATA = """
 }
 """
 
+
 def render_schedule_planner():
     st.markdown("### 🗓️ 模擬排課")
     st.markdown("您可以在下方課表中直接點擊格子，輸入或修改預計修讀的課程名稱。編輯完成後即可匯出 CSV 檔供自行留存。")
-    
+
     # Init or load session state for the schedule dataframe
-    if 'schedule_df' not in st.session_state:
+    if "schedule_df" not in st.session_state:
         data = json.loads(DEFAULT_SCHEDULE_DATA)
-        
+
         periods = []
         for p in data["timeConfig"]["periods"]:
             periods.append(f"第{p['id']}節 ({p['startTime']}-{p['endTime']})")
-            
+
         df = pd.DataFrame(columns=["節次/時間", "星期一", "星期二", "星期三", "星期四", "星期五"])
         df["節次/時間"] = periods
         df.fillna("", inplace=True)
-        
-        day_map = {"Monday": "星期一", "Tuesday": "星期二", "Wednesday": "星期三", "Thursday": "星期四", "Friday": "星期五"}
+
+        day_map = {
+            "Monday": "星期一",
+            "Tuesday": "星期二",
+            "Wednesday": "星期三",
+            "Thursday": "星期四",
+            "Friday": "星期五",
+        }
         for c in data["courses"]:
             c_name = c["courseName"]
             for eng_day, p_ids in c.get("schedule", {}).items():
@@ -56,55 +64,48 @@ def render_schedule_planner():
                         idx = int(p_id) - 1
                         if 0 <= idx < len(periods):
                             df.at[idx, zh_day] = c_name
-                                
-        st.session_state['schedule_df'] = df
+
+        st.session_state["schedule_df"] = df
 
     col_config = {
-        "節次/時間": st.column_config.TextColumn(
-            "節次/時間",
-            disabled=True,
-            width="medium"
-        ),
+        "節次/時間": st.column_config.TextColumn("節次/時間", disabled=True, width="medium"),
     }
     for day in ["星期一", "星期二", "星期三", "星期四", "星期五"]:
-        col_config[day] = st.column_config.TextColumn(
-            day,
-            width="medium"
-        )
+        col_config[day] = st.column_config.TextColumn(day, width="medium")
 
     palette = [
-        "#999EA2", "#93939B", "#CCD2CC", "#DBD2C9", "#976666", 
-        "#C09D9B", "#BEBEBE", "#7A848D", "#A9B7AA", "#DBD4C6"
+        "#999EA2",
+        "#93939B",
+        "#CCD2CC",
+        "#DBD2C9",
+        "#976666",
+        "#C09D9B",
+        "#BEBEBE",
+        "#7A848D",
+        "#A9B7AA",
+        "#DBD4C6",
     ]
-    
+
     def style_schedule(val):
         if not val or str(val).strip() == "":
-            return ''
+            return ""
         idx = sum(ord(c) for c in str(val)) % len(palette)
         bg_color = palette[idx]
-        return f'background-color: {bg_color}; color: white; font-weight: 600;'
+        return f"background-color: {bg_color}; color: white; font-weight: 600;"
 
     # Apply style to days only
-    styled_df = st.session_state['schedule_df'].style.map(style_schedule, subset=["星期一", "星期二", "星期三", "星期四", "星期五"])
+    styled_df = st.session_state["schedule_df"].style.map(
+        style_schedule, subset=["星期一", "星期二", "星期三", "星期四", "星期五"]
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
     edited_df = st.data_editor(
-        styled_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config=col_config,
-        num_rows="fixed",
-        height=580
+        styled_df, use_container_width=True, hide_index=True, column_config=col_config, num_rows="fixed", height=580
     )
-    
-    st.session_state['schedule_df'] = pd.DataFrame(edited_df)
+
+    st.session_state["schedule_df"] = pd.DataFrame(edited_df)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("📥 輸出暫時規劃表 (CSV)"):
-        csv = st.session_state['schedule_df'].to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="點擊下載課表 CSV",
-            data=csv,
-            file_name="Temporary_Schedule.csv",
-            mime="text/csv"
-        )
+        csv = st.session_state["schedule_df"].to_csv(index=False).encode("utf-8-sig")
+        st.download_button(label="點擊下載課表 CSV", data=csv, file_name="Temporary_Schedule.csv", mime="text/csv")

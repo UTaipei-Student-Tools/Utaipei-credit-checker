@@ -1,14 +1,13 @@
-# -*- coding: utf-8 -*-
 """
 Admin panel helpers for updating graduation rules.
 """
 
 import json
 import os
+import secrets
+import tempfile
+
 import streamlit as st
-
-
-ADMIN_PASSWORD = "jimmy0320"
 
 
 def render_admin_rules_editor(config_path):
@@ -23,15 +22,22 @@ def render_admin_rules_editor(config_path):
             unsafe_allow_html=True,
         )
 
+        admin_secret = os.environ.get("UTAIPEI_ADMIN_PASSWORD", "")
+        if not admin_secret:
+            try:
+                admin_secret = st.secrets.get("UTAIPEI_ADMIN_PASSWORD", "")
+            except FileNotFoundError:
+                admin_secret = ""
+        if not admin_secret:
+            st.info("管理功能尚未啟用。請由部署管理員設定 UTAIPEI_ADMIN_PASSWORD。")
+            return
+
         admin_pwd = st.text_input("管理員密碼", type="password", key="admin_pwd", placeholder="輸入管理員密碼...")
-        if admin_pwd == ADMIN_PASSWORD:
+        if admin_pwd and secrets.compare_digest(admin_pwd, admin_secret):
             st.success("✅ 已驗證身分，可進行規則更新")
             current_json = _load_current_config(config_path)
             new_json_text = st.text_area(
-                "貼上新的 rules_config.json 內容",
-                value=current_json,
-                height=300,
-                key="admin_json_editor"
+                "貼上新的 rules_config.json 內容", value=current_json, height=300, key="admin_json_editor"
             )
             col_validate, col_save = st.columns(2)
             with col_validate:
@@ -48,7 +54,7 @@ def _load_current_config(config_path):
     if not os.path.exists(config_path):
         return ""
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             return f.read()
     except Exception:
         return ""
@@ -65,7 +71,7 @@ def _validate_json(text):
             version = parsed.get("_meta", {}).get("version", "未知")
             st.success(f"✅ JSON 格式正確！偵測到學年度版本：{version}")
     except json.JSONDecodeError as e:
-        st.error(f"❌ JSON 格式錯誤：{str(e)}")
+        st.error(f"❌ JSON 格式錯誤：{e!s}")
 
 
 def _save_json(config_path, text):
@@ -76,9 +82,17 @@ def _save_json(config_path, text):
         if missing:
             st.error(f"❌ 儲存失敗：缺少必要欄位 {missing}")
             return
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(text)
+        target_dir = os.path.dirname(os.path.abspath(config_path))
+        fd, temp_path = tempfile.mkstemp(prefix="rules-", suffix=".json", dir=target_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(parsed, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(temp_path, config_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         st.success("✅ 已成功儲存新規則！請重新整理頁面讓新規則生效。")
         st.balloons()
     except json.JSONDecodeError as e:
-        st.error(f"❌ JSON 格式錯誤，儲存失敗：{str(e)}")
+        st.error(f"❌ JSON 格式錯誤，儲存失敗：{e!s}")

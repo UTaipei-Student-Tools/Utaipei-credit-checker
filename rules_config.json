@@ -223,5 +223,10 @@
   "free_elective": {
     "_comment": "自由選修最低要求",
     "total_req": 15
+  },
+
+  "physical_education": {
+    "_comment": "零學分體育必修學期數",
+    "semesters_required": 4
   }
 }

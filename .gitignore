@@ -28,6 +28,12 @@ venv/
 # temporary files
 *.tmp
 *.temp
+utaipei-transcript-*.pdf
+student_transcript*.pdf
+*_export.csv
+
+# Local credentials and Streamlit secrets
+.streamlit/secrets.toml
 
 # Hugging Face
 *.hf
