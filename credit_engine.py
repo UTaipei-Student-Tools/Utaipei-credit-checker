@@ -5,14 +5,7 @@ Graduation Credit Evaluation Engine — v2
 
 import re
 
-from handbook_rules import (
-    APC_RULES,
-    CS_RULES,
-    EARTH_LIFE_MAJOR,
-    UNIVERSITY_COMMON,
-    get_credit_requirements,
-    normalize_course_name,
-)
+from handbook_rules import get_credit_requirements, get_rule_sets, get_rules_meta, normalize_course_name
 
 # 匹配除錯開關：出問題時可打開以取得匹配決策輸出
 DEBUG_MATCHING = False
@@ -26,85 +19,180 @@ def dbg(msg):
             pass
 
 
-def _collect_rule_names():
-    """收集所有系、雙主修與輔系的課名（normalized），用於排除不該被當作通識的課程。"""
+def _normalized_names(course_map):
+    return {normalize_course_name(name) for name in course_map if normalize_course_name(name)}
+
+
+def _collect_rule_names(rule_sets):
+    """Collect exact program titles for the selected handbook only."""
+    earth = rule_sets["earth_life_major"]
+    apc = rule_sets["apc_rules"]
+    cs = rule_sets["cs_rules"]
     names = set()
-    try:
-        # Earth/Life major
-        for k in EARTH_LIFE_MAJOR.get("common_compulsory", {}).keys():
-            names.add(normalize_course_name(k))
-        for domain, rules in EARTH_LIFE_MAJOR.get("domains", {}).items():
-            for k in rules.keys():
-                names.add(normalize_course_name(k))
-        for d, lst in EARTH_LIFE_MAJOR.get("domain_electives", {}).items():
-            for it in lst:
-                names.add(normalize_course_name(it))
+    names.update(_normalized_names(rule_sets["university_common"]["compulsory"]))
+    names.update(_normalized_names(earth["common_compulsory"]))
+    for group in earth.get("common_alternatives", []):
+        names.update(_normalized_names(group.get("options", {})))
+    for mapping in earth.get("domains", {}).values():
+        names.update(_normalized_names(mapping))
+    for mapping in earth.get("domain_electives", {}).values():
+        names.update(_normalized_names(mapping))
+    names.update(_normalized_names(apc.get("basic_core", {})))
+    names.update(_normalized_names(apc.get("shared_other_required", {})))
+    for division in apc.get("divisions", {}).values():
+        names.update(_normalized_names(division.get("compulsory", {})))
+    names.update(_normalized_names(cs.get("department_courses", {})))
+    for scope_aliases in rule_sets.get("course_aliases", {}).values():
+        for official, aliases in scope_aliases.items():
+            names.add(normalize_course_name(official))
+            names.update(normalize_course_name(alias) for alias in aliases)
+    return {name for name in names if name}
 
-        # APC rules
-        for k in APC_RULES.get("basic_core", {}).keys():
-            names.add(normalize_course_name(k))
-        for div, data in APC_RULES.get("divisions", {}).items():
-            for k in data.get("compulsory", {}).keys():
-                names.add(normalize_course_name(k))
 
-        # CS rules
-        for prog in ["double_major", "minor"]:
-            for k in CS_RULES.get(prog, {}).get("compulsory", {}).keys():
-                names.add(normalize_course_name(k))
-    except Exception:
-        pass
+def _collect_major_names(earth_rules):
+    names = _normalized_names(earth_rules.get("common_compulsory", {}))
+    for group in earth_rules.get("common_alternatives", []):
+        names.update(_normalized_names(group.get("options", {})))
+    for mapping in earth_rules.get("domains", {}).values():
+        names.update(_normalized_names(mapping))
+    for mapping in earth_rules.get("domain_electives", {}).values():
+        names.update(_normalized_names(mapping))
     return names
 
 
-_RULE_NAMES_SET = _collect_rule_names()
-
-
-def _collect_major_names():
-    """收集地生系（主修）的所有必選修課名，用於在雙輔系判定中排除本系課程。"""
-    names = set()
-    try:
-        for k in EARTH_LIFE_MAJOR.get("common_compulsory", {}).keys():
-            names.add(normalize_course_name(k))
-        for domain, rules in EARTH_LIFE_MAJOR.get("domains", {}).items():
-            for k in rules.keys():
-                names.add(normalize_course_name(k))
-        for d, lst in EARTH_LIFE_MAJOR.get("domain_electives", {}).items():
-            for it in lst:
-                names.add(normalize_course_name(it))
-    except Exception:
-        pass
+def _collect_major_compulsory(earth_rules):
+    names = _normalized_names(earth_rules.get("common_compulsory", {}))
+    for group in earth_rules.get("common_alternatives", []):
+        names.update(_normalized_names(group.get("options", {})))
+    for mapping in earth_rules.get("domains", {}).values():
+        names.update(_normalized_names(mapping))
     return names
 
 
-_MAJOR_NAMES_SET = _collect_major_names()
+def _is_in_program_rules(name_norm, raw_norm, rule_names):
+    """Use exact normalized identity; substring matches are intentionally forbidden."""
+    return name_norm in rule_names or raw_norm in rule_names
 
 
-def _collect_major_compulsory():
-    """收集地生系（主修）的所有必修課名，用於在雙輔系判定中確保必修不被搶佔。"""
-    names = set()
+def _course_credit_matches(course, expected_credit):
+    if expected_credit is None:
+        return True
     try:
-        for k in EARTH_LIFE_MAJOR.get("common_compulsory", {}).keys():
-            names.add(normalize_course_name(k))
-        for domain, rules in EARTH_LIFE_MAJOR.get("domains", {}).items():
-            for k in rules.keys():
-                names.add(normalize_course_name(k))
-    except Exception:
-        pass
-    return names
+        return abs(float(course.get("total_credit") or 0.0) - float(expected_credit)) < 1e-6
+    except (TypeError, ValueError):
+        return False
 
 
-_MAJOR_COMPULSORY_SET = _collect_major_compulsory()
+def _course_matches_rule(course, rule_name, expected_credit=None, aliases=()):
+    accepted = {normalize_course_name(rule_name)}
+    accepted.update(normalize_course_name(alias) for alias in aliases)
+    accepted.discard("")
+    course_name = normalize_course_name(course.get("name", "") or "")
+    raw_name = normalize_course_name(course.get("raw_name", "") or "")
+    return (course_name in accepted or raw_name in accepted) and _course_credit_matches(course, expected_credit)
 
 
-def _is_in_program_rules(name_norm, raw_norm):
-    """若課程名稱或原始名稱命中任何系/雙主修/輔系規則清單，回傳 True（表示應由系規則處理，而非通識）。"""
-    # 精準或包含比對皆視為命中
-    for r in _RULE_NAMES_SET:
-        if not r:
-            continue
-        if r in name_norm or r in raw_norm or name_norm in r or raw_norm in r:
-            return True
-    return False
+def _explicit_aliases(alias_sets, scope, rule_name):
+    return alias_sets.get(scope, {}).get(rule_name, [])
+
+
+def _find_best_alternative(courses, options, consumed_set):
+    candidates = []
+    for option_name, expected_credit in options.items():
+        for course in courses:
+            if id(course) in consumed_set:
+                continue
+            if _course_matches_rule(course, option_name, expected_credit):
+                rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
+                candidates.append((rank, option_name, course))
+    if not candidates:
+        return None
+    _, _, selected = max(candidates, key=lambda item: item[0])
+    consumed_set.add(id(selected))
+    return selected
+
+
+def _earned_and_in_progress(course):
+    completed = max(0.0, float(course.get("completed_credit") or 0.0))
+    in_progress = 0.0
+    if course.get("is_in_progress"):
+        in_progress = max(0.0, float(course.get("total_credit") or 0.0) - completed)
+    return completed, in_progress
+
+
+def _allocation_copy(course, completed, in_progress, note):
+    """Create a reporting-only slice without mutating the parsed transcript row."""
+    allocated = dict(course)
+    allocated["_origin_id"] = course.get("_origin_id", id(course))
+    allocated["total_credit"] = completed + in_progress
+    allocated["completed_credit"] = completed
+    allocated["is_completed"] = completed > 0
+    allocated["is_in_progress"] = in_progress > 0
+    allocated["allocation_note"] = note
+    return allocated
+
+
+def _cap_course_bucket(courses, credit_limit, label):
+    """Cap a requirement bucket while preserving every earned/planned credit.
+
+    Completed credits fill the quota before in-progress credits.  If the last
+    course crosses the threshold, reporting-only course slices make the exact
+    recognized and overflow amounts visible instead of showing e.g. 23/20.
+    """
+    limit = max(0.0, float(credit_limit or 0.0))
+    allocations = [{"completed": 0.0, "ip": 0.0} for _ in courses]
+    remaining = limit
+
+    for index, item in enumerate(courses):
+        completed, _ = _earned_and_in_progress(item)
+        amount = min(completed, remaining)
+        allocations[index]["completed"] = amount
+        remaining -= amount
+
+    for index, item in enumerate(courses):
+        _, in_progress = _earned_and_in_progress(item)
+        amount = min(in_progress, remaining)
+        allocations[index]["ip"] = amount
+        remaining -= amount
+
+    recognized = []
+    overflow = []
+    recognized_completed = 0.0
+    recognized_ip = 0.0
+    for item, allocation in zip(courses, allocations):
+        completed, in_progress = _earned_and_in_progress(item)
+        used_completed = allocation["completed"]
+        used_ip = allocation["ip"]
+        extra_completed = completed - used_completed
+        extra_ip = in_progress - used_ip
+
+        recognized_completed += used_completed
+        recognized_ip += used_ip
+        earned_total = completed + in_progress
+        used_total = used_completed + used_ip
+
+        if earned_total <= 1e-6:
+            # Keep a failed/unresolved exact attempt visible beside the missing rule.
+            recognized.append(item)
+        elif used_total > 1e-6:
+            if abs(used_total - earned_total) < 1e-6:
+                recognized.append(item)
+            else:
+                recognized.append(
+                    _allocation_copy(item, used_completed, used_ip, f"{label}採認 {used_total:g} 學分")
+                )
+
+        if extra_completed + extra_ip > 1e-6:
+            overflow.append(
+                _allocation_copy(
+                    item,
+                    extra_completed,
+                    extra_ip,
+                    f"{label}門檻超額，轉自由選修 {extra_completed + extra_ip:g} 學分",
+                )
+            )
+
+    return recognized, overflow, recognized_completed, recognized_ip
 
 
 # 體育課名稱關鍵字（0學分但須追蹤修讀狀態）
@@ -151,27 +239,41 @@ def _is_exempt_course(c):
 
 def evaluate_graduation(courses, config):
     """
-    Evaluates student course credits against 114 Science College Handbook rules.
+    Evaluate courses against one explicitly selected Science College handbook.
 
     Parameters:
         courses (list): List of parsed course dicts from pdf_parser.
         config (dict): {
             "domain": "地球環境" or "生命科學",
             "program": "單主修", "雙主修", or "輔系",
-            "target_dept": "物化系化學組", "物化系物理組", or "資科系"
+            "target_dept": "物化系化學組", "物化系物理組", or "資科系",
+            "handbook_year": "112", "113", or "114"
         }
     """
     domain = config.get("domain", "地球環境")
     program = config.get("program", "單主修")
     target_dept = config.get("target_dept", "物化系化學組")
-    if domain not in EARTH_LIFE_MAJOR.get("domains", {}):
+    handbook_year = config.get("handbook_year")
+    rule_sets = get_rule_sets(handbook_year)
+    university_common = rule_sets["university_common"]
+    earth_life_major = rule_sets["earth_life_major"]
+    apc_rules = rule_sets["apc_rules"]
+    cs_rules = rule_sets["cs_rules"]
+    alias_sets = rule_sets.get("course_aliases", {})
+    rule_names_set = _collect_rule_names(rule_sets)
+    major_compulsory_set = _collect_major_compulsory(earth_life_major)
+
+    if domain not in earth_life_major.get("domains", {}):
         raise ValueError(f"不支援的主修專業領域：{domain}")
     if program not in {"單主修", "雙主修", "輔系"}:
         raise ValueError(f"不支援的修課身分：{program}")
 
-    requirements = get_credit_requirements(program, target_dept)
+    requirements = get_credit_requirements(program, target_dept, rule_sets["academic_year"])
 
     report = {
+        "handbook_year": rule_sets["academic_year"],
+        "rules_meta": get_rules_meta(rule_sets["academic_year"]),
+        "document_warnings": rule_sets.get("document_warnings", []),
         "requirements": requirements,
         "summary": {
             "total_completed": 0.0,
@@ -194,9 +296,10 @@ def evaluate_graduation(courses, config):
             "compulsory_courses": [],
             # 通識分類選修（四大領域 16學分）
             "categories": {
-                k: {"completed": 0.0, "ip": 0.0, "courses": []} for k in UNIVERSITY_COMMON["category_domains"].keys()
+                k: {"completed": 0.0, "ip": 0.0, "courses": []}
+                for k in university_common["category_domains"].keys()
             },
-            "category_overflow": {k: [] for k in UNIVERSITY_COMMON["category_domains"].keys()},
+            "category_overflow": {k: [] for k in university_common["category_domains"].keys()},
             "category_completed": 0.0,
             "category_ip": 0.0,
             # 通識共同選修（2學分）
@@ -232,6 +335,7 @@ def evaluate_graduation(courses, config):
             "elective_completed": 0.0,
             "elective_ip": 0.0,
             "elective_courses": [],
+            "elective_missing": [],
             "total_completed": 0.0,
             "total_ip": 0.0,
         },
@@ -294,25 +398,46 @@ def evaluate_graduation(courses, config):
             report["pe"]["semesters_completed"] += sem_count
             report["pe"]["semesters_ip"] += ip_count
 
-    # ── PHASE 0.5: 地生系與專業領域必修（主修必修最高優先，避免被雙主修吃掉）────────
-    for name, req_cred in EARTH_LIFE_MAJOR["common_compulsory"].items():
-        matched_c = find_and_consume_course(courses, name, consumed)
+    # ── PHASE 0.5: 地生系與專業領域必修（主修必修最高優先）────────
+    for name, req_cred in earth_life_major["common_compulsory"].items():
+        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["dept_compulsory_courses"].append(matched_c)
             report["major"]["dept_compulsory_completed"] += comp_c
             report["major"]["dept_compulsory_ip"] += ip_c
+            if comp_c + 1e-6 < req_cred:
+                report["major"]["dept_compulsory_missing"].append({"name": name, "credit": req_cred - comp_c})
         else:
             report["major"]["dept_compulsory_missing"].append({"name": name, "credit": req_cred})
 
-    domain_rules = EARTH_LIFE_MAJOR["domains"][domain]
+    for group in earth_life_major.get("common_alternatives", []):
+        required = float(group.get("required_credits", 0))
+        matched_c = _find_best_alternative(courses, group.get("options", {}), consumed)
+        if matched_c:
+            comp_c, ip_c = get_course_credits(matched_c)
+            report["major"]["dept_compulsory_courses"].append(matched_c)
+            report["major"]["dept_compulsory_completed"] += min(comp_c, required)
+            report["major"]["dept_compulsory_ip"] += min(ip_c, max(0.0, required - comp_c))
+            if comp_c + 1e-6 < required:
+                report["major"]["dept_compulsory_missing"].append(
+                    {"name": group.get("label", "替代必修"), "credit": required - comp_c}
+                )
+        else:
+            report["major"]["dept_compulsory_missing"].append(
+                {"name": group.get("label", "替代必修"), "credit": required}
+            )
+
+    domain_rules = earth_life_major["domains"][domain]
     for name, req_cred in domain_rules.items():
-        matched_c = find_and_consume_course(courses, name, consumed)
+        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["domain_compulsory_courses"].append(matched_c)
             report["major"]["domain_compulsory_completed"] += comp_c
             report["major"]["domain_compulsory_ip"] += ip_c
+            if comp_c + 1e-6 < req_cred:
+                report["major"]["domain_compulsory_missing"].append({"name": name, "credit": req_cred - comp_c})
         else:
             report["major"]["domain_compulsory_missing"].append({"name": name, "credit": req_cred})
 
@@ -320,93 +445,107 @@ def evaluate_graduation(courses, config):
     if program in ["雙主修", "輔系"]:
         if "物化系" in target_dept:
             div = "化學組" if "化學組" in target_dept else "物理組"
-            rules = APC_RULES["divisions"][div]
-            basic_core_rules = APC_RULES["basic_core"]
-            specialty_comp_rules = rules["compulsory"]
+            program_key = "double_major" if program == "雙主修" else "minor"
+            program_rules = apc_rules[program_key]
+            basic_core_rules = apc_rules["basic_core"]
 
             for name, req_cred in basic_core_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed)
+                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["basic_core_courses"].append(matched_c)
                     report["target"]["basic_core_completed"] += comp_c
                     report["target"]["basic_core_ip"] += ip_c
+                    if comp_c + 1e-6 < req_cred:
+                        report["target"]["basic_core_missing"].append({"name": name, "credit": req_cred - comp_c})
                 else:
                     report["target"]["basic_core_missing"].append({"name": name, "credit": req_cred})
 
-            other_req = rules["double_major_other_req"] if program == "雙主修" else rules["minor_other_req"]
-
-            for name, req_cred in specialty_comp_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed)
+            other_req = float(program_rules["other_req"])
+            other_required_pool = dict(apc_rules.get("shared_other_required", {}))
+            other_required_pool.update(apc_rules["divisions"][div]["compulsory"])
+            for name, req_cred in other_required_pool.items():
+                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
                     report["target"]["compulsory_completed"] += comp_c
                     report["target"]["compulsory_ip"] += ip_c
-                else:
-                    report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
-            apc_electives = set(normalize_course_name(name) for name in APC_RULES.get("electives", []))
-            for c in courses:
-                c_idx = id(c)
-                if c_idx not in consumed:
-                    c_norm = normalize_course_name(c["name"])
-                    if (c_norm in apc_electives or "微積分" in c["name"]) and c_norm not in _MAJOR_COMPULSORY_SET:
-                        comp_c, ip_c = get_course_credits(c)
-                        report["target"]["elective_courses"].append(c)
-                        report["target"]["elective_completed"] += comp_c
-                        report["target"]["elective_ip"] += ip_c
-                        consumed.add(c_idx)
+            (
+                report["target"]["compulsory_courses"],
+                target_overflow,
+                report["target"]["compulsory_completed"],
+                report["target"]["compulsory_ip"],
+            ) = _cap_course_bucket(report["target"]["compulsory_courses"], other_req, f"{div}其餘必修")
+            for overflow_course in target_overflow:
+                overflow_completed, overflow_ip = _earned_and_in_progress(overflow_course)
+                report["free"]["courses"].append(overflow_course)
+                report["free"]["completed"] += overflow_completed
+                report["free"]["ip"] += overflow_ip
+
+            recognized_other = report["target"]["compulsory_completed"] + report["target"]["compulsory_ip"]
+            if recognized_other + 1e-6 < other_req:
+                report["target"]["compulsory_missing"].append(
+                    {"name": f"{div}其餘必修課程", "credit": other_req - recognized_other}
+                )
 
             report["target"]["total_completed"] = (
                 report["target"]["basic_core_completed"]
                 + report["target"]["compulsory_completed"]
-                + report["target"]["elective_completed"]
             )
             report["target"]["total_ip"] = (
-                report["target"]["basic_core_ip"] + report["target"]["compulsory_ip"] + report["target"]["elective_ip"]
+                report["target"]["basic_core_ip"] + report["target"]["compulsory_ip"]
             )
 
         elif "資科系" in target_dept:
-            rules = CS_RULES["double_major"] if program == "雙主修" else CS_RULES["minor"]
+            rules = cs_rules["double_major"] if program == "雙主修" else cs_rules["minor"]
             comp_rules = rules["compulsory"]
 
             for name, req_cred in comp_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed)
+                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
                     report["target"]["compulsory_completed"] += comp_c
                     report["target"]["compulsory_ip"] += ip_c
+                    if comp_c + 1e-6 < req_cred:
+                        report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred - comp_c})
                 else:
                     report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
-            cs_electives = set(normalize_course_name(name) for name in CS_RULES.get("electives", []))
-            for c in courses:
-                c_idx = id(c)
-                if c_idx not in consumed:
-                    c_norm = normalize_course_name(c["name"])
-                    # 優先判定：如果是資科系輔系明定的選修（如微積分I、II），且非本系「必修」課，直接歸入輔系
-                    if c_norm in cs_electives and c_norm not in _MAJOR_COMPULSORY_SET:
-                        comp_c, ip_c = get_course_credits(c)
-                        report["target"]["elective_courses"].append(c)
-                        report["target"]["elective_completed"] += comp_c
-                        report["target"]["elective_ip"] += ip_c
-                        consumed.add(c_idx)
-                    # 模糊判定：如果符合關鍵字匹配，且完全不是本系的課（不屬於 _MAJOR_NAMES_SET），歸入輔系
-                    elif c_norm not in _MAJOR_NAMES_SET:
-                        if (
-                            "資訊" in c["name"]
-                            or "程式設計" in c["name"]
-                            or "資料結構" in c["name"]
-                            or "演算法" in c["name"]
-                            or "計算機" in c["name"]
-                        ):
-                            comp_c, ip_c = get_course_credits(c)
-                            report["target"]["elective_courses"].append(c)
-                            report["target"]["elective_completed"] += comp_c
-                            report["target"]["elective_ip"] += ip_c
-                            consumed.add(c_idx)
+            for name, req_cred in cs_rules.get("department_courses", {}).items():
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    _explicit_aliases(alias_sets, "cs", name),
+                )
+                if matched_c:
+                    comp_c, ip_c = get_course_credits(matched_c)
+                    report["target"]["elective_courses"].append(matched_c)
+                    report["target"]["elective_completed"] += comp_c
+                    report["target"]["elective_ip"] += ip_c
+
+            other_req = float(rules["other_req"])
+            (
+                report["target"]["elective_courses"],
+                target_overflow,
+                report["target"]["elective_completed"],
+                report["target"]["elective_ip"],
+            ) = _cap_course_bucket(report["target"]["elective_courses"], other_req, "資科系其他課程")
+            for overflow_course in target_overflow:
+                overflow_completed, overflow_ip = _earned_and_in_progress(overflow_course)
+                report["free"]["courses"].append(overflow_course)
+                report["free"]["completed"] += overflow_completed
+                report["free"]["ip"] += overflow_ip
+
+            recognized_other = report["target"]["elective_completed"] + report["target"]["elective_ip"]
+            if recognized_other + 1e-6 < other_req:
+                report["target"]["elective_missing"].append(
+                    {"name": "資科系其他開設課程", "credit": other_req - recognized_other}
+                )
 
             report["target"]["total_completed"] = (
                 report["target"]["compulsory_completed"] + report["target"]["elective_completed"]
@@ -414,21 +553,29 @@ def evaluate_graduation(courses, config):
             report["target"]["total_ip"] = report["target"]["compulsory_ip"] + report["target"]["elective_ip"]
 
     # ── PHASE 2: 校共同必修（英文、國文）─────────────────────────────────────
-    for name, req_cred in UNIVERSITY_COMMON["compulsory"].items():
-        matched_c = find_and_consume_course(courses, name, consumed)
+    for name, req_cred in university_common["compulsory"].items():
+        matched_c = find_and_consume_course(
+            courses,
+            name,
+            consumed,
+            req_cred,
+            _explicit_aliases(alias_sets, "university_common", name),
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["common"]["compulsory_courses"].append(matched_c)
             report["common"]["compulsory_completed"] += comp_c
             report["common"]["compulsory_ip"] += ip_c
+            if comp_c + 1e-6 < req_cred:
+                report["common"]["compulsory_missing"].append({"name": name, "credit": req_cred - comp_c})
         else:
             report["common"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
     # ── PHASE 3: 通識分類選修（匹配通識課程、標籤或關鍵字）──────────────────
     # 每類最低學分 (預設 4，若未在 rules 中提供則採此值)
-    per_category_req = UNIVERSITY_COMMON.get("per_category_req", 4)
+    per_category_req = university_common.get("per_category_req", 4)
 
-    for cat_name, keywords in UNIVERSITY_COMMON["category_domains"].items():
+    for cat_name, keywords in university_common["category_domains"].items():
         for c in courses:
             c_idx = id(c)
             if c_idx not in consumed:
@@ -441,7 +588,7 @@ def evaluate_graduation(courses, config):
                     f"PHASE3: checking course id={c_idx} name='{name_norm}' raw_norm='{raw_norm}' for category '{cat_name}'"
                 )
                 # 嚴格參考 rules_config.json：若此課已在任何系/雙主修/輔系規則中列出，則不應被歸為通識
-                if _is_in_program_rules(name_norm, raw_norm):
+                if _is_in_program_rules(name_norm, raw_norm, rule_names_set):
                     dbg(f"PHASE3: skipped (in program rules) id={c_idx} name='{name_norm}' raw_norm='{raw_norm}'")
                     continue
 
@@ -460,8 +607,8 @@ def evaluate_graduation(courses, config):
                     dbg(f"PHASE3: compare label('{label}') vs cat('{cat_name}') -> {cond1},{cond2},{cond3}")
                     if cond1 or cond2 or cond3:
                         is_match = True
-                # 若沒有中括號標註，回退到原本的關鍵字比對（課名或 raw_name 包含關鍵字）
-                if not is_match:
+                # 無明確通識標記時不靠課名猜測，避免把系所專業課誤放進通識。
+                if not is_match and ("通選" in raw_norm or "通識" in raw_norm):
                     for kw in keywords:
                         if kw in name_norm or kw in raw_norm:
                             is_match = True
@@ -491,7 +638,7 @@ def evaluate_graduation(courses, config):
             name_norm = normalize_course_name(name)
             dbg(f"PHASE4: checking course id={c_idx} name='{name_norm}' raw_norm='{raw_norm}'")
             # 嚴格參考 rules_config.json：若此課已在任何系/雙主修/輔系規則中列出，則不應被歸為通識
-            if _is_in_program_rules(name_norm, raw_norm):
+            if _is_in_program_rules(name_norm, raw_norm, rule_names_set):
                 dbg(f"PHASE4: skipped (in program rules) id={c_idx} name='{name_norm}' raw_norm='{raw_norm}'")
                 continue
             # 若為系內選修 override 名稱，跳過通識判定，讓後續專業選修階段處理
@@ -526,31 +673,7 @@ def evaluate_graduation(courses, config):
 
             if assigned:
                 continue
-            if (
-                "通選" in raw_norm
-                or "通識" in raw_norm
-                or "共同選修" in raw_norm
-                or any(
-                    kw in name_norm or kw in raw_norm
-                    for kw in [
-                        "藝術",
-                        "美感",
-                        "人文",
-                        "文化",
-                        "社會",
-                        "公民",
-                        "自然",
-                        "生命",
-                        "科技",
-                        "環境",
-                        "歷史",
-                        "哲學",
-                        "科學",
-                        "資訊",
-                        "文藝",
-                    ]
-                )
-            ):
+            if "通選" in raw_norm or "通識" in raw_norm or "共同選修" in raw_norm:
                 comp_c, ip_c = get_course_credits(c)
                 ge_common_req = requirements["ge_common_elective"]
                 # 溢出處理：如果通識共同選修已滿，溢出到自由選修
@@ -596,32 +719,36 @@ def evaluate_graduation(courses, config):
     # (原 PHASE 5, 6 已移至 PHASE 0.5)
 
     # ── PHASE 7: 專業領域選修（至少20學分）──────────────────────────────────
-    domain_elective_keywords = EARTH_LIFE_MAJOR["domain_electives"][domain]
+    domain_elective_rules = earth_life_major["domain_electives"][domain]
     for c in courses:
         c_idx = id(c)
         if c_idx not in consumed:
-            if c["name"] in domain_elective_keywords or any(kw == c["name"] for kw in domain_elective_keywords):
-                comp_c, ip_c = get_course_credits(c)
-                report["major"]["domain_elective_courses"].append(c)
-                report["major"]["domain_elective_completed"] += comp_c
-                report["major"]["domain_elective_ip"] += ip_c
-                consumed.add(c_idx)
+            for rule_name, rule_credit in domain_elective_rules.items():
+                if _course_matches_rule(c, rule_name, rule_credit):
+                    comp_c, ip_c = get_course_credits(c)
+                    report["major"]["domain_elective_courses"].append(c)
+                    report["major"]["domain_elective_completed"] += comp_c
+                    report["major"]["domain_elective_ip"] += ip_c
+                    consumed.add(c_idx)
+                    break
 
     # ── PHASE 8: 系共同選修（其他27學分）─────────────────────────────────────
-    all_major_electives = set(EARTH_LIFE_MAJOR["domain_electives"].get("common_electives", []))
-    for dname, electives in EARTH_LIFE_MAJOR["domain_electives"].items():
+    all_major_electives = dict(earth_life_major["domain_electives"].get("common_electives", {}))
+    for dname, electives in earth_life_major["domain_electives"].items():
         if dname != domain and dname != "common_electives":
             all_major_electives.update(electives)
 
     for c in courses:
         c_idx = id(c)
         if c_idx not in consumed:
-            if c["name"] in all_major_electives or any(kw == c["name"] for kw in all_major_electives):
-                comp_c, ip_c = get_course_credits(c)
-                report["major"]["other_elective_courses"].append(c)
-                report["major"]["other_elective_completed"] += comp_c
-                report["major"]["other_elective_ip"] += ip_c
-                consumed.add(c_idx)
+            for rule_name, rule_credit in all_major_electives.items():
+                if _course_matches_rule(c, rule_name, rule_credit):
+                    comp_c, ip_c = get_course_credits(c)
+                    report["major"]["other_elective_courses"].append(c)
+                    report["major"]["other_elective_completed"] += comp_c
+                    report["major"]["other_elective_ip"] += ip_c
+                    consumed.add(c_idx)
+                    break
 
     # ── PHASE 9: 自由選修（剩餘所有有學分的課）──────────────────────────────
     for c in courses:
@@ -637,8 +764,8 @@ def evaluate_graduation(courses, config):
                 cross_keywords = ["物理", "化學", "資訊", "數學", "計算機", "離散數學", "微積分"]
                 if any(kw in c["name"] for kw in cross_keywords):
                     if (
-                        c["name"] not in EARTH_LIFE_MAJOR["common_compulsory"]
-                        and c["name"] not in EARTH_LIFE_MAJOR["domain_electives"][domain]
+                        normalize_course_name(c["name"]) not in major_compulsory_set
+                        and normalize_course_name(c["name"]) not in _normalized_names(domain_elective_rules)
                     ):
                         report["free"]["science_college_cross_courses"].append(c)
                         report["free"]["science_college_cross_credits"] += comp_c
@@ -695,44 +822,17 @@ def evaluate_graduation(courses, config):
         report["free"]["completed"] += comp_c
         report["free"]["ip"] += ip_c
 
-    # 3. 雙主修/輔系選修超額 (輔系超過 20 或雙主修超過 40 學分的部分) -> 溢流到 自由選修
-    target_req = requirements["target_total"]
-    if target_req > 0.0:
-        comp_total = report["target"]["compulsory_completed"] + report["target"].get("basic_core_completed", 0.0)
-        allowed_elective_req = max(0.0, target_req - comp_total)
-        accumulated = 0.0
-        new_target_electives = []
-        overflow_target_to_free = []
-        for c in report["target"]["elective_courses"]:
-            comp_c = c["completed_credit"]
-            if accumulated >= allowed_elective_req:
-                overflow_target_to_free.append(c)
-            else:
-                new_target_electives.append(c)
-                accumulated += comp_c
-
-        report["target"]["elective_courses"] = new_target_electives
-        report["target"]["elective_completed"] = sum(c["completed_credit"] for c in new_target_electives)
-        report["target"]["elective_ip"] = sum(
-            c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_target_electives
-        )
-
-        for c in overflow_target_to_free:
-            report["free"]["courses"].append(c)
-            comp_c, ip_c = get_course_credits(c)
-            report["free"]["completed"] += comp_c
-            report["free"]["ip"] += ip_c
-
-        report["target"]["total_completed"] = (
-            report["target"]["compulsory_completed"]
-            + report["target"].get("basic_core_completed", 0.0)
-            + report["target"]["elective_completed"]
-        )
-        report["target"]["total_ip"] = (
-            report["target"]["compulsory_ip"]
-            + report["target"].get("basic_core_ip", 0.0)
-            + report["target"]["elective_ip"]
-        )
+    # 3. 跨系各子門檻已於 PHASE 1 精確封頂；在此只重新匯總。
+    report["target"]["total_completed"] = (
+        report["target"]["compulsory_completed"]
+        + report["target"].get("basic_core_completed", 0.0)
+        + report["target"]["elective_completed"]
+    )
+    report["target"]["total_ip"] = (
+        report["target"]["compulsory_ip"]
+        + report["target"].get("basic_core_ip", 0.0)
+        + report["target"]["elective_ip"]
+    )
 
     # ── PHASE 10: 匯總計算 ───────────────────────────────────────────────
     report["summary"]["common_completed"] = (
@@ -794,7 +894,12 @@ def evaluate_graduation(courses, config):
 
     target_satisfied = True
     if requirements["target_total"] > 0:
-        target_satisfied = report["target"]["total_completed"] >= requirements["target_total"]
+        target_satisfied = (
+            report["target"]["total_completed"] >= requirements["target_total"]
+            and len(report["target"]["basic_core_missing"]) == 0
+            and len(report["target"]["compulsory_missing"]) == 0
+            and len(report["target"].get("elective_missing", [])) == 0
+        )
 
     report["summary"]["graduation_ready"] = (
         has_enough and has_common and has_major and has_free and has_pe and no_missing and target_satisfied
@@ -803,91 +908,27 @@ def evaluate_graduation(courses, config):
     return report
 
 
-def find_and_consume_course(courses, rule_name, consumed_set):
-    """精確名稱優先，模糊對應次之，防止過度匹配。"""
-    norm_rule_name = normalize_course_name(rule_name)
+def find_and_consume_course(courses, rule_name, consumed_set, expected_credit=None, aliases=()):
+    """Consume one exact scoped identity, preferring completed attempts.
 
-    # 精確匹配（使用 normalized name）
-    for c in courses:
-        c_idx = id(c)
-        if c_idx not in consumed_set:
-            c_name_norm = normalize_course_name(c.get("name", "") or "")
-            if c_name_norm == norm_rule_name:
-                consumed_set.add(c_idx)
-                dbg(f"find_and_consume: exact match id={c_idx} rule='{norm_rule_name}' course='{c_name_norm}'")
-                return c
-
-    # 包含匹配（較短的名稱包含在較長的名稱內，或反之），使用 normalized 比對
-    for c in courses:
-        c_idx = id(c)
-        if c_idx not in consumed_set:
-            c_name_norm = normalize_course_name(c.get("name", "") or "")
-            if len(norm_rule_name) >= 3 and (norm_rule_name in c_name_norm):
-                consumed_set.add(c_idx)
-                dbg(f"find_and_consume: contains match id={c_idx} rule='{norm_rule_name}' course='{c_name_norm}'")
-                return c
-
-    # 模糊對應表
-    fuzzy_mappings = {
-        "英文(一)": ["英文(一)"],
-        "英文(二)": ["英文(二)"],
-        "國文(一):閱讀與思辨": ["國文(一):閱讀與思辨", "國文(一)", "國文一"],
-        "國文(二):語文表達": ["國文(二):語文表達", "國文(二)", "國文二"],
-        "普通物理學(一)": ["普通物理(含實驗)", "普通物理學(含實驗)"],
-        "普通物理學(二)": ["普通物理(含實驗)", "普通物理學(含實驗)"],
-        "普通化學(一)": ["普通化學(含實驗)", "普通化學(一)(含實驗)"],
-        "普通化學(二)": ["普通化學(含實驗)", "普通化學(二)(含實驗)"],
-        "生物化學(一)": ["生物化學(一)", "生物化學"],
-    }
-
-    for key, aliases in fuzzy_mappings.items():
-        if norm_rule_name == normalize_course_name(key):
-            for alias in aliases:
-                norm_alias = normalize_course_name(alias)
-                for c in courses:
-                    c_idx = id(c)
-                    if c_idx not in consumed_set:
-                        c_name_norm = normalize_course_name(c.get("name", "") or "")
-                        if c_name_norm == norm_alias or norm_alias in c_name_norm:
-                            consumed_set.add(c_idx)
-                            dbg(
-                                f"find_and_consume: fuzzy alias match id={c_idx} rule='{norm_rule_name}' alias='{norm_alias}' course='{c_name_norm}'"
-                            )
-                            return c
-
-    # 額外寬鬆匹配：若規則名稱包含冒號（如 "國文(一):閱讀與思辨"），嘗試只用冒號前段比對
-    if ":" in norm_rule_name:
-        head = norm_rule_name.split(":", 1)[0]
-        for c in courses:
-            c_idx = id(c)
-            if c_idx not in consumed_set:
-                c_name_norm = normalize_course_name(c.get("name", "") or "")
-                if c_name_norm == head or head in c_name_norm or c_name_norm in head:
-                    consumed_set.add(c_idx)
-                    dbg(f"find_and_consume: colon-head match id={c_idx} rule_head='{head}' course='{c_name_norm}'")
-                    return c
-
-    # 最後嘗試使用 raw_name 的包含比對，避免因標點或空白差異漏抓常見課名
-    for c in courses:
-        c_idx = id(c)
-        if c_idx not in consumed_set:
-            raw = c.get("raw_name") or ""
-            raw_norm = normalize_course_name(raw)
-            if raw_norm:
-                if ":" in norm_rule_name:
-                    head = norm_rule_name.split(":", 1)[0]
-                    if head in raw_norm or norm_rule_name in raw_norm:
-                        consumed_set.add(c_idx)
-                        dbg(
-                            f"find_and_consume: raw_name match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'"
-                        )
-                        return c
-                else:
-                    if norm_rule_name in raw_norm or raw_norm in norm_rule_name:
-                        consumed_set.add(c_idx)
-                        dbg(
-                            f"find_and_consume: raw_name contains match id={c_idx} rule='{norm_rule_name}' raw_norm='{raw_norm}'"
-                        )
-                        return c
-
-    return None
+    Substring matching, edit-distance matching and global aliases are forbidden.
+    This is what keeps ``微積分`` separate from ``微積分(I)/(II)`` and keeps
+    combined laboratory courses separate from their theory/lab components.
+    """
+    candidates = []
+    for position, course in enumerate(courses):
+        c_idx = id(course)
+        if c_idx in consumed_set:
+            continue
+        if _course_matches_rule(course, rule_name, expected_credit, aliases):
+            rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
+            candidates.append((rank, -position, course))
+    if not candidates:
+        return None
+    _, _, selected = max(candidates, key=lambda item: (item[0], item[1]))
+    consumed_set.add(id(selected))
+    dbg(
+        "find_and_consume: exact scoped match "
+        f"rule='{normalize_course_name(rule_name)}' course='{normalize_course_name(selected.get('name', ''))}'"
+    )
+    return selected

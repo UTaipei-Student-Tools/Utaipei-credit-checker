@@ -4,9 +4,11 @@ Sidebar control panel for the UTaipei graduation credit check app.
 
 import os
 import tempfile
+from html import escape
 
 import streamlit as st
 
+from handbook_rules import get_available_handbook_years, get_default_handbook_year, get_rules_meta
 from schedule_parser import parse_schedule_html
 from scraper import (
     crawl_course_schedule,
@@ -26,15 +28,18 @@ def _init_session_state():
         st.session_state["source_label"] = "尚未載入"
     if "upload_key_version" not in st.session_state:
         st.session_state["upload_key_version"] = 0
+    if "handbook_year" not in st.session_state:
+        st.session_state["handbook_year"] = get_default_handbook_year()
 
 
-def render_sidebar(rules_meta):
+def render_sidebar():
     _init_session_state()
 
     st.sidebar.markdown("### 🎓 北市大校務整合")
     with st.sidebar.container():
+        rules_meta = _render_handbook_selector()
         _render_rules_meta_card(rules_meta)
-        _render_major_settings()
+        _render_major_settings(st.session_state["handbook_year"])
         st.sidebar.markdown("---")
         _render_upload_section()
         st.sidebar.markdown("---")
@@ -43,6 +48,8 @@ def render_sidebar(rules_meta):
         _render_portal_discovery_section()
 
     return {
+        "handbook_year": st.session_state["handbook_year"],
+        "rules_meta": rules_meta,
         "major_domain": st.session_state.get("major_domain", "地球環境"),
         "program_type": st.session_state.get("program_type", "雙主修"),
         "target_dept": st.session_state.get("target_dept", "物化系化學組"),
@@ -52,6 +59,26 @@ def render_sidebar(rules_meta):
         "student_pwd": st.session_state.get("student_pwd", ""),
         "portal_features": st.session_state.get("portal_features", None),
     }
+
+
+def _render_handbook_selector():
+    st.sidebar.markdown("### 📚 適用學生手冊")
+    years = get_available_handbook_years()
+    if not years:
+        raise RuntimeError("目前沒有可用的學生手冊規則。")
+    current = st.session_state.get("handbook_year", get_default_handbook_year())
+    if current not in years:
+        current = get_default_handbook_year()
+    selected = st.sidebar.selectbox(
+        "學生手冊學年度",
+        options=years,
+        index=years.index(current),
+        format_func=lambda year: f"{year} 學年度手冊",
+        key="handbook_year_selector",
+        help="請選擇校方規定適用於你的學生手冊。這與下方『課表抓取學年度』是兩件不同的事。",
+    )
+    st.session_state["handbook_year"] = selected
+    return get_rules_meta(selected)
 
 
 def _render_upload_section():
@@ -98,21 +125,25 @@ def _clear_loaded_data():
 
 
 def _render_rules_meta_card(rules_meta):
-    rules_version = rules_meta.get("version", "N/A")
-    rules_updated = rules_meta.get("last_updated", "N/A")
+    rules_version = escape(str(rules_meta.get("version", "N/A")))
+    rules_updated = escape(str(rules_meta.get("last_updated", "N/A")))
+    source_file = escape(str(rules_meta.get("source_file", "未標示")))
+    verification = escape(str(rules_meta.get("verification", "尚未標示")))
     st.sidebar.markdown(
         f"""
         <div style="background: rgba(79,172,254,0.12); border:1px solid rgba(79,172,254,0.3); border-radius:10px; padding:10px 14px; margin-bottom:8px;">
             <div style="font-size:11px; color: var(--text-color, #94a3b8); opacity: 0.8; margin-bottom:2px;">📋 目前規則版本</div>
             <div style="font-size:15px; font-weight:700; color:#4facfe;">{rules_version} 學年度手冊</div>
             <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">最後更新：{rules_updated}</div>
+            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">來源：{source_file}</div>
+            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">核對：{verification}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def _render_major_settings():
+def _render_major_settings(handbook_year):
     st.sidebar.markdown("### 🛠️ 學業模組設定")
     st.session_state["major_domain"] = st.sidebar.selectbox(
         "主修專業領域",
@@ -121,7 +152,10 @@ def _render_major_settings():
         help="地生系分為『地球環境』與『生命科學』專業領域，必修14學分、選修至少20學分。",
     )
     st.session_state["program_type"] = st.sidebar.selectbox(
-        "修課身分設定", options=["單主修", "雙主修", "輔系"], index=1, help="依據114學年度理學院手冊進行跨系學分核算。"
+        "修課身分設定",
+        options=["單主修", "雙主修", "輔系"],
+        index=1,
+        help=f"依據 {handbook_year} 學年度理學院手冊進行跨系學分核算。",
     )
     st.session_state["target_dept"] = st.sidebar.selectbox(
         "雙主修 / 輔系 目標學系",
@@ -149,10 +183,10 @@ def _render_login_section():
     col_y, col_s = st.sidebar.columns(2)
     with col_y:
         st.session_state["crawl_year"] = st.selectbox(
-            "學年度",
+            "課表學年度",
             options=["113", "114", "115", "116"],
             index=2,  # Default to 115
-            help="選擇要抓取的課表學年度",
+            help="只決定要抓哪一學期的課表；不會改變上方的學生手冊版本。",
         )
     with col_s:
         st.session_state["crawl_semester"] = st.selectbox(

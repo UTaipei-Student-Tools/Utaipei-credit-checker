@@ -3,6 +3,7 @@ Report rendering utilities for the UTaipei graduation credit dashboard.
 """
 
 from html import escape
+import re
 
 import pandas as pd
 import streamlit as st
@@ -14,12 +15,16 @@ from ui_components import draw_premium_progress, render_header_card
 def render_report(student_info, courses, report, major_domain, program_type, target_dept, source_label):
     summary = report["summary"]
     requirements = report["requirements"]
+    rules_meta = report.get("rules_meta", {})
+    handbook_year = str(report.get("handbook_year") or rules_meta.get("version") or "未辨識")
     safe_source = escape(str(source_label or "未知來源"))
-    mode_tag = f"<span class='source-badge'>{safe_source}</span>"
+    safe_handbook = escape(handbook_year)
+    safe_rule_source = escape(str(rules_meta.get("source_file") or "未標示"))
+    mode_tag = f"<span class='source-badge'>{safe_handbook} 學年度手冊</span>"
 
     render_header_card(
         title="🎓 臺北市立大學 歷年畢業學分自我審查系統",
-        subtitle=f"{major_domain}領域 / {program_type}{f' ({target_dept})' if program_type != '單主修' else ''}",
+        subtitle=f"{handbook_year} 學年度手冊 / {major_domain}領域 / {program_type}{f' ({target_dept})' if program_type != '單主修' else ''}",
     )
 
     st.markdown(
@@ -31,18 +36,30 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
                     姓名：<strong>{escape(str(student_info.get("name") or "未辨識"))}</strong><br>
                     學號：<strong>{escape(str(student_info.get("student_id") or "未辨識"))}</strong><br>
                     系所：<strong>{escape(str(student_info.get("department") or "未辨識"))}</strong><br>
+                    入學年月：<strong>{escape(str(student_info.get("admission_year") or "未辨識"))}</strong><br>
                     列印日期：<strong>{escape(str(student_info.get("print_date") or "未辨識"))}</strong>
                 </div>
             </div>
             <div class="info-card info-card-highlight">
-                <div style="font-size:14px; color:#0f172a; font-weight:700; margin-bottom:8px;">系統模式</div>
+                <div style="font-size:14px; color:#0f172a; font-weight:700; margin-bottom:8px;">審查依據</div>
                 <div style="font-size:18px; color:#0f172a; font-weight:800;">{mode_tag}</div>
-                <div style="margin-top:10px; font-size:13px; color:#475569;">已分析 {len(courses)} 筆修課紀錄，並自動分類成畢業必修、選修與跨系學分。</div>
+                <div style="margin-top:10px; font-size:13px; color:#475569;">手冊來源：{safe_rule_source}<br>成績來源：{safe_source}<br>已分析 {len(courses)} 筆修課紀錄。</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    admission_year = str(student_info.get("admission_year") or "")
+    admission_match = re.search(r"(?<!\d)(1\d{2})(?!\d)", admission_year)
+    if admission_match and admission_match.group(1) != handbook_year:
+        st.warning(
+            f"成績單辨識到的入學年度為 {admission_match.group(1)}，目前選的是 {handbook_year} 學年度手冊。"
+            "請確認校方規定的實際適用版本；系統不會擅自替你切換。"
+        )
+
+    for warning in report.get("document_warnings", []):
+        st.warning(f"手冊核對提醒：{warning}")
 
     _render_parsed_course_totals(courses, report["summary"], program_type)
     _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements)
@@ -156,7 +173,7 @@ def _render_tabs(courses, report, summary, major_domain, program_type, target_de
             "四、專業選修",
             "五、其他本系課程",
             "六、自由選修",
-            "🧪 雙主修",
+            f"🧪 {program_type}",
             "📦 全部匯出",
             "🗓️ 模擬排課",
         ]
@@ -205,6 +222,13 @@ def _render_overview_tab(courses, summary, report, major_domain, program_type, t
         missing.append({"類別": "地生系共同必修", "科目名稱": item["name"], "學分": item["credit"]})
     for item in report["major"]["domain_compulsory_missing"]:
         missing.append({"類別": f"{major_domain}領域必修", "科目名稱": item["name"], "學分": item["credit"]})
+    if program_type != "單主修":
+        for item in report["target"].get("basic_core_missing", []):
+            missing.append({"類別": f"{target_dept}{program_type}基礎", "科目名稱": item["name"], "學分": item["credit"]})
+        for item in report["target"].get("compulsory_missing", []):
+            missing.append({"類別": f"{target_dept}{program_type}", "科目名稱": item["name"], "學分": item["credit"]})
+        for item in report["target"].get("elective_missing", []):
+            missing.append({"類別": f"{target_dept}{program_type}", "科目名稱": item["name"], "學分": item["credit"]})
 
     if missing:
         st.warning("⚠️ 您目前尚有以下核心必修科目未修畢：")
@@ -215,42 +239,46 @@ def _render_overview_tab(courses, summary, report, major_domain, program_type, t
 
 def _get_course_category(c, report):
     c_idx = id(c)
+
+    def is_same_course(report_course):
+        return id(report_course) == c_idx or report_course.get("_origin_id") == c_idx
+
     for rc in report.get("common", {}).get("compulsory_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "校共同必修"
     for rc in report.get("common", {}).get("common_elective_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "通識共同選修"
     for cat_name, cat_data in report.get("common", {}).get("categories", {}).items():
         for rc in cat_data.get("courses", []):
-            if id(rc) == c_idx:
+            if is_same_course(rc):
                 return f"通識分類({cat_name})"
     for rc in report.get("major", {}).get("dept_compulsory_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "系共同必修"
     for rc in report.get("major", {}).get("domain_compulsory_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "專業必修"
     for rc in report.get("major", {}).get("domain_elective_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "專業選修"
     for rc in report.get("major", {}).get("other_elective_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "其他本系課程"
     for rc in report.get("target", {}).get("basic_core_courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "跨系基礎必修"
     for rc in report.get("target", {}).get("compulsory_courses", []):
-        if id(rc) == c_idx:
-            return "跨系專業必修"
+        if is_same_course(rc):
+            return "跨系專業必修（超額學分另轉自由選修）" if rc.get("allocation_note") else "跨系專業必修"
     for rc in report.get("target", {}).get("elective_courses", []):
-        if id(rc) == c_idx:
-            return "跨系選修"
+        if is_same_course(rc):
+            return "跨系選修（超額學分另轉自由選修）" if rc.get("allocation_note") else "跨系選修"
     for rc in report.get("pe", {}).get("courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "體育"
     for rc in report.get("free", {}).get("courses", []):
-        if id(rc) == c_idx:
+        if is_same_course(rc):
             return "自由選修"
     return "未歸類"
 
@@ -298,7 +326,8 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
     df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
-    df_full.columns = ["科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
+    df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
+    df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
     csv_bytes = df_full.to_csv(index=False).encode("utf-8")
 
     html_str = [
@@ -323,7 +352,7 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
     st.download_button(
         label="📦 全部匯出 CSV",
         data=csv_bytes,
-        file_name="UTaipei_Credit_Audit_Overview.csv",
+        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}_Overview.csv",
         mime="text/csv",
         use_container_width=False,
     )
@@ -651,7 +680,7 @@ def _render_target_tab(report, program_type, target_dept, summary):
         st.info("💡 目前為「單主修」身分，無輔系/雙主修學分計算。")
         return
 
-    st.markdown(f"### 🧪 雙主修：{target_dept} ({program_type})")
+    st.markdown(f"### 🧪 {program_type}：{target_dept}")
     target_req = report["requirements"]["target_total"]
     draw_premium_progress(
         f"🧪 {program_type} ({target_dept})", summary["target_completed"], target_req, ip=summary["target_ip"]
@@ -663,17 +692,19 @@ def _render_target_tab(report, program_type, target_dept, summary):
         _render_course_table_with_missing(
             report["target"]["basic_core_courses"], report["target"]["basic_core_missing"]
         )
-        st.markdown("#### 🅱️ 物化系分組專業必修")
-        _render_course_table(report["target"]["compulsory_courses"])
-        st.markdown("#### 🅲 物化系其他選修")
-        _render_course_table(report["target"]["elective_courses"])
+        st.markdown("#### 🅱️ 物化系其餘分組必修（只採手冊列示必修課）")
+        _render_course_table_with_missing(
+            report["target"]["compulsory_courses"], report["target"]["compulsory_missing"]
+        )
     else:
         st.markdown("#### 🅰️ 資科系指定必修")
         _render_course_table_with_missing(
             report["target"]["compulsory_courses"], report["target"]["compulsory_missing"]
         )
-        st.markdown("#### 🅱️ 資科系其他選修")
-        _render_course_table(report["target"]["elective_courses"])
+        st.markdown("#### 🅱️ 資科系其他開設課程（只採該年度官方課表精確課名）")
+        _render_course_table_with_missing(
+            report["target"]["elective_courses"], report["target"].get("elective_missing", [])
+        )
 
 
 def _render_export_tab(courses, report, summary, requirements):
@@ -684,13 +715,14 @@ def _render_export_tab(courses, report, summary, requirements):
     df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
-    df_full.columns = ["科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
+    df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
+    df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
     st.dataframe(df_full, use_container_width=True)
     csv_bytes = df_full.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="📥 匯出學分審查試算表 (CSV)",
         data=csv_bytes,
-        file_name="UTaipei_Credit_Audit.csv",
+        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}.csv",
         mime="text/csv",
         use_container_width=True,
     )
@@ -860,7 +892,7 @@ def _course_row(c):
     score = c["sem1_score"] if c["sem1_score"] not in (None, "", "--") else c["sem2_score"]
     status, status_type = _status_label(score)
     return {
-        "科目名稱": c["name"],
+        "科目名稱": f"{c['name']}（{c['allocation_note']}）" if c.get("allocation_note") else c["name"],
         "修課學年": f"{c['academic_year']}學年",
         "學分": c["total_credit"],
         "成績": score,

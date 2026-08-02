@@ -5,7 +5,6 @@ Modular Streamlit app entrypoint for the UTaipei graduation credit checker.
 import streamlit as st
 
 from credit_engine import evaluate_graduation
-from handbook_rules import get_rules_meta
 from pdf_parser import parse_transcript_pdf
 from report_renderer import render_report
 from schedule_parser import merge_schedule_courses
@@ -22,8 +21,7 @@ def main():
     setup_page()
     render_header_card("北市大畢業學分審查系統", "🎓 快速檢查你的畢業進度")
 
-    rules_meta = get_rules_meta()
-    sidebar_state = render_sidebar(rules_meta)
+    sidebar_state = render_sidebar()
     collapse_sidebar_if_needed()
 
     transcript_source = sidebar_state["transcript_source"]
@@ -31,6 +29,7 @@ def main():
     major_domain = sidebar_state["major_domain"]
     program_type = sidebar_state["program_type"]
     target_dept = sidebar_state["target_dept"]
+    handbook_year = sidebar_state["handbook_year"]
 
     if not transcript_source:
         render_landing_message()
@@ -51,6 +50,7 @@ def main():
                 "domain": major_domain,
                 "program": program_type,
                 "target_dept": target_dept,
+                "handbook_year": handbook_year,
             },
         )
         render_report(student_info, courses, report, major_domain, program_type, target_dept, source_label)
