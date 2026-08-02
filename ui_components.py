@@ -233,18 +233,11 @@ def inject_theme_css():
             .hero-callout strong {
                 color: var(--text-color, #0c4a6e) !important;
             }
-            /* Streamlit Tabs Stretch & Enlarge */
-            button[data-baseweb="tab"] {
-                flex: 1 1 0% !important;
-                font-size: 16px !important;
-                font-weight: 600 !important;
-                padding-top: 12px !important;
-                padding-bottom: 12px !important;
-            }
-            div[data-baseweb="tab-list"] {
-                gap: 0px !important;
-                justify-content: space-between !important;
-                width: 100% !important;
+            /* Keep Streamlit's native tab scrolling/arrows; do not override geometry. */
+            [data-testid="stTabs"] [role="tab"],
+            [data-testid="stTabs"] button[data-baseweb="tab"] {
+                font-size: 15px !important;
+                font-weight: 700 !important;
             }
             /* Responsive Utilities */
             .info-flex {
@@ -384,22 +377,6 @@ def inject_theme_css():
                     flex-direction: column;
                     align-items: flex-start;
                     gap: 4px;
-                }
-                div[data-baseweb="tab-list"] {
-                    display: flex !important;
-                    overflow-x: auto !important;
-                    flex-wrap: nowrap !important;
-                    gap: 8px !important;
-                    padding-bottom: 8px !important;
-                    -webkit-overflow-scrolling: touch;
-                }
-                button[data-baseweb="tab"] {
-                    white-space: nowrap !important;
-                    flex: 0 0 auto !important;
-                    width: auto !important;
-                    padding-left: 16px !important;
-                    padding-right: 16px !important;
-                    min-width: max-content !important;
                 }
             }
         </style>

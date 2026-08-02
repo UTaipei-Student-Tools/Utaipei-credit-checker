@@ -64,7 +64,7 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
     _render_parsed_course_totals(courses, report["summary"], program_type)
     _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements)
     st.markdown("<br><br>", unsafe_allow_html=True)
-    _render_tabs(courses, report, summary, major_domain, program_type, target_dept, requirements)
+    _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements)
 
 
 def _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements):
@@ -127,7 +127,7 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
     st.markdown("".join(html_str), unsafe_allow_html=True)
 
 
-def _render_tabs(courses, report, summary, major_domain, program_type, target_dept, requirements):
+def _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements):
     st.markdown("### 🎯 畢業進度總覽")
 
     schedule_courses = [
@@ -164,49 +164,46 @@ def _render_tabs(courses, report, summary, major_domain, program_type, target_de
 
     st.markdown("---")
 
-    tabs = st.tabs(
-        [
-            "📊 學分進度概覽",
-            "一、校共同課程",
-            "二、系共同必修",
-            "三、專業必修",
-            "四、專業選修",
-            "五、其他本系課程",
-            "六、自由選修",
-            f"🧪 {program_type}",
-            "📦 全部匯出",
-            "🗓️ 模擬排課",
-        ]
+    section_labels = {
+        "overview": "📊 學分進度概覽",
+        "common": "一、校共同課程",
+        "dept_required": "二、系共同必修",
+        "domain_required": "三、專業必修",
+        "domain_elective": "四、專業選修",
+        "other_elective": "五、其他本系課程",
+        "free_elective": "六、自由選修",
+        "target": f"🧪 {program_type}",
+        "export": "📦 全部匯出",
+        "planner": "🗓️ 模擬排課",
+    }
+    selected_section = st.selectbox(
+        "📂 查看詳細分類與工具",
+        options=list(section_labels),
+        format_func=section_labels.get,
+        key="report_section_selector",
+        help="共 10 個區塊。改用下拉導覽可避免較窄的畫面把後段分頁裁掉。",
     )
+    st.caption(f"共 {len(section_labels)} 個區塊｜目前顯示：{section_labels[selected_section]}")
 
-    with tabs[0]:
+    if selected_section == "overview":
         _render_overview_tab(courses, summary, report, major_domain, program_type, target_dept, requirements)
-
-    with tabs[1]:
+    elif selected_section == "common":
         _render_common_section(report["common"], report["pe"], requirements)
-
-    with tabs[2]:
+    elif selected_section == "dept_required":
         _render_dept_compulsory_section(report["major"], requirements)
-
-    with tabs[3]:
+    elif selected_section == "domain_required":
         _render_domain_compulsory_section(report["major"], major_domain, requirements)
-
-    with tabs[4]:
+    elif selected_section == "domain_elective":
         _render_domain_elective_section(report["major"], major_domain, requirements)
-
-    with tabs[5]:
+    elif selected_section == "other_elective":
         _render_other_elective_section(report["major"], requirements)
-
-    with tabs[6]:
+    elif selected_section == "free_elective":
         _render_free_elective_section(report["free"], requirements)
-
-    with tabs[7]:
+    elif selected_section == "target":
         _render_target_tab(report, program_type, target_dept, summary)
-
-    with tabs[8]:
+    elif selected_section == "export":
         _render_export_tab(courses, report, summary, requirements)
-
-    with tabs[9]:
+    elif selected_section == "planner":
         render_schedule_planner()
 
 
