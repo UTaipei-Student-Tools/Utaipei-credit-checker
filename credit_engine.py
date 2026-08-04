@@ -742,7 +742,12 @@ def evaluate_graduation(courses, config):
         c_idx = id(c)
         if c_idx not in consumed:
             for rule_name, rule_credit in all_major_electives.items():
-                if _course_matches_rule(c, rule_name, rule_credit):
+                if _course_matches_rule(
+                    c,
+                    rule_name,
+                    rule_credit,
+                    _explicit_aliases(alias_sets, "earth_life_common_electives", rule_name),
+                ):
                     comp_c, ip_c = get_course_credits(c)
                     report["major"]["other_elective_courses"].append(c)
                     report["major"]["other_elective_completed"] += comp_c

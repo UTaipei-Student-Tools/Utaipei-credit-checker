@@ -38,6 +38,9 @@
       "cs": {
         "微積分(I)": ["微積分I"],
         "微積分(II)": ["微積分II"]
+      },
+      "earth_life_common_electives": {
+        "普通物理學(含實驗)": ["普通物理(含實驗)"]
       }
     },
     "free_elective": {"total_req": 15},

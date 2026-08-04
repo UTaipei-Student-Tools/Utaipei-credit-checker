@@ -2,14 +2,15 @@
 Report rendering utilities for the UTaipei graduation credit dashboard.
 """
 
-from html import escape
 import re
+from html import escape
 
 import pandas as pd
 import streamlit as st
 
+from handbook_rules import normalize_course_name
 from schedule_planner import render_schedule_planner
-from ui_components import draw_premium_progress, render_header_card
+from ui_components import draw_premium_progress, format_credit, render_header_card
 
 
 def render_report(student_info, courses, report, major_domain, program_type, target_dept, source_label):
@@ -98,14 +99,21 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
             continue
 
         total_with_ip = summary.get("total_with_ip", completed + ip) if idx == 0 else completed
-        bottom_text = (
-            f"已得 {completed:g} / 修讀中 {ip:g} / 應修 {target:g}" if idx == 0 else f"應修 {target:g} / 修讀中 {ip:g}"
-        )
+        if label == "🎽 體育修課":
+            value_text = f"{total_with_ip:g}"
+            bottom_text = f"應修 {target:g} 學期 / 修讀中 {ip:g}"
+        else:
+            value_text = format_credit(total_with_ip)
+            bottom_text = (
+                f"已得 {format_credit(completed)} / 修讀中 {format_credit(ip)} / 應修 {format_credit(target)}"
+                if idx == 0
+                else f"應修 {format_credit(target)} / 修讀中 {format_credit(ip)}"
+            )
 
         html_str.append(
             f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
             f"<div style='font-size:14px; font-weight:700; color:#475569; margin-bottom:12px;'>{label}</div>"
-            f"<div style='font-size:28px; font-weight:800; color:{color}; margin-bottom:6px;'>{total_with_ip:g}</div>"
+            f"<div style='font-size:28px; font-weight:800; color:{color}; margin-bottom:6px;'>{value_text}</div>"
             f"<div style='font-size:12px; color:#64748b;'>{bottom_text}</div>"
             f"</div>"
         )
@@ -144,7 +152,7 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
         )
         term_label = "、".join(terms) if terms else "已公布"
         st.info(
-            f"📅 已納入 {term_label} 課表：{len(schedule_courses)} 門、{schedule_credits:g} 學分；"
+            f"📅 已納入 {term_label} 課表：{len(schedule_courses)} 門、{format_credit(schedule_credits)} 學分；"
             "以下進度條的藍色區段代表這些修讀中學分。"
         )
 
@@ -338,8 +346,8 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
             html_str.append(
                 f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:20px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 f"<div style='font-size:15px; font-weight:700; color:#475569; margin-bottom:12px; line-height:1.4;'>{card['title']}</div>"
-                f"<div style='font-size:32px; font-weight:800; color:#0f172a; margin-bottom:8px;'>{card['completed']:g} / {card['target']:g}</div>"
-                f"<div style='font-size:13px; color:#64748b;'>已得 {card['completed']:g} / 修讀中 {card['ip']:g}</div>"
+                f"<div style='font-size:32px; font-weight:800; color:#0f172a; margin-bottom:8px;'>{format_credit(card['completed'])} / {format_credit(card['target'])}</div>"
+                f"<div style='font-size:13px; color:#64748b;'>已得 {format_credit(card['completed'])} / 修讀中 {format_credit(card['ip'])}</div>"
                 f"</div>"
             )
 
@@ -513,24 +521,10 @@ def _render_common_section(common_report, pe_report, requirements):
 
     # 校共同必修
     st.markdown("#### 📖 校共同必修課程")
-    rows = []
-    for c in common_report["compulsory_courses"]:
-        rows.append(_course_row(c))
-    for missing in common_report["compulsory_missing"]:
-        rows.append(
-            {
-                "科目名稱": missing["name"],
-                "修課學年": "--",
-                "學分": missing["credit"],
-                "成績": "--",
-                "狀態": "缺漏",
-                "狀態類別": "missing",
-            }
-        )
-    if rows:
-        _render_course_cards(rows)
-    else:
-        st.warning("⚠️ 目前無相關修課紀錄。")
+    _render_course_table_with_missing(
+        common_report["compulsory_courses"],
+        common_report["compulsory_missing"],
+    )
 
     # 通識
     st.markdown(f"#### 🎨 通識分類選修（各領域至少 {requirements['ge_per_category']:g} 學分）")
@@ -562,27 +556,11 @@ def _render_dept_compulsory_section(major_report, requirements):
     )
     st.markdown("---")
 
-    rows = []
-    for c in major_report["dept_compulsory_courses"]:
-        rows.append(_course_row(c))
-    for missing in major_report["dept_compulsory_missing"]:
-        rows.append(
-            {
-                "科目名稱": missing["name"],
-                "修課學年": "--",
-                "學分": missing["credit"],
-                "成績": "--",
-                "狀態": "缺漏",
-                "狀態類別": "missing",
-            }
-        )
-
-    if rows:
-        _render_course_cards(rows)
-    else:
-        st.warning("⚠️ 目前無相關修課紀錄。")
-
-    missing_count = len(major_report["dept_compulsory_missing"])
+    visible_missing = _render_course_table_with_missing(
+        major_report["dept_compulsory_courses"],
+        major_report["dept_compulsory_missing"],
+    )
+    missing_count = len(visible_missing)
     if missing_count > 0:
         st.warning(f"⚠️ 您尚有 {missing_count} 門必修課程未修習")
 
@@ -598,27 +576,11 @@ def _render_domain_compulsory_section(major_report, major_domain, requirements):
     )
     st.markdown("---")
 
-    rows = []
-    for c in major_report["domain_compulsory_courses"]:
-        rows.append(_course_row(c))
-    for missing in major_report["domain_compulsory_missing"]:
-        rows.append(
-            {
-                "科目名稱": missing["name"],
-                "修課學年": "--",
-                "學分": missing["credit"],
-                "成績": "--",
-                "狀態": "缺漏",
-                "狀態類別": "missing",
-            }
-        )
-
-    if rows:
-        _render_course_cards(rows)
-    else:
-        st.warning("⚠️ 目前無相關修課紀錄。")
-
-    missing_count = len(major_report["domain_compulsory_missing"])
+    visible_missing = _render_course_table_with_missing(
+        major_report["domain_compulsory_courses"],
+        major_report["domain_compulsory_missing"],
+    )
+    missing_count = len(visible_missing)
     if missing_count > 0:
         st.warning(f"⚠️ 您尚有 {missing_count} 門必修課程未修習")
 
@@ -789,10 +751,10 @@ def _render_parsed_course_totals(courses, summary, program_type):
     st.markdown(
         f"""
         <div style='display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px;'>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>解析總學分: <b>{parsed_total:g}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>已修得: <b>{parsed_completed:g}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>修讀中: <b>{parsed_ip:g}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>總含修讀中: <b>{summary.get("total_with_ip", 0.0):g}</b></div>
+            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>解析總學分: <b>{format_credit(parsed_total)}</b></div>
+            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>已修得: <b>{format_credit(parsed_completed)}</b></div>
+            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>修讀中: <b>{format_credit(parsed_ip)}</b></div>
+            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>總含修讀中: <b>{format_credit(summary.get("total_with_ip", 0.0))}</b></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -808,6 +770,7 @@ def _render_course_table(courses):
 
 
 def _render_course_table_with_missing(courses, missing_items):
+    visible_missing = _visible_missing_items(courses, missing_items)
     rows = [_course_row(c) for c in courses]
     rows.extend(
         {
@@ -818,12 +781,28 @@ def _render_course_table_with_missing(courses, missing_items):
             "狀態": "缺漏",
             "狀態類別": "missing",
         }
-        for item in missing_items
+        for item in visible_missing
     )
     if rows:
         _render_course_cards(rows)
     else:
         st.warning("⚠️ 目前無相關修課紀錄。")
+    return visible_missing
+
+
+def _visible_missing_items(courses, missing_items):
+    """Hide a duplicate placeholder when the same requirement is already in progress."""
+    in_progress_names = {
+        normalize_course_name(course.get("name", ""))
+        for course in courses
+        if course.get("is_in_progress")
+    }
+    return [
+        item
+        for item in missing_items
+        if item.get("status") != "in_progress"
+        and normalize_course_name(item.get("name", "")) not in in_progress_names
+    ]
 
 
 def _render_course_cards(rows):
@@ -868,7 +847,7 @@ def _render_course_cards(rows):
 
         safe_name = escape(str(r.get("科目名稱", "")))
         safe_year = escape(str(r.get("修課學年", "")))
-        safe_credit = escape(str(r.get("學分", "")))
+        safe_credit = escape(format_credit(r.get("學分", "")))
         safe_score = escape(str(r.get("成績", "")))
         safe_status = escape(str(status))
         html.append(

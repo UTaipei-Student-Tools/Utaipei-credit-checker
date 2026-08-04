@@ -2,10 +2,24 @@
 UI helper functions for the UTaipei graduation credit check Streamlit app.
 """
 
+import math
 from html import escape
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+
+def format_credit(value):
+    """Format a credit value consistently without changing its numeric data."""
+    if value in (None, ""):
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(numeric):
+        return str(value)
+    return f"{numeric:.1f}"
 
 
 def setup_page():
@@ -13,7 +27,7 @@ def setup_page():
         page_title="北市大畢業學分審查系統 | UTaipei Credit Checker",
         page_icon="🎓",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
     inject_theme_css()
 
@@ -52,10 +66,27 @@ def inject_theme_css():
     st.markdown(
         """
         <style>
+            *, *::before, *::after {
+                box-sizing: border-box;
+            }
             html, body, [class*="css"] {
                 font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, -apple-system, sans-serif;
                 color: var(--text-color, #111827);
                 font-size: 16px !important;
+            }
+            [data-testid="stAppViewContainer"] {
+                max-width: 100%;
+                overflow-x: clip;
+            }
+            [data-testid="stMain"],
+            [data-testid="stMainBlockContainer"],
+            [data-testid="stSidebar"],
+            [data-testid="stSidebarContent"] {
+                min-width: 0;
+            }
+            [data-testid="stMainBlockContainer"] {
+                width: 100%;
+                max-width: 100%;
             }
             .stMarkdown p, .stMarkdown li, .stMarkdown div {
                 font-size: 16px !important;
@@ -256,6 +287,7 @@ def inject_theme_css():
                 box-shadow: 0 18px 40px rgba(15,23,42,0.05);
                 flex: 1;
                 min-width: 250px;
+                max-width: 100%;
             }
             .info-card * {
                 color: var(--text-color, #111827) !important;
@@ -266,7 +298,7 @@ def inject_theme_css():
             }
             .overview-grid {
                 display: grid;
-                grid-template-columns: repeat(3, 1fr);
+                grid-template-columns: repeat(3, minmax(0, 1fr));
                 gap: 16px;
                 align-items: stretch;
             }
@@ -287,7 +319,7 @@ def inject_theme_css():
             }
             .metric-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
                 gap: 16px;
                 align-items: stretch;
             }
@@ -312,9 +344,15 @@ def inject_theme_css():
                 background: var(--secondary-background-color, #ffffff) !important;
                 border: 1px solid var(--border-color, rgba(226, 232, 240, 0.9)) !important;
                 border-radius: 18px;
+                min-width: 0;
             }
             .course-row * {
                 color: var(--text-color, #111827) !important;
+            }
+            .course-row > div,
+            .course-header > div {
+                min-width: 0;
+                overflow-wrap: anywhere;
             }
             .course-header {
                 display: grid;
@@ -329,13 +367,68 @@ def inject_theme_css():
                 border-radius: 18px;
             }
 
+            @media (max-width: 1100px) {
+                .overview-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+                .metric-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+                .course-row,
+                .course-header {
+                    grid-template-columns: minmax(0, 2.4fr) minmax(88px, 0.9fr) minmax(64px, 0.7fr) minmax(64px, 0.7fr) minmax(86px, 0.9fr);
+                }
+            }
+
             @media (max-width: 768px) {
-                .header-title { font-size: 28px; }
-                .header-card { padding: 24px; }
+                [data-testid="stMainBlockContainer"] {
+                    padding: 4.5rem 0.75rem 4rem !important;
+                }
+                [data-testid="stSidebar"] {
+                    width: min(88vw, 22rem) !important;
+                    max-width: 88vw !important;
+                }
+                [data-testid="stSidebarContent"] {
+                    padding-top: 0.75rem;
+                }
+                [data-testid="stHorizontalBlock"] {
+                    gap: 0.75rem;
+                    flex-wrap: wrap;
+                }
+                [data-testid="column"] {
+                    min-width: min(100%, 14rem);
+                    flex: 1 1 14rem !important;
+                }
+                .stButton > button,
+                .stDownloadButton > button,
+                [data-baseweb="select"] > div,
+                [data-testid="stFileUploaderDropzone"] button {
+                    min-height: 44px;
+                }
+                [data-testid="stMainMenuButton"] {
+                    min-width: 44px;
+                    min-height: 44px;
+                }
+                .stButton > button,
+                .stDownloadButton > button {
+                    width: 100%;
+                }
+                .header-title {
+                    font-size: clamp(24px, 7vw, 28px);
+                    line-height: 1.25;
+                    overflow-wrap: anywhere;
+                }
+                .header-card { padding: 22px 18px; border-radius: 20px; }
+                .header-subtitle { font-size: 14px; }
                 .info-flex { flex-direction: column !important; }
                 .info-flex > .info-card { width: 100% !important; min-width: 0 !important; margin-bottom: 8px; }
-                .overview-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) !important; }
-                .metric-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) !important; }
+                .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+                .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+                .metric-card { padding: 18px 16px; }
+                .metric-value { font-size: 28px; }
+                .card-panel { padding: 18px; border-radius: 20px; }
+                .hero-callout { padding: 16px; }
+                .table-container { max-width: 100%; }
                 
                 .course-header { display: none !important; }
                 .course-row {
@@ -347,7 +440,8 @@ def inject_theme_css():
                     display: flex;
                     justify-content: space-between;
                     align-items: flex-start;
-                    word-break: keep-all;
+                    word-break: break-word;
+                    overflow-wrap: anywhere;
                     text-align: right;
                 }
                 .course-row > div::before {
@@ -379,6 +473,40 @@ def inject_theme_css():
                     gap: 4px;
                 }
             }
+
+            @media (max-width: 480px) {
+                [data-testid="stMainBlockContainer"] {
+                    padding-inline: 0.625rem !important;
+                }
+                [data-testid="column"] {
+                    min-width: 100%;
+                    flex-basis: 100% !important;
+                }
+                .overview-grid,
+                .metric-grid {
+                    grid-template-columns: minmax(0, 1fr) !important;
+                }
+                .info-card,
+                .card-panel,
+                .course-row {
+                    padding: 15px !important;
+                    border-radius: 16px;
+                }
+                .progress-label-row { font-size: 12px; }
+            }
+
+            @media (hover: none) {
+                .metric-card:hover { transform: none; }
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                *, *::before, *::after {
+                    scroll-behavior: auto !important;
+                    transition-duration: 0.01ms !important;
+                    animation-duration: 0.01ms !important;
+                    animation-iteration-count: 1 !important;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -390,6 +518,9 @@ def draw_premium_progress(label, completed, required, ip=0.0):
     ip = float(ip or 0.0)
     comp_pct = min(100.0, (completed / required) * 100.0) if required > 0 else 100.0
     ip_pct = min(100.0 - comp_pct, (ip / required) * 100.0) if required > 0 else 0.0
+    completed_text = format_credit(completed)
+    ip_text = format_credit(ip)
+    required_text = format_credit(required)
 
     st.markdown(
         f"""
@@ -397,7 +528,7 @@ def draw_premium_progress(label, completed, required, ip=0.0):
             <div class="progress-label-row">
                 <span style="font-weight:600; color:var(--text-color, #121212);">{escape(str(label))}</span>
                 <span style="color:var(--text-color, #1f2937);">
-                    已得 <b style="color:#0f766e;">{completed:g}</b> 學分 {f'| 修讀中 <b style="color:#2563eb;">{ip:g}</b>' if ip > 0 else ""} / 應修 <b>{required:g}</b> 學分
+                    已得 <b style="color:#0f766e;">{completed_text}</b> 學分 {f'| 修讀中 <b style="color:#2563eb;">{ip_text}</b>' if ip > 0 else ""} / 應修 <b>{required_text}</b> 學分
                 </span>
             </div>
             <div class="progress-bar-bg">
