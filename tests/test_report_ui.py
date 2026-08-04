@@ -156,6 +156,7 @@ class ReportNavigationTests(unittest.TestCase):
         self.assertIn("@media (max-width: 480px)", css)
         self.assertIn("min-height: 44px", css)
         self.assertIn("grid-template-columns: minmax(0, 1fr)", css)
+        self.assertIn('[data-testid="stSidebar"][aria-expanded="true"]', css)
 
 
 if __name__ == "__main__":

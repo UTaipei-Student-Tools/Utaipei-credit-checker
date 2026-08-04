@@ -384,7 +384,7 @@ def inject_theme_css():
                 [data-testid="stMainBlockContainer"] {
                     padding: 4.5rem 0.75rem 4rem !important;
                 }
-                [data-testid="stSidebar"] {
+                [data-testid="stSidebar"][aria-expanded="true"] {
                     width: min(88vw, 22rem) !important;
                     max-width: 88vw !important;
                 }
