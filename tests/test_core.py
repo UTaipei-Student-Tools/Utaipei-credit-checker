@@ -183,6 +183,44 @@ class EngineTests(unittest.TestCase):
         self.assertIn("微積分", [c["name"] for c in report["major"]["other_elective_courses"]])
         self.assertEqual(report["summary"]["target_completed"], 6)
 
+    def test_earth_combined_physics_alias_is_scoped_and_credit_exact(self):
+        for handbook_year in get_available_handbook_years():
+            with self.subTest(handbook_year=handbook_year):
+                report = evaluate_graduation(
+                    [course("普通物理(含實驗)", 3)],
+                    {"domain": "地球環境", "program": "單主修", "handbook_year": handbook_year},
+                )
+                self.assertEqual(
+                    [item["name"] for item in report["major"]["other_elective_courses"]],
+                    ["普通物理(含實驗)"],
+                )
+                self.assertEqual(report["major"]["other_elective_completed"], 3)
+                self.assertEqual(report["free"]["courses"], [])
+
+                wrong_credit = evaluate_graduation(
+                    [course("普通物理(含實驗)", 2)],
+                    {"domain": "地球環境", "program": "單主修", "handbook_year": handbook_year},
+                )
+                self.assertEqual(wrong_credit["major"]["other_elective_courses"], [])
+                self.assertEqual(
+                    [item["name"] for item in wrong_credit["free"]["courses"]],
+                    ["普通物理(含實驗)"],
+                )
+
+    def test_earth_combined_physics_alias_never_satisfies_apc_components(self):
+        report = evaluate_graduation(
+            [course("普通物理(含實驗)", 3)],
+            {"domain": "地球環境", "program": "輔系", "target_dept": "物化系物理組", "handbook_year": "114"},
+        )
+        self.assertEqual(report["target"]["basic_core_completed"], 0)
+        self.assertEqual(
+            [item["name"] for item in report["major"]["other_elective_courses"]],
+            ["普通物理(含實驗)"],
+        )
+        missing = [item["name"] for item in report["target"]["basic_core_missing"]]
+        self.assertIn("普通物理學(一)", missing)
+        self.assertIn("普通物理實驗(一)", missing)
+
     def test_cs_alias_does_not_cross_into_chinese_numbered_apc_course(self):
         courses = [course("微積分I", 3), course("微積分(一)", 3)]
         report = evaluate_graduation(
