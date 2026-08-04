@@ -158,6 +158,20 @@ class ReportNavigationTests(unittest.TestCase):
         self.assertIn("grid-template-columns: minmax(0, 1fr)", css)
         self.assertIn('[data-testid="stSidebar"][aria-expanded="true"]', css)
 
+    def test_sidebar_dark_theme_uses_color_scheme_aware_text(self):
+        app = AppTest.from_function(_responsive_theme_fixture, default_timeout=20).run()
+        self.assertEqual(len(app.exception), 0)
+        css = "\n".join(str(element.value) for element in app.markdown)
+
+        self.assertRegex(
+            css,
+            r'\[data-testid="stSidebar"\]\s*\{[^}]*--text-color:\s*CanvasText;',
+        )
+        self.assertIn("color: var(--text-color, #111827) !important", css)
+        # Native inputs and portal-mounted options already follow Streamlit's
+        # theme; avoid global overrides that could break keyboard highlighting.
+        self.assertNotIn('[data-baseweb="popover"] [role="option"] {', css)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,14 @@ def inject_theme_css():
                 background: var(--background-color, linear-gradient(180deg, #F8FAFC 0%, #E2E8F0 100%));
                 min-height: 100vh;
             }
+            /*
+             * Streamlit 1.57 sets color-scheme on the sidebar but does not
+             * expose --text-color. CanvasText therefore follows the explicit
+             * Light/Dark choice without disturbing native BaseWeb controls.
+             */
+            [data-testid="stSidebar"] {
+                --text-color: CanvasText;
+            }
             .stApp, .stApp div, .stApp p, .stApp span, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp a, .stApp label {
                 color: var(--text-color, #111827) !important;
             }
