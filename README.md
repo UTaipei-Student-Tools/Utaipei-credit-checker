@@ -10,72 +10,103 @@ pinned: false
 license: mit
 ---
 
-# 🎓 臺北市立大學理學院畢業學分自我審查系統 (Hugging Face Space 版)
+# 北市大畢業學分自我審查系統
 
-本專案專為 **臺北市立大學 (北市大) 地球環境暨生物資源學系 (地生系)** 學生打造，能夠自動模擬登入北市大校務系統抓取成績單 PDF，並依據 **114學年度理學院學生手冊** 之畢業標準，精準核算共同必修、通識領域選修、系專門必修、分組選修與自由選修之學分完成度。
+這是一套以 Streamlit 製作的學分自我檢查工具，依據臺北市立大學 111–115 學年度理學院學生手冊，解析歷年成績單 PDF，將課程分類至校共同、通識、地生系主修、自由選修，以及支援的雙主修規劃模組。111、115 與非地生逐課資料不足的情況只顯示已核對門檻，結果保守標示 `UNKNOWN`，不猜測課程身份。
 
-系統特別支援 **應用物理暨化學系 (化學組/物理組)** 與 **資訊科學系 (資科系)** 之雙主修與輔系精密學分試算，自動排除重疊必修學分，防止重複計算。
+> 本工具提供個人規劃與初步核對，不取代教務處、系所或學分審查會議的正式認定。規則更新後，應先由熟悉校規的人員核對 `rules_config.json`。
 
-## 🌟 特色功能
+## 功能
 
-1. **實時爬蟲抓取 (Live Scraper)**：輸入學號密碼，系統自動以唯讀模式安全登入校務系統 (`https://my.utaipei.edu.tw/`) 並下載最新歷年成績單 PDF。
-2. **本機 Demo 展示 (Offline Demo)**：一鍵載入本機預先快取的成績單 ( student_transcript.pdf )，在不暴露隱私帳密的情況下完整體驗高級儀表板的全部功能。
-3. **精緻視覺美學 (Premium UX)**：
-   - 融合高級暗色系與霓虹色彩（HSL Harmony）。
-   - 採用現代玻璃擬態卡片（Glassmorphism）與滑動懸停動態效果。
-   - 提供精密的多層次進度條矩陣與核算藥丸狀態標章 (Badges)。
-   - 支援完整的畢業核心必修缺失稽核 (Audits) 與自由選修外系跨系學分試算。
-4. **一鍵 Excel/CSV 匯出**：支持將審查後的修課完整列表一鍵下載為試算表檔案。
+- 上傳歷年成績單 PDF，不必提供校務系統帳密。
+- 在左側選擇入學 cohort 111–115；cohort 決定主要手冊，且不會被課表學年度或雙主修申請年度取代。
+- 選擇地生（生命科學／地球環境）、物化（電子物理／應用化學）、資科或數學（115 標示為數據科學與數學），以及單主修／雙主修身分。
+- 追蹤校共同必修、四類通識、體育、系共同必修、領域必選修及自由選修。
+- 雙主修依校級「大二起至正常修業最後一年第一學期、至少40學分、共同課程最多6學分且須系所核准」規則顯示四狀態資格；各系更嚴格規定與申請證據仍須人工確認。
+- 可登入校務系統抓取成績單與指定學期課表；此功能可能受校方維護、頁面改版或網路區域限制影響。
+- 合併規劃中課程、模擬排課，並匯出 CSV。
+- 報告以固定的 10 區塊下拉導覽切換明細，避免較窄畫面把後段分頁裁掉。
+- 畢業門檻由 `rules_config.json` 統一驅動；每個手冊年度都有獨立課名、學分、必選修與雙主修／輔系規則。
+- 課程採「手冊年度＋學系範圍＋完整正規化課名＋正式學分」嚴格配對。例如 `微積分`、`微積分(I)`、`微積分(II)`、`微積分(一)`、`微積分(二)` 都是不同課程。
 
----
+## 本機執行
 
-## 🛠️ 本地執行與開發指南
+需求：Python 3.10 以上。
 
-若您想在本機運行此專案：
-
-### 1. 安裝環境與依賴
-確保您的本機已安裝 Python 3.8+，並在專案目錄下執行：
-```bash
-pip install -r requirements.txt
-```
-
-### 2. 啟動 Streamlit 服務
-在專案根目錄下執行：
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 streamlit run app.py
 ```
-啟動後，瀏覽器將會自動開啟 `http://localhost:8501`。
 
----
+啟動後開啟終端顯示的本機網址，通常是 `http://localhost:8501`。
 
-## 🚀 Hugging Face Spaces 部署步驟
+## 測試
 
-要在 Hugging Face 上部署本系統，請遵循以下步驟：
+```powershell
+python -m unittest discover -s tests -v
+```
 
-1. **註冊/登入 Hugging Face**。
-2. 點擊右上角個人頭像，選擇 **"New Space"**。
-3. 設定您的 Space 名稱（例如：`utaipei-credit-checker`）。
-4. **SDK 選擇**：選擇 **Streamlit**。
-5. **Space License**：可選擇 `MIT`。
-6. 點擊 **"Create Space"**。
-7. 將本專案的所有檔案（包括此 `README.md`, `app.py`, `scraper.py`, `pdf_parser.py`, `credit_engine.py`, `handbook_rules.py`, `requirements.txt` 及 `student_transcript.pdf`）上傳至您的 Hugging Face Space 儲存庫：
-   - 您可以使用 Git 命令推送：
-     ```bash
-     git clone https://huggingface.co/spaces/您的用戶名/您的Space名稱
-     # 將本專案的檔案複製進去
-     git add .
-     git commit -m "Deploy UTaipei Credit Checker with Premium UI"
-     git push
-     ```
-   - 或是直接透過 Hugging Face 的 Web 介面點擊 **"Files and versions" -> "Add file" -> "Upload files"** 上傳檔案。
-8. 檔案上傳完成後，Hugging Face 將會自動偵測 `README.md` 中的元數據 (Metadata) 並於 1-2 分鐘內自動建立、編譯、安裝依賴，並一鍵上線您的專案！
+測試涵蓋三個手冊年度隔離、課名與學分嚴格配對、科系別名範圍、含實驗課程、年度增刪、替代必修、成績狀態、非 PDF 防護、課表解析，以及分類前後總學分守恆。
 
----
+## 隱私與安全
 
-## 🔒 隱私與安全承諾
+- 建議使用「上傳 PDF」模式。上傳內容只保存在目前 Streamlit 工作階段記憶體中。
+- 即時抓取只在處理期間使用唯一暫存檔，讀回記憶體後立即刪除；不會留下學生 PDF 或寫入固定的 `student_transcript.pdf`。
+- 校務帳密不會寫入專案檔案、規則檔或匯出檔。
+- 請勿將真實成績單、匯出 CSV、`.env` 或 `.streamlit/secrets.toml` 提交到 Git；`.gitignore` 已包含這些規則。
+- 管理員功能不再內建密碼。若要啟用，請設定環境變數或 Streamlit secret：`UTAIPEI_ADMIN_PASSWORD`。
 
-- **唯讀存取**：爬蟲完全基於 `requests` 模擬登入，不包含任何資料庫寫入或表單提交修改操作。
-- **無密碼儲存**：本系統為無伺服器狀態（Stateless），絕對不會在任何伺服器或 Hugging Face 雲端紀錄或儲存您的帳號密碼。
+## 更新畢業規則
 
----
-*北市大理學院大一至大四學術審查輔助軟體 - 祝您順利畢業！🎓*
+主要門檻與課程清單位於 `rules_config.json`：
+
+- `_meta`：結構版本、預設手冊年度與配對政策。
+- `shared`：三個年度共用的校共同、明示安全別名、自由選修與體育設定。
+- `handbooks.112`、`handbooks.113`、`handbooks.114`：已建置逐課規則；111、115 的門檻規劃與 PDF 頁碼引用由 `policy_audit.py` 提供，逐課結果保持人工複核。
+
+雙主修校級規則來源：[臺北市立大學雙主修規定 PDF](https://reg.utaipei.edu.tw/var/file/31/1031/img/926/316980591.pdf)；資科系專題／認證門檻來源：[資科系規則 PDF](https://cs.utaipei.edu.tw/var/file/81/1081/img/1416/276427143.pdf)。
+
+修改流程：
+
+1. 取得校方最新正式規章並逐項核對。
+2. 先備份 `rules_config.json`。
+3. 在對應 `handbooks.<學年度>` 節點修改來源、門檻與正式課程清單；不要用全域模糊別名合併不同科系的同名或近似課程。
+4. 若成績單只有可靠的格式差異，才在指定學系範圍加入明示別名，並保留 I／II、一／二、上／下、實驗與含實驗等課程身分資訊。
+5. 執行完整測試。
+6. 使用一份去識別化測試成績單人工核對分類結果。
+7. 重新啟動 Streamlit；規則在程式載入時讀取。
+
+## 專案結構
+
+- `app.py`：應用程式入口與整體流程。
+- `sidebar.py`：上傳、登入、身分與領域設定。
+- `pdf_parser.py`：成績單 PDF 解析及課程狀態建立。
+- `scraper.py`：校務系統登入、成績單與課表抓取。
+- `schedule_parser.py`：課表 HTML 解析。
+- `credit_engine.py`：課程分類與畢業門檻判定。
+- `handbook_rules.py`：規則載入、課名標準化與門檻介面。
+- `policy_audit.py`：cohort／系所門檻、雙主修資格、人工證據與來源引用。
+- `audit_export.py`：含公式注入防護的 CSV／JSON 稽核匯出。
+- `report_renderer.py`：審查結果、明細與匯出畫面。
+- `ui_components.py`：共用視覺元件與響應式樣式。
+- `schedule_planner.py`：模擬排課。
+- `rules_config.json`：可維護的規則資料。
+- `tests/`：不依賴真實個資的自動測試。
+
+## 已知限制
+
+- PDF 解析依賴北市大目前的成績單欄位位置；校方版面更新後可能需要調整欄位座標。
+- 成績單目前沒有穩定提供開課系所與課號；完全同名、同學分但分屬不同系所，或抵免／採認個案，仍須由系所人工確認。
+- 系統不使用子字串、編輯距離或關鍵字來猜測系所課程；沒有可靠學分的課表列也不會自動假設為 2 學分。
+- 物化、資科、數學目前以已核對門檻規劃為主；成績單缺少課號／開課系所、人工核准或資科專題／認證證據時，系統不應宣稱已完成正式審查。
+
+## 部署
+
+Hugging Face Spaces 可讀取本檔案最上方的 Streamlit metadata。部署前請確認：
+
+- 未包含真實學生 PDF、CSV 或帳密。
+- `rules_config.json` 已經人工核對。
+- `python -m unittest discover -s tests -v` 全數通過。
+- 即時抓取功能在部署地區可連線至校務系統；若不可用，使用者仍可上傳 PDF。
