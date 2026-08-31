@@ -37,6 +37,96 @@ _EVIDENCE_SOURCE_NAMES = {
 }
 
 
+# APC double-major target requirements are represented independently from the
+# legacy aggregate ``basic_core``/``other_req`` values.  The IDs are generated
+# from the selected admission cohort and target track, so a decision recorded
+# for one handbook can never silently be applied to another handbook.
+_APC_SPLIT_BASE = (
+    ("普通物理學(一)", 3.0, "physics_1"),
+    ("普通物理實驗(一)", 1.0, "physics_lab_1"),
+    ("普通化學(一)", 3.0, "chemistry_1"),
+    ("普通化學實驗(一)", 1.0, "chemistry_lab_1"),
+    ("普通物理學(二)", 3.0, "physics_2"),
+    ("普通物理實驗(二)", 1.0, "physics_lab_2"),
+    ("普通化學(二)", 3.0, "chemistry_2"),
+    ("普通化學實驗(二)", 1.0, "chemistry_lab_2"),
+)
+
+_APC_115_BASE = {
+    "物理組": (
+        ("普通物理學(一)", 3.0, "physics_1"),
+        ("普通化學(一)", 3.0, "chemistry_1"),
+        ("普通物理實驗(一)", 1.0, "physics_lab_1"),
+        ("微積分(一)", 3.0, "calculus_1"),
+        ("普通物理學(二)", 3.0, "physics_2"),
+        ("普通化學(二)", 3.0, "chemistry_2"),
+        ("普通物理實驗(二)", 1.0, "physics_lab_2"),
+        ("微積分(二)", 3.0, "calculus_2"),
+    ),
+    "化學組": (
+        ("普通物理學(一)", 3.0, "physics_1"),
+        ("普通化學(一)", 3.0, "chemistry_1"),
+        ("普通化學實驗(一)", 1.0, "chemistry_lab_1"),
+        ("微積分(一)", 3.0, "calculus_1"),
+        ("普通物理學(二)", 3.0, "physics_2"),
+        ("普通化學(二)", 3.0, "chemistry_2"),
+        ("普通化學實驗(二)", 1.0, "chemistry_lab_2"),
+        ("微積分(二)", 3.0, "calculus_2"),
+    ),
+}
+
+# These are the 115 handbook's track-specific "other required" catalogues.
+# They are intentionally catalogues, not aliases: a source course still needs
+# an exact title/credit match or an auditable department-approved decision.
+_APC_115_OTHER_CATALOGS = {
+    "物理組": {
+        "應用科學專題(一)": 1,
+        "應用科學專題(二)": 1,
+        "物理數學(一)": 3,
+        "電磁學(一)": 3,
+        "電磁學實驗": 1,
+        "力學(一)": 2,
+        "電子學(一)": 3,
+        "電子學(二)": 3,
+        "電子學實驗(一)": 1,
+        "物理數學(二)": 3,
+        "電磁學(二)": 3,
+        "光學": 3,
+        "光學實驗": 1,
+        "半導體物理": 3,
+        "光電子學": 3,
+        "近代物理": 3,
+        "近代物理實驗": 1,
+        "電子學實驗(二)": 1,
+        "固態物理(一)": 3,
+        "固態物理(二)": 3,
+    },
+    "化學組": {
+        "應用科學專題(一)": 1,
+        "應用科學專題(二)": 1,
+        "普通化學實驗(一)": 1,
+        "普通化學實驗(二)": 1,
+        "分析化學(一)": 3,
+        "有機化學 (一)": 3,
+        "有機化學實驗 (一)": 1,
+        "化學數學(一)": 2,
+        "物理化學 (一)": 3,
+        "物理化學實驗 (一)": 1,
+        "有機化學 (二)": 3,
+        "有機化學實驗 (二)": 1,
+        "物理化學 (二)": 3,
+        "物理化學實驗 (二)": 1,
+        "材料科學": 3,
+        "無機化學(一)": 3,
+        "儀器分析(一)": 3,
+        "物理化學(三)": 3,
+        "生物化學": 3,
+        "無機化學(二)": 3,
+        "儀器分析實驗": 1,
+    },
+}
+
+
 def _load_config():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as handle:
@@ -209,6 +299,12 @@ def get_rule_sets(year=None):
     }
     earth_life_major["domain_electives"]["common_electives"] = deepcopy(earth.get("common_electives", {}))
 
+    apc_target_requirements = {}
+    for target_track in ("物理組", "化學組"):
+        for target_type in ("雙主修", "輔系"):
+            apc_target_requirements[f"{target_track}:{target_type}"] = get_apc_target_requirements(
+                handbook["academic_year"], target_track, target_type
+            )
     return {
         "academic_year": handbook["academic_year"],
         "university_common": university_common,
@@ -217,7 +313,137 @@ def get_rule_sets(year=None):
         "cs_rules": deepcopy(handbook["cs_rules"]),
         "course_aliases": deepcopy(handbook.get("course_aliases", {})),
         "document_warnings": deepcopy(handbook.get("_meta", {}).get("document_warnings", [])),
+        "apc_target_requirements": apc_target_requirements,
     }
+
+
+def _apc_target_slug(value):
+    """Return a stable, ASCII-like component for an APC target ID."""
+
+    mapping = {
+        "物理組": "physics",
+        "電子物理": "physics",
+        "化學組": "chemistry",
+        "應用化學": "chemistry",
+        "普通物理學(一)": "physics_1",
+        "普通物理學(二)": "physics_2",
+        "普通物理實驗(一)": "physics_lab_1",
+        "普通物理實驗(二)": "physics_lab_2",
+        "普通化學(一)": "chemistry_1",
+        "普通化學(二)": "chemistry_2",
+        "普通化學實驗(一)": "chemistry_lab_1",
+        "普通化學實驗(二)": "chemistry_lab_2",
+        "微積分(一)": "calculus_1",
+        "微積分(二)": "calculus_2",
+        "其餘必修課程": "other_required",
+    }
+    if value in mapping:
+        return mapping[value]
+    text = re.sub(r"[^0-9A-Za-z]+", "_", str(value or "").strip()).strip("_").lower()
+    return text or "requirement"
+
+
+def apc_target_requirement_id(cohort, track, requirement_name, program_type="雙主修"):
+    """Build the stable ID used by the source-attempt binding workflow."""
+
+    selected = normalize_handbook_year(cohort)
+    track_slug = _apc_target_slug(track)
+    program_slug = "dm" if program_type == "雙主修" else "minor" if program_type == "輔系" else _apc_target_slug(program_type)
+    requirement_slug = _apc_target_slug(requirement_name)
+    return f"apc.{program_slug}.{selected}.{track_slug}.{requirement_slug}"
+
+
+def get_apc_target_requirements(cohort, track="化學組", program_type="雙主修"):
+    """Return auditable APC target rows for one cohort and track.
+
+    The legacy engine's aggregate quota fields remain available for backward
+    compatibility.  This API is the source of truth for new course-level
+    decisions: every course row and the remaining named/generic quota have a
+    cohort-scoped ID, while the catalogue stays exact-title/exact-credit.
+    """
+
+    selected = normalize_handbook_year(cohort)
+    track_text = str(track or "化學組").strip()
+    if track_text in {"電子物理", "物理", "物理組", "物化系物理組"}:
+        selected_track = "物理組"
+    elif track_text in {"應用化學", "化學", "化學組", "物化系化學組"}:
+        selected_track = "化學組"
+    else:
+        raise ValueError(f"不支援的物化系組別：{track}")
+    if program_type not in {"雙主修", "輔系"}:
+        raise ValueError(f"不支援的物化系修讀身分：{program_type}")
+
+    handbook = get_handbook_config(selected)
+    apc = handbook.get("apc_rules", {})
+    program_key = "double_major" if program_type == "雙主修" else "minor"
+    program_rules = apc.get(program_key, {})
+    if selected == "115":
+        base_rows = _APC_115_BASE[selected_track]
+        catalogue = _APC_115_OTHER_CATALOGS[selected_track]
+        # The 115 handbook says the named base list is 20 credits for both
+        # minor/double-major tables; only the double-major table adds the
+        # remaining 20-credit other-required quota.
+        other_required = 20.0 if program_type == "雙主修" else 0.0
+        evidence = "VERIFIED" if selected_track == "化學組" else "MANUAL_REVIEW"
+        warnings = [] if evidence == "VERIFIED" else ["115 電子物理組目標逐課清單仍需系所人工核對。"]
+    else:
+        base_rows = _APC_SPLIT_BASE
+        catalogue = dict(apc.get("shared_other_required", {}))
+        catalogue.update(apc.get("divisions", {}).get(selected_track, {}).get("compulsory", {}))
+        other_required = float(program_rules.get("other_req", 0.0) or 0.0)
+        evidence = "VERIFIED"
+        warnings = []
+
+    requirements = []
+    for name, credits, slug in base_rows:
+        requirements.append(
+            {
+                "id": apc_target_requirement_id(selected, selected_track, name, program_type),
+                "requirement_id": apc_target_requirement_id(selected, selected_track, name, program_type),
+                "name": name,
+                "credits": float(credits),
+                "bucket": "base",
+                "kind": "course",
+                "evidence": evidence,
+                "allow_combined_lab_source": False,
+            }
+        )
+    quota_name = f"{selected_track}其餘必修課程"
+    quota_id = apc_target_requirement_id(selected, selected_track, "其餘必修課程", program_type)
+    requirements.append(
+        {
+            "id": quota_id,
+            "requirement_id": quota_id,
+            "name": quota_name,
+            "credits": float(other_required),
+            "bucket": "other_required",
+            "kind": "quota",
+            "evidence": evidence,
+            "catalog": [
+                {"name": str(name), "credits": float(credits)} for name, credits in catalogue.items()
+            ],
+        }
+    )
+    return {
+        "cohort": selected,
+        "program": "物化",
+        "track": selected_track,
+        "program_type": program_type,
+        "total_required": float(program_rules.get("total_req", 40.0 if program_type == "雙主修" else 20.0)),
+        "base_required": sum(row["credits"] for row in requirements if row["bucket"] == "base"),
+        "other_required": float(other_required),
+        "requirements": requirements,
+        "course_requirements": {
+            row["name"]: row["credits"] for row in requirements if row["kind"] == "course"
+        },
+        "other_required_catalog": catalogue,
+        "evidence": evidence,
+        "warnings": warnings,
+    }
+
+
+get_target_requirements = get_apc_target_requirements
+get_apc_requirement_catalog = get_apc_target_requirements
 
 
 def get_credit_requirements(program="單主修", target_dept="", handbook_year=None):

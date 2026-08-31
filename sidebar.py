@@ -157,13 +157,13 @@ def _render_rules_meta_card(rules_meta):
     verification = escape(str(rules_meta.get("verification", "尚未標示")))
     st.sidebar.markdown(
         f"""
-        <div style="background: rgba(79,172,254,0.12); border:1px solid rgba(79,172,254,0.3); border-radius:10px; padding:10px 14px; margin-bottom:8px;">
-            <div style="font-size:11px; color: var(--text-color, #94a3b8); opacity: 0.8; margin-bottom:2px;">📋 目前規則版本</div>
-            <div style="font-size:15px; font-weight:700; color:#4facfe;">{rules_version} 學年度手冊</div>
-            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">最後更新：{rules_updated}</div>
-            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">來源：{source_file}</div>
-            <div style="font-size:11px; color: var(--text-color, #64748b); opacity: 0.7;">核對：{verification}</div>
-        </div>
+        <section class="sidebar-rules-card" aria-label="目前規則版本">
+            <div class="sidebar-eyebrow">📋 目前規則版本</div>
+            <div class="sidebar-rules-version">{rules_version} 學年度手冊</div>
+            <div class="sidebar-meta">最後更新：{rules_updated}</div>
+            <div class="sidebar-meta">來源：{source_file}</div>
+            <div class="sidebar-meta">核對：{verification}</div>
+        </section>
         """,
         unsafe_allow_html=True,
     )

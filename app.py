@@ -6,9 +6,11 @@ import streamlit as st
 
 from credit_engine import evaluate_graduation
 from pdf_parser import parse_transcript_pdf
+from pwa_metadata import inject_pwa_metadata
 from report_renderer import render_report
 from schedule_parser import merge_schedule_courses
 from sidebar import render_sidebar
+from equivalency_ui import render_equivalency_workflow
 from ui_components import (
     collapse_sidebar_if_needed,
     render_header_card,
@@ -40,6 +42,7 @@ def _evaluation_config(sidebar_state, courses=None, parser_diagnostics=None):
         "cs_certification_a": sidebar_state.get("cs_certification_a"),
         "cs_certification_b": sidebar_state.get("cs_certification_b"),
         "cs_alternative_course": sidebar_state.get("cs_alternative_course"),
+        "equivalency_decisions": st.session_state.get("equivalency_decisions", []),
         "courses": courses or [],
     }
     if parser_diagnostics is not None:
@@ -49,7 +52,8 @@ def _evaluation_config(sidebar_state, courses=None, parser_diagnostics=None):
 
 def main():
     setup_page()
-    render_header_card("北市大畢業學分審查系統", "🎓 快速檢查你的畢業進度")
+    inject_pwa_metadata()
+    render_header_card("北市大畢業學分審查系統", "🎓 快速檢查你的畢業進度", landmark_id="main-content")
 
     sidebar_state = render_sidebar()
     collapse_sidebar_if_needed()
@@ -64,6 +68,11 @@ def main():
         render_landing_message()
         try:
             report = evaluate_graduation([], _evaluation_config(sidebar_state))
+            render_equivalency_workflow(
+                [],
+                report,
+                _evaluation_config(sidebar_state),
+            )
             render_report(
                 {"name": "", "student_id": "", "department": "", "admission_year": "", "print_date": ""},
                 [],
@@ -105,6 +114,11 @@ def main():
             st.session_state.pop("cohort_mismatch_confirmation", None)
         report = evaluate_graduation(
             courses,
+            _evaluation_config(sidebar_state, courses, parser_diagnostics),
+        )
+        render_equivalency_workflow(
+            courses,
+            report,
             _evaluation_config(sidebar_state, courses, parser_diagnostics),
         )
         render_report(

@@ -9,6 +9,7 @@ course tables are not encoded in the application.
 from __future__ import annotations
 
 import re
+import math
 from typing import Any
 
 
@@ -582,6 +583,8 @@ def _shared_evidence_state(shared_credits: Any, shared_approved: bool | None, ex
         amount = float(shared_credits)
     except (TypeError, ValueError):
         return SHARED_EVIDENCE_INVALID
+    if not math.isfinite(amount):
+        return SHARED_EVIDENCE_INVALID
     if abs(amount) <= 1e-6:
         # A caller that supplied a numeric zero has answered the question;
         # the UI uses ``None`` for its unanswered option.
@@ -598,12 +601,15 @@ def assess_double_major_eligibility(
     application_status: Any = None,
     secondary_credits: Any = None,
     shared_credits: Any = None,
+    shared_course_credits: Any = None,
+    shared_reuse_credits: Any = None,
     shared_approved: bool | None = None,
     shared_evidence_state: Any = None,
     department_approved: bool | None = None,
     interrupted: bool = False,
     leave_history: Any = None,
     final_normal_year: int = 4,
+    equivalency_bound: bool = False,
 ) -> dict[str, Any]:
     """Assess the general double-major rule using four-state outcomes.
 
@@ -672,11 +678,23 @@ def assess_double_major_eligibility(
     else:
         reasons.append(f"雙主修已修學分為 {secondary:g}，達至少40學分。")
 
+    # ``shared_course_credits`` is an old aggregate-only spelling.  It is
+    # accepted for compatibility, but it remains subject to the same
+    # source/target binding gate and can never create course-level credit.
+    raw_shared_credits = shared_credits
+    if raw_shared_credits is None:
+        raw_shared_credits = shared_course_credits
+    if raw_shared_credits is None:
+        raw_shared_credits = shared_reuse_credits
     try:
-        shared = None if shared_credits is None or str(shared_credits).strip() == "" else float(shared_credits)
+        shared = None if raw_shared_credits is None or str(raw_shared_credits).strip() == "" else float(raw_shared_credits)
     except (TypeError, ValueError):
         shared = None
-    shared_state = _shared_evidence_state(shared_credits, shared_approved, shared_evidence_state)
+    if shared is not None and not math.isfinite(shared):
+        shared = None
+        shared_state = SHARED_EVIDENCE_INVALID
+    else:
+        shared_state = _shared_evidence_state(raw_shared_credits, shared_approved, shared_evidence_state)
     if shared is None and shared_state == SHARED_EVIDENCE_CONFIRMED_ZERO:
         # Explicit zero evidence is sufficient even when integrations omit a
         # redundant numeric field; unanswered remains a distinct state.
@@ -688,6 +706,9 @@ def assess_double_major_eligibility(
     elif shared_state == SHARED_EVIDENCE_INVALID:
         unsatisfied = True
         reasons.append("共同修課學分／證據格式無法辨識。")
+    elif shared_state == SHARED_EVIDENCE_CONFIRMED_ZERO and shared > 1e-6:
+        unknown = True
+        reasons.append("共同修課證據標示為0，但數字欄位仍有正值；需人工確認。")
     elif shared is None:
         unknown = True
         reasons.append("缺少可核對的共同修課學分。")
@@ -704,6 +725,13 @@ def assess_double_major_eligibility(
         if shared_approved is False and shared_evidence_state not in {"approved", "已核准"}:
             unknown = True
             reasons.append("共同修課證據彼此矛盾，需人工確認。")
+        elif shared > 1e-6 and not equivalency_bound:
+            # The old UI stored only an aggregate number.  It has no source
+            # attempt, target requirement, authority, or evidence binding, so
+            # it cannot alter the eligibility amount.  The new engine passes
+            # ``equivalency_bound=True`` only after the row-level audit passes.
+            unknown = True
+            reasons.append("舊版 aggregate 共同修課未綁定來源與目標；不計入雙主修有效學分，需逐筆人工確認。")
         else:
             shared_reuse_allowance = max(0.0, shared)
             reasons.append("共同修課在6學分內且已有核准證據；共享額度將另列稽核。")
@@ -716,6 +744,7 @@ def assess_double_major_eligibility(
     elif department_approved is None:
         warnings.append("系所可訂更嚴格規定；校級規則不能取代系所最終認定。")
 
+    legacy_unbound = bool(shared is not None and shared > 1e-6 and not equivalency_bound)
     state = UNSATISFIED if unsatisfied else UNKNOWN if unknown else SATISFIED
     return {
         "status": state,
@@ -730,10 +759,13 @@ def assess_double_major_eligibility(
         "shared_credits": shared,
         "shared_credit_state": shared_state,
         "shared_reuse_allowance": shared_reuse_allowance,
+        "equivalency_bound": bool(equivalency_bound),
+        "legacy_unbound": legacy_unbound,
+        "shared_course_credits": shared,
         "shared_evidence": {
             "state": shared_state,
             "raw_credits": shared,
-            "approved": shared_approved is True or shared_state == SHARED_EVIDENCE_CONFIRMED_ZERO,
+            "approved": (shared_approved is True or shared_state == SHARED_EVIDENCE_CONFIRMED_ZERO) and not legacy_unbound,
             "reuse_allowance": shared_reuse_allowance,
         },
         "citations": [_citation(DOUBLE_MAJOR_RULE_URL, "official rule", "校級雙主修申請與40學分規定", DOUBLE_MAJOR_RULE_URL)],
@@ -766,7 +798,13 @@ def build_policy_audit(config: dict[str, Any] | None = None, report: dict[str, A
         application_semester=config.get("application_semester"),
         application_status=config.get("application_status"),
         secondary_credits=config.get("secondary_credits", (report or {}).get("summary", {}).get("target_completed") if report else None),
-        shared_credits=config.get("shared_credits"),
+        shared_credits=(
+            config.get("shared_credits")
+            if config.get("shared_credits") is not None
+            else config.get("shared_course_credits")
+        ),
+        shared_course_credits=config.get("shared_course_credits"),
+        shared_reuse_credits=config.get("shared_reuse_credits"),
         shared_approved=config.get("shared_approved"),
         shared_evidence_state=config.get("shared_evidence_state"),
         department_approved=config.get("department_approved"),

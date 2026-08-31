@@ -75,6 +75,65 @@ def _normalize_shared_reuse(value: Any) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_equivalency(value: Any) -> dict[str, Any]:
+    """Normalize source-attempt bindings without dropping audit fields."""
+
+    normalized = dict(value) if isinstance(value, Mapping) else {}
+    for key, default in {
+        "status": "NOT_APPLICABLE",
+        "state": "NOT_APPLICABLE",
+        "decisions": [],
+        "approved_mappings": [],
+        "candidates": [],
+        "validation_codes": [],
+        "warnings": [],
+        "approved_credits": 0.0,
+        "approved_shared_reuse_credits": 0.0,
+        "approved_exclusive_credits": 0.0,
+        "legacy_unbound": False,
+    }.items():
+        normalized.setdefault(key, default)
+    for key in ("decisions", "approved_mappings", "candidates"):
+        rows = normalized.get(key)
+        if isinstance(rows, (list, tuple)):
+            normalized[key] = [dict(row) if isinstance(row, Mapping) else {"value": row} for row in rows]
+        else:
+            normalized[key] = []
+    return normalized
+
+
+def flatten_equivalency_rows(audit: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Return one export row per proposed/approved/rejected binding."""
+
+    audit = _normalize_equivalency(audit)
+    rows = []
+    for item in audit.get("decisions", []):
+        row = dict(item) if isinstance(item, Mapping) else {"value": item}
+        rows.append(
+            {
+                "source_attempt_id": row.get("source_attempt_id", ""),
+                "source_course_name": row.get("source_course_name", ""),
+                "source_credit": row.get("source_credit", 0.0),
+                "source_completed_credits": row.get("source_completed_credits", 0.0),
+                "target_requirement_id": row.get("target_requirement_id", ""),
+                "target_requirement_name": row.get("target_requirement_name", ""),
+                "target_credits": row.get("target_credits", 0.0),
+                "decision": row.get("decision", row.get("state", "")),
+                "authority": row.get("authority", ""),
+                "evidence_reference": row.get("evidence_reference", ""),
+                "approved_credits": row.get("approved_credits", 0.0),
+                "allocation_type": row.get("allocation_type", ""),
+                "counts": bool(row.get("counts", False)),
+                "validation_codes": row.get("validation_codes", []),
+                "reasons": row.get("reasons", []),
+            }
+        )
+    return rows
+
+
+flatten_source_target_rows = flatten_equivalency_rows
+
+
 def flatten_allocation_rows(report: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     """Flatten every allocated report bucket into deterministic audit rows.
 
@@ -216,6 +275,9 @@ def build_audit_payload(audit: Mapping[str, Any] | None = None) -> dict[str, Any
     if not isinstance(allocation_rows, (list, tuple)):
         allocation_rows = []
     shared_reuse = _normalize_shared_reuse(source.get("shared_reuse", report.get("shared_reuse", {})))
+    equivalency = _normalize_equivalency(
+        source.get("equivalency", source.get("equivalency_audit", report.get("equivalency", report.get("equivalency_audit", {}))))
+    )
     credit_audit = source.get("credit_audit", report.get("audit", {}))
     if not isinstance(credit_audit, Mapping):
         credit_audit = {"value": credit_audit}
@@ -245,6 +307,7 @@ def build_audit_payload(audit: Mapping[str, Any] | None = None) -> dict[str, Any
         "citations": [dict(item) if isinstance(item, Mapping) else {"citation": str(item)} for item in citations],
         "allocation_rows": [dict(item) if isinstance(item, Mapping) else {"value": item} for item in allocation_rows],
         "shared_reuse": dict(shared_reuse),
+        "equivalency": dict(equivalency),
         "credit_audit": dict(credit_audit),
     }
 
@@ -262,6 +325,7 @@ def audit_csv_bytes(audit: Mapping[str, Any] | None = None) -> bytes:
     application = payload["application"]
     eligibility = payload["eligibility"]
     shared_reuse = payload["shared_reuse"]
+    equivalency = payload["equivalency"]
     row = {
         "cohort": payload["cohort"],
         "primary_program": payload["primary_program"],
@@ -288,6 +352,12 @@ def audit_csv_bytes(audit: Mapping[str, Any] | None = None) -> bytes:
         "citations": _json_value(payload["citations"]),
         "allocation_rows": _json_value(payload["allocation_rows"]),
         "shared_reuse": _json_value(payload["shared_reuse"]),
+        "equivalency_status": equivalency.get("status", ""),
+        "equivalency_decisions": _json_value(equivalency.get("decisions", [])),
+        "equivalency_approved_mappings": _json_value(equivalency.get("approved_mappings", [])),
+        "equivalency_validation_codes": _json_value(equivalency.get("validation_codes", [])),
+        "equivalency_warnings": _json_value(equivalency.get("warnings", [])),
+        "equivalency_legacy_unbound": bool(equivalency.get("legacy_unbound", False)),
         "credit_audit": _json_value(payload["credit_audit"]),
     }
     output = io.StringIO(newline="")

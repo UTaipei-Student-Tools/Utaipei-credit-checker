@@ -6,7 +6,18 @@ Graduation Credit Evaluation Engine — v2
 import re
 from copy import deepcopy
 
-from handbook_rules import get_credit_requirements, get_rule_sets, get_rules_meta, normalize_course_name
+from handbook_rules import (
+    get_apc_target_requirements,
+    get_credit_requirements,
+    get_rule_sets,
+    get_rules_meta,
+    normalize_course_name,
+)
+from equivalency_audit import (
+    apply_equivalency_audit_to_report,
+    audit_equivalency_decisions,
+    source_attempt_id,
+)
 from policy_audit import (
     GRADUATION_UNKNOWN,
     GRADUATION_NOT_SATISFIED,
@@ -250,70 +261,30 @@ def _iter_primary_allocation_courses(report):
 
 
 def _build_shared_reuse_allocations(report, allowance):
-    """Allocate an approved shared allowance without changing raw totals."""
+    """Keep the legacy helper inert; aggregate allowances are not bindings.
+
+    Older integrations may still call this private compatibility helper.  It
+    intentionally returns no rows and no effective credits.  New callers must
+    use :func:`equivalency_audit.audit_equivalency_decisions` with an explicit
+    source attempt and target requirement.
+    """
 
     try:
         allowance_value = max(0.0, float(allowance or 0.0))
     except (TypeError, ValueError):
         allowance_value = 0.0
-    remaining = allowance_value
-    candidates = []
-    for bucket, course in _iter_primary_allocation_courses(report):
-        completed, in_progress = _earned_and_in_progress(course)
-        if completed + in_progress <= 1e-6:
-            continue
-        candidates.append((bucket, course, completed, in_progress))
-    candidates.sort(
-        key=lambda item: (
-            0 if item[2] > 1e-6 else 1,
-            item[0],
-            str(item[1].get("name", "")),
-            str(item[1].get("attempt_id") or item[1].get("_origin_id") or ""),
-        )
-    )
-    rows = []
-    for bucket, course, completed, in_progress in candidates:
-        if remaining <= 1e-6:
-            break
-        reused_completed = min(completed, remaining)
-        remaining -= reused_completed
-        reused_ip = min(in_progress, remaining)
-        remaining -= reused_ip
-        reused = reused_completed + reused_ip
-        if reused <= 1e-6:
-            continue
-        attempt_id = course.get("attempt_id") or course.get("_origin_id") or _stable_attempt_id(course)
-        rows.append(
-            {
-                "allocation_id": f"shared:{attempt_id}|{bucket}|{reused_completed:.6f}|{reused_ip:.6f}",
-                "attempt_id": attempt_id,
-                "source_bucket": bucket,
-                "course_name": course.get("name", ""),
-                "reused_completed_credits": reused_completed,
-                "reused_ip_credits": reused_ip,
-                "reused_credits": reused,
-                "approval_scope": _SHARED_REUSE_APPROVAL_SCOPE,
-                "allocation_type": _SHARED_REUSE_ALLOCATION_TYPE,
-                "selection_basis": _SHARED_REUSE_SELECTION_BASIS,
-                "course_identity_status": _SHARED_REUSE_COURSE_IDENTITY_STATUS,
-                "official_course_identity_note": _SHARED_REUSE_OFFICIAL_IDENTITY_NOTE,
-                "allocation_note": _SHARED_REUSE_OFFICIAL_IDENTITY_NOTE,
-            }
-        )
-    completed_total = sum(row["reused_completed_credits"] for row in rows)
-    ip_total = sum(row["reused_ip_credits"] for row in rows)
     return {
         "allowance": allowance_value,
-        "completed": completed_total,
-        "ip": ip_total,
-        "total": completed_total + ip_total,
-        "rows": rows,
-        "unallocated_allowance": max(0.0, remaining),
-        "approval_scope": _SHARED_REUSE_APPROVAL_SCOPE,
-        "allocation_type": _SHARED_REUSE_ALLOCATION_TYPE,
-        "selection_basis": _SHARED_REUSE_SELECTION_BASIS,
-        "course_identity_status": _SHARED_REUSE_COURSE_IDENTITY_STATUS,
-        "official_course_identity_note": _SHARED_REUSE_OFFICIAL_IDENTITY_NOTE,
+        "completed": 0.0,
+        "ip": 0.0,
+        "total": 0.0,
+        "rows": [],
+        "unallocated_allowance": allowance_value,
+        "approval_scope": "legacy_unbound",
+        "allocation_type": "not_counted",
+        "selection_basis": "legacy_compatibility_only",
+        "course_identity_status": "not_bound",
+        "official_course_identity_note": "舊版 aggregate 共同修課欄位未綁定來源與目標，不計入有效進度。",
     }
 
 
@@ -616,6 +587,10 @@ def _empty_threshold_report(plan, requirements, config, target_plan=None, target
             "effective_total_completed": 0.0,
             "effective_total_ip": 0.0,
             "shared_reuse_credits": 0.0,
+            "equivalency_courses": [],
+            "equivalency_completed": 0.0,
+            "equivalency_shared_completed": 0.0,
+            "equivalency_exclusive_completed": 0.0,
         },
         "pe": {"courses": [], "semesters_completed": 0, "semesters_required": requirements.get("pe_semesters", 4), "semesters_ip": 0},
         "free": {"completed": 0.0, "ip": 0.0, "courses": [], "science_college_cross_credits": 0.0, "science_college_cross_courses": []},
@@ -631,6 +606,63 @@ def _target_program_config(program, track):
     if program == "物化":
         return "物化系物理組" if track == "電子物理" else "物化系化學組"
     return ""
+
+
+def _apc_target_plan_for_engine(handbook_year, target_dept, program):
+    """Load the cohort-scoped APC target rows used by exact allocation.
+
+    The old ``apc_rules.basic_core`` table is retained for compatibility, but
+    the 115 chemistry/physics target lists differ by track.  This helper keeps
+    that distinction at the target boundary and gives every row a stable
+    requirement ID for the equivalency audit.
+    """
+
+    if program not in {"雙主修", "輔系"} or "物化系" not in str(target_dept or ""):
+        return None
+    track = "物理組" if "物理" in str(target_dept) else "化學組"
+    try:
+        return get_apc_target_requirements(handbook_year, track, program)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _target_course_rules(target_plan):
+    if not isinstance(target_plan, dict):
+        return {}
+    return {
+        str(row.get("name")): float(row.get("credits", 0.0) or 0.0)
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("kind", "course") == "course" and row.get("name")
+    }
+
+
+def _annotate_target_requirements(report, target_plan):
+    """Attach stable IDs to exact target rows and missing rows."""
+
+    if not isinstance(target_plan, dict):
+        return
+    by_name = {
+        normalize_course_name(row.get("name")): row
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("name")
+    }
+    target = report.get("target", {})
+    for key in ("basic_core_courses", "compulsory_courses", "elective_courses"):
+        for course in target.get(key, []):
+            if not isinstance(course, dict):
+                continue
+            item = by_name.get(normalize_course_name(course.get("name") or course.get("raw_name")))
+            if item:
+                course["target_requirement_id"] = item.get("id", "")
+                course["target_requirement_name"] = item.get("name", "")
+    for key in ("basic_core_missing", "compulsory_missing", "elective_missing"):
+        for missing in target.get(key, []):
+            if not isinstance(missing, dict):
+                continue
+            item = by_name.get(normalize_course_name(missing.get("name")))
+            if item:
+                missing["target_requirement_id"] = item.get("id", "")
+                missing["target_requirement_name"] = item.get("name", "")
 
 
 def evaluate_cohort_plan(courses, config):
@@ -661,6 +693,12 @@ def evaluate_cohort_plan(courses, config):
         else:
             target_program, target_track = normalize_primary_program(target_program, cohort)
             target_plan = get_double_structure(cohort, target_program, target_track or config.get("target_track"))
+            if target_program == "物化":
+                target_plan["target_requirements"] = _apc_target_plan_for_engine(
+                    cohort,
+                    "物化系物理組" if target_track == "電子物理" else "物化系化學組",
+                    program_type,
+                )
             target_eligibility = assess_double_major_eligibility(
                 program_type=program_type,
                 admission_cohort=cohort,
@@ -669,6 +707,8 @@ def evaluate_cohort_plan(courses, config):
                 application_status=config.get("application_status"),
                 secondary_credits=config.get("secondary_credits"),
                 shared_credits=config.get("shared_credits"),
+                shared_course_credits=config.get("shared_course_credits"),
+                shared_reuse_credits=config.get("shared_reuse_credits"),
                 shared_approved=config.get("shared_approved"),
                 shared_evidence_state=config.get("shared_evidence_state"),
                 department_approved=config.get("department_approved"),
@@ -690,6 +730,10 @@ def evaluate_cohort_plan(courses, config):
         legacy["program"] = program_type
         if target_old:
             legacy["target_dept"] = target_old
+        if target_plan and target_plan.get("target_requirements"):
+            legacy["target_requirements"] = target_plan["target_requirements"]
+        legacy["equivalency_decisions"] = config.get("equivalency_decisions", [])
+        legacy["equivalency_context"] = config.get("equivalency_context", {})
         report = evaluate_graduation(courses, legacy)
         report["primary_plan"] = plan
         report["target_plan"] = target_plan
@@ -699,6 +743,9 @@ def evaluate_cohort_plan(courses, config):
         # that target total when applying the independent double-major rule;
         # do not retain the pre-transcript UNKNOWN produced above.
         if target_old and program_type == "雙主修":
+            bound_shared = float(
+                (report.get("equivalency", {}) or {}).get("approved_shared_reuse_credits", 0.0) or 0.0
+            )
             target_eligibility = assess_double_major_eligibility(
                 program_type=program_type,
                 admission_cohort=cohort,
@@ -708,9 +755,10 @@ def evaluate_cohort_plan(courses, config):
                 secondary_credits=report.get("target", {}).get(
                     "effective_total_completed", report.get("summary", {}).get("target_completed", 0.0)
                 ),
-                shared_credits=config.get("shared_credits"),
-                shared_approved=config.get("shared_approved"),
-                shared_evidence_state=config.get("shared_evidence_state"),
+                shared_credits=bound_shared,
+                shared_approved=True,
+                shared_evidence_state="approved" if bound_shared > 1e-6 else "confirmed_zero",
+                equivalency_bound=bound_shared > 1e-6,
                 department_approved=config.get("department_approved"),
                 interrupted=bool(config.get("interrupted")),
                 leave_history=config.get("leave_history"),
@@ -792,6 +840,9 @@ def evaluate_graduation(courses, config):
         raise ValueError(f"不支援的修課身分：{program}")
 
     requirements = get_credit_requirements(program, target_dept, rule_sets["academic_year"])
+    target_requirements = config.get("target_requirements")
+    if not isinstance(target_requirements, dict):
+        target_requirements = _apc_target_plan_for_engine(rule_sets["academic_year"], target_dept, program)
 
     report = {
         "handbook_year": rule_sets["academic_year"],
@@ -810,6 +861,7 @@ def evaluate_graduation(courses, config):
         "policy_warnings": [],
         "citations": [],
         "requirements": requirements,
+        "target_requirements": target_requirements,
         "detailed": True,
         "summary": {
             "total_completed": 0.0,
@@ -877,6 +929,10 @@ def evaluate_graduation(courses, config):
             "effective_total_completed": 0.0,
             "effective_total_ip": 0.0,
             "shared_reuse_credits": 0.0,
+            "equivalency_courses": [],
+            "equivalency_completed": 0.0,
+            "equivalency_shared_completed": 0.0,
+            "equivalency_exclusive_completed": 0.0,
         },
         "pe": {
             # 體育（每學期 0學分必修，共需修 4 學期）
@@ -989,7 +1045,7 @@ def evaluate_graduation(courses, config):
             div = "化學組" if "化學組" in target_dept else "物理組"
             program_key = "double_major" if program == "雙主修" else "minor"
             program_rules = apc_rules[program_key]
-            basic_core_rules = apc_rules["basic_core"]
+            basic_core_rules = _target_course_rules(target_requirements) or apc_rules["basic_core"]
 
             for name, req_cred in basic_core_rules.items():
                 matched_c = find_and_consume_course(courses, name, consumed, req_cred)
@@ -1003,9 +1059,16 @@ def evaluate_graduation(courses, config):
                 else:
                     report["target"]["basic_core_missing"].append({"name": name, "credit": req_cred})
 
-            other_req = float(program_rules["other_req"])
-            other_required_pool = dict(apc_rules.get("shared_other_required", {}))
-            other_required_pool.update(apc_rules["divisions"][div]["compulsory"])
+            other_req = float(
+                (target_requirements or {}).get("other_required", program_rules.get("other_req", 0.0))
+            )
+            other_required_pool = dict(
+                (target_requirements or {}).get(
+                    "other_required_catalog",
+                    dict(apc_rules.get("shared_other_required", {}))
+                    | dict(apc_rules["divisions"][div]["compulsory"]),
+                )
+            )
             for name, req_cred in other_required_pool.items():
                 matched_c = find_and_consume_course(courses, name, consumed, req_cred)
                 if matched_c:
@@ -1320,6 +1383,7 @@ def evaluate_graduation(courses, config):
         + report["target"].get("basic_core_ip", 0.0)
         + report["target"]["elective_ip"]
     )
+    _annotate_target_requirements(report, target_requirements)
 
     # ── PHASE 10: 匯總計算 ───────────────────────────────────────────────
     report["summary"]["common_completed"] = (
@@ -1425,8 +1489,12 @@ def evaluate_graduation(courses, config):
         target_basic_req = 0.0
         target_compulsory_req = 0.0
         if "物化系" in target_dept:
-            target_basic_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("basic_req", 0.0))
-            target_compulsory_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("other_req", 0.0))
+            if target_requirements:
+                target_basic_req = float(target_requirements.get("base_required", 0.0) or 0.0)
+                target_compulsory_req = float(target_requirements.get("other_required", 0.0) or 0.0)
+            else:
+                target_basic_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("basic_req", 0.0))
+                target_compulsory_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("other_req", 0.0))
         elif "資科系" in target_dept:
             target_compulsory_req = float(
                 cs_rules.get("double_major" if program == "雙主修" else "minor", {}).get("compulsory_req", 0.0)
@@ -1440,6 +1508,51 @@ def evaluate_graduation(courses, config):
             and report["target"].get("basic_core_completed", 0.0) >= target_basic_req
             and report["target"].get("compulsory_completed", 0.0) + report["target"].get("elective_completed", 0.0) >= target_compulsory_req
         )
+
+    # Course-level equivalency is a second pass over the exact transcript
+    # allocations.  Suggestions remain UNKNOWN; only an approved source
+    # attempt -> target requirement row can affect effective target progress.
+    equivalency_audit = {
+        "status": "NOT_APPLICABLE",
+        "state": "NOT_APPLICABLE",
+        "decisions": [],
+        "approved_mappings": [],
+        "candidates": [],
+        "manual_gate": {"status": "NOT_APPLICABLE", "state": "NOT_APPLICABLE", "validation_codes": []},
+        "warnings": [],
+        "validation_codes": [],
+        "legacy_unbound": False,
+        "approved_shared_reuse_credits": 0.0,
+        "approved_exclusive_credits": 0.0,
+    }
+    if target_requirements and "物化系" in target_dept:
+        equivalency_context = dict(config.get("equivalency_context") or {})
+        equivalency_context.update(
+            {
+                "admission_cohort": rule_sets["academic_year"],
+                "target_program": "物化",
+                "target_dept": target_dept,
+                "target_track": target_requirements.get("track", ""),
+                "program_type": program,
+                # Preserve legacy inputs only for a compatibility warning;
+                # audit_equivalency_decisions never treats them as bindings.
+                "shared_credits": config.get("shared_credits"),
+                "shared_course_credits": config.get("shared_course_credits"),
+                "shared_reuse_credits": config.get("shared_reuse_credits"),
+                "shared_reuse": config.get("shared_reuse"),
+                "shared_approved": config.get("shared_approved"),
+                "shared_evidence_state": config.get("shared_evidence_state"),
+            }
+        )
+        equivalency_audit = audit_equivalency_decisions(
+            courses,
+            target_requirements,
+            config.get("equivalency_decisions") or [],
+            context=equivalency_context,
+            report=report,
+            include_candidates=True,
+        )
+        report = apply_equivalency_audit_to_report(report, equivalency_audit, mutate=True)
 
     target_satisfied = target_gate_satisfied()
 
@@ -1471,8 +1584,13 @@ def evaluate_graduation(courses, config):
         secondary_base = (
             config.get("secondary_credits")
             if config.get("secondary_credits") is not None
-            else report["summary"]["target_completed"]
+            else report["target"].get("effective_total_completed", report["summary"]["target_completed"])
         )
+        bound_shared = float(equivalency_audit.get("approved_shared_reuse_credits", 0.0) or 0.0)
+        # Legacy aggregate fields are deliberately not forwarded as an
+        # allowance.  An explicit zero keeps the independent timing/40-credit
+        # policy check useful while the equivalency gate reports any unresolved
+        # source-to-target evidence.
         eligibility_kwargs = {
             "program_type": program,
             "admission_cohort": config.get("handbook_year"),
@@ -1480,32 +1598,17 @@ def evaluate_graduation(courses, config):
             "application_semester": config.get("application_semester"),
             "application_status": config.get("application_status"),
             "secondary_credits": secondary_base,
-            "shared_credits": config.get("shared_credits"),
-            "shared_approved": config.get("shared_approved"),
-            "shared_evidence_state": config.get("shared_evidence_state"),
+            "shared_credits": bound_shared,
+            "shared_approved": True,
+            "shared_evidence_state": "approved" if bound_shared > 1e-6 else "confirmed_zero",
             "department_approved": config.get("department_approved"),
             "interrupted": bool(config.get("interrupted")),
             "leave_history": config.get("leave_history"),
+            "equivalency_bound": bound_shared > 1e-6,
         }
         eligibility = assess_double_major_eligibility(
             **eligibility_kwargs,
         )
-        shared_reuse = _build_shared_reuse_allocations(
-            report, eligibility.get("shared_reuse_allowance", 0.0)
-        )
-        report["shared_reuse"] = shared_reuse
-        report["target"]["shared_reuse_credits"] = shared_reuse["total"]
-        report["target"]["effective_total_completed"] = (
-            report["target"].get("total_completed", 0.0) + shared_reuse["completed"]
-        )
-        report["target"]["effective_total_ip"] = (
-            report["target"].get("total_ip", 0.0) + shared_reuse["ip"]
-        )
-        # The policy eligibility amount includes only completed shared reuse;
-        # in-progress reuse remains visible in the report but cannot satisfy a
-        # completed-credit threshold.
-        eligibility_kwargs["secondary_credits"] = report["target"]["effective_total_completed"]
-        eligibility = assess_double_major_eligibility(**eligibility_kwargs)
         report["double_major_eligibility"] = eligibility
         if eligibility.get("status") != "SATISFIED":
             report["policy_warnings"].extend(eligibility.get("reasons", []))

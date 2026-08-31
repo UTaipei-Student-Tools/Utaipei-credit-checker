@@ -10,9 +10,10 @@ import streamlit as st
 
 from audit_export import audit_csv_bytes, audit_json_bytes, dataframe_csv_bytes
 from handbook_rules import normalize_course_name
+from lieflat_progress_chart import render_progress_chart
 from policy_audit import UNKNOWN
 from schedule_planner import render_schedule_planner
-from ui_components import draw_premium_progress, format_credit, render_header_card
+from ui_components import draw_premium_progress, format_credit
 
 
 _STATUS_LABELS = {
@@ -66,29 +67,24 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
         if evidence_states.get(key)
     )
 
-    render_header_card(
-        title="🎓 臺北市立大學 歷年畢業學分自我審查系統",
-        subtitle=f"{handbook_year} 學年度手冊 / {major_domain}領域 / {program_type}{f' ({target_dept})' if program_type != '單主修' else ''}",
-    )
-
     st.markdown(
         f"""
         <div class="info-flex">
-            <div class="info-card">
-                <div style="font-size:14px; color:#64748b; font-weight:700;">學生資訊</div>
-                <div style="margin-top:10px; font-size:15px; color:#0f172a; line-height:1.7;">
+            <section class="info-card" aria-label="學生資訊">
+                <div class="eyebrow">學生資訊</div>
+                <div class="meta-value info-value">
                     姓名：<strong>{escape(str(student_info.get("name") or "未辨識"))}</strong><br>
                     學號：<strong>{escape(str(student_info.get("student_id") or "未辨識"))}</strong><br>
                     系所：<strong>{escape(str(student_info.get("department") or "未辨識"))}</strong><br>
                     入學年月：<strong>{escape(str(student_info.get("admission_year") or "未辨識"))}</strong><br>
                     列印日期：<strong>{escape(str(student_info.get("print_date") or "未辨識"))}</strong>
                 </div>
-            </div>
-            <div class="info-card info-card-highlight">
-                <div style="font-size:14px; color:#0f172a; font-weight:700; margin-bottom:8px;">審查依據</div>
-                <div style="font-size:18px; color:#0f172a; font-weight:800;">{mode_tag}</div>
-                <div style="margin-top:10px; font-size:13px; color:#475569;">手冊來源：{safe_rule_source}<br>成績來源：{safe_source}<br>已分析 {len(courses)} 筆修課紀錄。<br>{escape(evidence_text)}</div>
-            </div>
+            </section>
+            <section class="info-card info-card-highlight" aria-label="審查依據">
+                <div class="eyebrow">審查依據</div>
+                <div class="meta-value info-source">{mode_tag}</div>
+                <div class="meta-label info-note">手冊來源：{safe_rule_source}<br>成績來源：{safe_source}<br>已分析 {len(courses)} 筆修課紀錄。<br>{escape(evidence_text)}</div>
+            </section>
         </div>
         """,
         unsafe_allow_html=True,
@@ -119,6 +115,7 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
     _render_parsed_course_totals(courses, report["summary"], program_type)
     _render_outcome_headline(report["summary"].get("graduation_status"))
     _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements)
+    _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta)
     st.markdown("<br><br>", unsafe_allow_html=True)
     _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements)
 
@@ -126,9 +123,13 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
 def _render_outcome_headline(status):
     status = status or UNKNOWN
     label = _status_display(status)
-    color = {"SATISFIED": "#047857", "NOT_SATISFIED": "#dc2626", "UNKNOWN": "#b45309"}.get(status, "#b45309")
+    outcome_class = {
+        "SATISFIED": "outcome-satisfied",
+        "NOT_SATISFIED": "outcome-not-satisfied",
+        "UNKNOWN": "outcome-unknown",
+    }.get(status, "outcome-unknown")
     st.markdown(
-        f"<div style='border:2px solid {color}; border-radius:12px; padding:12px 16px; margin:8px 0 16px; color:{color}; font-size:20px; font-weight:800;'>審查結果：{label}</div>",
+        f"<div class='outcome-banner {outcome_class}' role='status'>審查結果：{escape(label)}</div>",
         unsafe_allow_html=True,
     )
 
@@ -219,31 +220,29 @@ def _render_policy_plan_report(student_info, report, program_type, target_dept):
 
 
 def _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements):
-    colors = ["#00cd98", "#4facfe", "#ffaa00", "#94a3b8", "#a855f7", "#f97316"]
     labels = [
-        ("🎓 實得總學分", summary["total_completed"], requirements["total"], summary["total_ip"], colors[0]),
-        ("🏫 校共同+通識", summary["common_completed"], requirements["common_total"], summary["common_ip"], colors[1]),
-        ("🔬 主修系專門學分", summary["major_completed"], requirements["major_total"], summary["major_ip"], colors[2]),
-        ("🔓 自由選修學分", summary["free_completed"], requirements["free_elective"], summary["free_ip"], colors[3]),
-        ("✨ 跨系所學分", summary["target_completed"], requirements["target_total"], summary["target_ip"], colors[4]),
+        ("🎓 實得總學分", summary["total_completed"], requirements["total"], summary["total_ip"]),
+        ("🏫 校共同+通識", summary["common_completed"], requirements["common_total"], summary["common_ip"]),
+        ("🔬 主修系專門學分", summary["major_completed"], requirements["major_total"], summary["major_ip"]),
+        ("🔓 自由選修學分", summary["free_completed"], requirements["free_elective"], summary["free_ip"]),
+        ("✨ 跨系所學分", summary["target_completed"], requirements["target_total"], summary["target_ip"]),
         (
             "🎽 體育修課",
             report["pe"]["semesters_completed"],
             report["pe"]["semesters_required"],
             report["pe"]["semesters_ip"],
-            colors[5],
         ),
     ]
 
-    html_str = ["<div style='width:100%;'>", "<div class='metric-grid'>"]
+    html_str = ["<section class='metric-grid' aria-label='學分統計'>"]
 
-    for idx, (label, completed, target, ip, color) in enumerate(labels):
+    for idx, (label, completed, target, ip) in enumerate(labels):
         if label == "✨ 跨系所學分" and program_type == "單主修":
             html_str.append(
-                "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div style='font-size:14px; font-weight:700; color:#475569; margin-bottom:12px;'>🚫 無跨系修讀</div>"
-                "<div style='font-size:28px; font-weight:800; color:#94a3b8; margin-bottom:6px;'>N/A</div>"
-                "<div style='font-size:12px; color:#94a3b8;'>目前為單主修身份</div>"
+                "<div class='metric-card metric-card--muted'>"
+                "<div class='metric-label'>🚫 無跨系修讀</div>"
+                "<div class='metric-value'>N/A</div>"
+                "<div class='metric-meta'>目前為單主修身份</div>"
                 "</div>"
             )
             continue
@@ -261,10 +260,10 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
             )
 
         html_str.append(
-            f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-            f"<div style='font-size:14px; font-weight:700; color:#475569; margin-bottom:12px;'>{label}</div>"
-            f"<div style='font-size:28px; font-weight:800; color:{color}; margin-bottom:6px;'>{value_text}</div>"
-            f"<div style='font-size:12px; color:#64748b;'>{bottom_text}</div>"
+            f"<div class='metric-card'>"
+            f"<div class='metric-label'>{escape(label)}</div>"
+            f"<div class='metric-value'>{escape(value_text)}</div>"
+            f"<div class='metric-meta'>{escape(bottom_text)}</div>"
             f"</div>"
         )
 
@@ -275,22 +274,21 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
         "NOT_SATISFIED": "⚠️ 未滿足",
         "UNKNOWN": "❔ 需人工確認",
     }.get(outcome, "❔ 需人工確認")
-    grad_color = {"SATISFIED": "#00cd98", "NOT_SATISFIED": "#ff3860", "UNKNOWN": "#b45309"}.get(outcome, "#b45309")
-    grad_bg = {
-        "SATISFIED": "rgba(0, 205, 152, 0.08)",
-        "NOT_SATISFIED": "rgba(255, 56, 96, 0.08)",
-        "UNKNOWN": "rgba(245, 158, 11, 0.10)",
-    }.get(outcome, "rgba(245, 158, 11, 0.10)")
+    outcome_class = {
+        "SATISFIED": "outcome-satisfied",
+        "NOT_SATISFIED": "outcome-not-satisfied",
+        "UNKNOWN": "outcome-unknown",
+    }.get(outcome, "outcome-unknown")
 
     html_str.append(
-        f"<div style='background:{grad_bg}; border:1px solid {grad_color}; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-        f"<div style='font-size:14px; font-weight:700; color:{grad_color}; margin-bottom:12px;'>✨ 審查結果</div>"
-        f"<div style='font-size:20px; font-weight:800; color:{grad_color}; margin-bottom:6px;'>{outcome_label}</div>"
-        f"<div style='font-size:12px; color:{grad_color}; opacity:0.8;'>含通識/體育/系專/輔雙</div>"
+        f"<div class='metric-card {outcome_class}' role='status'>"
+        f"<div class='metric-label'>✨ 審查結果</div>"
+        f"<div class='metric-value'>{escape(outcome_label)}</div>"
+        f"<div class='metric-meta'>含通識／體育／系專／雙主修</div>"
         f"</div>"
     )
 
-    html_str.append("</div></div>")
+    html_str.append("</section>")
     st.markdown("".join(html_str), unsafe_allow_html=True)
 
 
@@ -326,7 +324,7 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
     draw_premium_progress("🏆 畢業總學分進度", total_completed_all, major_target, ip=total_ip_all)
 
     if program_type != "單主修":
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
         draw_premium_progress(f"🧪 {program_type} ({target_dept})", target_completed, target_req, ip=target_ip)
 
     st.markdown("---")
@@ -516,25 +514,68 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
     df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
     csv_bytes = dataframe_csv_bytes(df_full)
 
-    html_str = [
-        "<div style='display:flex; justify-content:center; width:100%; margin-bottom:18px;'>",
-        "<div style='width:100%;'>",
-        "<div class='overview-grid'>",
-    ]
+    html_str = ["<section class='overview-grid' aria-label='分類學分統計'>"]
 
     for card in cards:
         if card.get("visible", True):
             html_str.append(
-                f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:20px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                f"<div style='font-size:15px; font-weight:700; color:#475569; margin-bottom:12px; line-height:1.4;'>{card['title']}</div>"
-                f"<div style='font-size:32px; font-weight:800; color:#0f172a; margin-bottom:8px;'>{format_credit(card['completed'])} / {format_credit(card['target'])}</div>"
-                f"<div style='font-size:13px; color:#64748b;'>已得 {format_credit(card['completed'])} / 修讀中 {format_credit(card['ip'])}</div>"
+                f"<div class='metric-card'>"
+                f"<div class='metric-label'>{escape(card['title'])}</div>"
+                f"<div class='metric-value'>{format_credit(card['completed'])} / {format_credit(card['target'])}</div>"
+                f"<div class='metric-meta'>已得 {format_credit(card['completed'])} ／修讀中 {format_credit(card['ip'])}</div>"
                 f"</div>"
             )
 
-    html_str.append("</div></div></div>")
+    html_str.append("</section>")
     st.markdown("".join(html_str), unsafe_allow_html=True)
-    st.markdown("<div style='display:flex; justify-content:center; margin-top:16px;'>", unsafe_allow_html=True)
+
+
+def _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta):
+    """Render one Lieflat F5 chart for the principal credit thresholds."""
+
+    rows = [
+        {
+            "label": "畢業總學分",
+            "completed": summary.get("total_completed", 0.0),
+            "required": requirements.get("total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "校共同＋通識",
+            "completed": summary.get("common_completed", 0.0),
+            "required": requirements.get("common_total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "主修系專門",
+            "completed": summary.get("major_completed", 0.0),
+            "required": requirements.get("major_total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "自由選修",
+            "completed": summary.get("free_completed", 0.0),
+            "required": requirements.get("free_elective", 0.0),
+            "unit": "學分",
+        },
+    ]
+    if program_type != "單主修" and float(requirements.get("target_total", 0.0) or 0.0) > 0:
+        rows.append(
+            {
+                "label": f"{program_type}目標系",
+                "completed": summary.get("target_completed", 0.0),
+                "required": requirements.get("target_total", 0.0),
+                "unit": "學分",
+            }
+        )
+
+    source = str(rules_meta.get("evidence_file") or rules_meta.get("source_file") or "學生手冊與成績單分析")
+    st.markdown(
+        render_progress_chart(rows, source=source),
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='export-group export-group-heading' role='group' aria-label='分類統計匯出'>", unsafe_allow_html=True)
+    st.markdown("<div class='export-label'>分類統計匯出</div></div>", unsafe_allow_html=True)
     st.download_button(
         label="📦 全部匯出 CSV",
         data=csv_bytes,
@@ -542,7 +583,6 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
         mime="text/csv",
         use_container_width=False,
     )
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_common_and_major_tab(report, major_domain):
@@ -618,21 +658,21 @@ def _render_ge_categories(common_report, per_category_required=4):
                 if category_data["completed"] + category_data["ip"] >= per_category_required
                 else "⚠️ 未達標"
             )
-            color = (
-                "#00cd98"
+            status_class = (
+                "status-completed"
                 if category_data["completed"] >= per_category_required
-                else "#4facfe"
+                else "status-ip"
                 if category_data["completed"] + category_data["ip"] >= per_category_required
-                else "#ff3860"
+                else "status-missing"
             )
             st.markdown(
                 f"""
-                <div style='background: rgba(30, 41, 85, 0.2); border:1px solid rgba(255,255,255,0.05); border-radius:12px; padding:15px; margin-bottom:15px;'>
-                    <div style='display:flex; justify-content:space-between; margin-bottom:10px; font-weight:600;'>
-                        <span>{escape(str(category_name))}</span>
-                        <span style='color:{color}; white-space:nowrap;'>{status}</span>
+                <div class='category-card'>
+                    <div class='category-heading'>
+                        <span class='category-name'>{escape(str(category_name))}</span>
+                        <span class='status-badge {status_class}'>{escape(status)}</span>
                     </div>
-                    <div style='font-size:13px; color:#475569; margin-bottom:10px;'>已得: {category_data["completed"]:g} / 修讀中: {category_data["ip"]:g} / 目標: {per_category_required:g} 學分</div>
+                    <div class='category-meta'>已得: {category_data["completed"]:g} ／修讀中: {category_data["ip"]:g} ／目標: {per_category_required:g} 學分</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -973,12 +1013,12 @@ def _render_parsed_course_totals(courses, summary, program_type):
 
     st.markdown(
         f"""
-        <div style='display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px;'>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>解析總學分: <b>{format_credit(parsed_total)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>已修得: <b>{format_credit(parsed_completed)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>修讀中: <b>{format_credit(parsed_ip)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>總含修讀中: <b>{format_credit(summary.get("total_with_ip", 0.0))}</b></div>
-        </div>
+        <section class='parsed-summary' aria-label='解析學分摘要'>
+            <div class='parsed-summary-item'><span>解析總學分</span><b>{format_credit(parsed_total)}</b></div>
+            <div class='parsed-summary-item'><span>已修得</span><b>{format_credit(parsed_completed)}</b></div>
+            <div class='parsed-summary-item'><span>修讀中</span><b>{format_credit(parsed_ip)}</b></div>
+            <div class='parsed-summary-item'><span>總含修讀中</span><b>{format_credit(summary.get("total_with_ip", 0.0))}</b></div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
@@ -1033,8 +1073,8 @@ def _render_course_cards(rows):
         st.warning("⚠️ 目前無相關修課紀錄。")
         return
     html = [
-        "<div style='display:grid; gap:12px;'>",
-        "<div class='course-header'>",
+        "<div class='course-list' role='table' aria-label='課程清單'>",
+        "<div class='course-header' role='row'>",
         "<div>科目名稱</div>",
         "<div>修課學年</div>",
         "<div>學分</div>",
@@ -1055,31 +1095,18 @@ def _render_course_cards(rows):
                 status_type = "missing"
             else:
                 status_type = "completed"
-        if status_type == "completed":
-            bg = "rgba(16, 185, 129, 0.12)"
-            color = "#0f766e"
-            border = "rgba(16, 185, 129, 0.24)"
-        elif status_type == "ip":
-            bg = "rgba(59, 130, 246, 0.12)"
-            color = "#1d4ed8"
-            border = "rgba(59, 130, 246, 0.24)"
-        else:
-            bg = "rgba(249, 115, 22, 0.12)"
-            color = "#c2410c"
-            border = "rgba(249, 115, 22, 0.24)"
-
         safe_name = escape(str(r.get("科目名稱", "")))
         safe_year = escape(str(r.get("修課學年", "")))
         safe_credit = escape(format_credit(r.get("學分", "")))
         safe_score = escape(str(r.get("成績", "")))
         safe_status = escape(str(status))
         html.append(
-            f"<div class='course-row'>"
-            f"<div class='course-name-col' data-label='科目名稱'>{safe_name}</div>"
-            f"<div data-label='修課學年' style='color:#334155;'>{safe_year}</div>"
-            f"<div data-label='學分' style='color:#334155;'>{safe_credit}</div>"
-            f"<div data-label='成績' style='color:#334155;'>{safe_score}</div>"
-            f"<div class='course-status-col' data-label='狀態'><span style='display:inline-flex; align-items:center; justify-content:center; padding:8px 14px; border-radius:999px; background:{bg}; color:{color}; border:1px solid {border}; font-size:12px; font-weight:700;'>{safe_status}</span></div>"
+            f"<div class='course-row' role='row'>"
+            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}</div>"
+            f"<div role='cell' data-label='修課學年'>{safe_year}</div>"
+            f"<div role='cell' data-label='學分'>{safe_credit}</div>"
+            f"<div role='cell' data-label='成績'>{safe_score}</div>"
+            f"<div class='course-status-col' role='cell' data-label='狀態'><span class='status-badge status-{status_type}'>{safe_status}</span></div>"
             f"</div>"
         )
 
