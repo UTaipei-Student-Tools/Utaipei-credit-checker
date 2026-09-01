@@ -103,7 +103,7 @@ def canonical_metadata_block() -> str:
     <meta name="theme-color" content="#081f5c" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="北市大畢業通" />
     <link rel="manifest" href="/app/static/manifest-v2.webmanifest" />
     <link rel="apple-touch-icon" sizes="180x180" type="image/png" href="/app/static/icons/ut-graduation-v2-180.png" />
@@ -141,6 +141,10 @@ def patch_html(html: str) -> str:
         raise BootstrapError("PWA patch did not produce exactly one title")
     if patched.count('name="apple-mobile-web-app-title" content="北市大畢業通"') != 1:
         raise BootstrapError("PWA patch did not produce exactly one iOS title")
+    if patched.count('name="apple-mobile-web-app-status-bar-style" content="black"') != 1:
+        raise BootstrapError("PWA patch did not produce exactly one opaque iOS status-bar style")
+    if "black-translucent" in patched.lower():
+        raise BootstrapError("PWA patch must not produce a translucent iOS status-bar style")
     if patched.count('rel="manifest" href="/app/static/manifest-v2.webmanifest"') != 1:
         raise BootstrapError("PWA patch did not produce exactly one manifest link")
     if patched.count('rel="apple-touch-icon" sizes="180x180"') != 1:
