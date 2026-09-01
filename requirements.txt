@@ -3,4 +3,4 @@ pymupdf>=1.26,<2
 requests>=2.32,<3
 beautifulsoup4>=4.13,<5
 pandas>=2.2,<4
-./streamlit_bootstrap
+utaipei-streamlit-bootstrap @ https://huggingface.co/spaces/Sapphirejimmy/Utaipei-credit-checker/resolve/5937dbbad8465faed8803f5fa6ce5034eb56861c/vendor/utaipei_streamlit_bootstrap-0.1.0-py3-none-any.whl#sha256=fed2afe1abd4df321157d6a0b049a6e55d2745338bc1e3dc80a04f8756551c37
