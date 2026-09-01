@@ -1,5 +1,5 @@
 ---
-title: UTaipei Science College Credit Checker
+title: 北市大畢業通
 emoji: 🎓
 colorFrom: blue
 colorTo: indigo
@@ -107,7 +107,11 @@ python -m unittest discover -s tests -v
 
 ## 部署
 
-Hugging Face Spaces 可讀取本檔案最上方的 Streamlit metadata。部署前請確認：
+Hugging Face Spaces 會依本檔案最上方的 YAML 使用免費的 Streamlit SDK 啟動，版本固定為 `streamlit==1.57.0`。安裝需求最後一行的本機 `streamlit_bootstrap` 套件會透過 Python `sitecustomize` 在 Streamlit 啟動前直接修補初始 HTML，寫入 `北市大畢業通`、iOS 主畫面名稱、manifest v2、UT 圖示與手機版 metadata；因此 iPhone Safari 的「加入主畫面」不需要等待 JavaScript 執行。升級 Streamlit 時必須同步重新檢查 patch，不可只放寬版本範圍。
+
+PWA 圖示由 `static/icons/ut-graduation-v2-source.png` 產出的不透明 32／180／192／512 PNG 組成。系統不註冊 service worker，也不快取成績單或個人審查結果。若 iPhone 已加入舊捷徑，請先刪除舊捷徑，再用 Safari 開啟 Space 網址並選擇「分享 → 加入主畫面」；新捷徑名稱會預填為 `北市大畢業通`。
+
+正式部署只需將本專案內容推送至原本的 Streamlit Space；repo slug 與公開網址不需變更。部署前請確認：
 
 - 未包含真實學生 PDF、CSV 或帳密。
 - `rules_config.json` 已經人工核對。

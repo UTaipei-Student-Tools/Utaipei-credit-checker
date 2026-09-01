@@ -5,12 +5,11 @@ Modular Streamlit app entrypoint for the UTaipei graduation credit checker.
 import streamlit as st
 
 from credit_engine import evaluate_graduation
+from equivalency_ui import render_equivalency_workflow
 from pdf_parser import parse_transcript_pdf
-from pwa_metadata import inject_pwa_metadata
 from report_renderer import render_report
 from schedule_parser import merge_schedule_courses
 from sidebar import render_sidebar
-from equivalency_ui import render_equivalency_workflow
 from ui_components import (
     collapse_sidebar_if_needed,
     render_header_card,
@@ -52,7 +51,6 @@ def _evaluation_config(sidebar_state, courses=None, parser_diagnostics=None):
 
 def main():
     setup_page()
-    inject_pwa_metadata()
     render_header_card("北市大畢業學分審查系統", "🎓 快速檢查你的畢業進度", landmark_id="main-content")
 
     sidebar_state = render_sidebar()
@@ -82,7 +80,7 @@ def main():
                 target_dept,
                 source_label,
             )
-        except Exception as exc:
+        except Exception:
             st.info("目前先顯示門檻規劃；上傳成績單或完成校務系統抓取後，才會開始個人學分審查。")
         return
 

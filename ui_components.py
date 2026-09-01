@@ -29,9 +29,9 @@ def format_credit(value):
 
 
 def setup_page():
-    page_icon = Path(__file__).resolve().parent / "static" / "icons" / "favicon-32.png"
+    page_icon = Path(__file__).resolve().parent / "static" / "icons" / "ut-graduation-v2-32.png"
     st.set_page_config(
-        page_title="北市大畢業學分審查系統 | UTaipei Credit Checker",
+        page_title="北市大畢業通",
         page_icon=str(page_icon) if page_icon.exists() else "🎓",
         layout="wide",
         initial_sidebar_state="auto",
