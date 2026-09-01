@@ -245,10 +245,12 @@ def inject_theme_css():
             [data-testid="stAppViewContainer"] {
                 min-width: 0;
                 overflow-x: clip;
-                padding-top: env(safe-area-inset-top, 0);
-                padding-right: env(safe-area-inset-right, 0);
-                padding-bottom: env(safe-area-inset-bottom, 0);
-                padding-left: env(safe-area-inset-left, 0);
+                --ui-safe-top: env(safe-area-inset-top, 0px);
+                --ui-safe-right: env(safe-area-inset-right, 0px);
+                --ui-safe-bottom: env(safe-area-inset-bottom, 0px);
+                --ui-safe-left: env(safe-area-inset-left, 0px);
+                padding: var(--ui-safe-top) var(--ui-safe-right)
+                    var(--ui-safe-bottom) var(--ui-safe-left);
             }
             [data-testid="stMainBlockContainer"] {
                 width: min(100%, 1400px) !important;
@@ -753,10 +755,18 @@ def inject_theme_css():
                 .info-flex { grid-template-columns: minmax(0, 1fr); }
             }
             @media (max-width: 768px) {
+                /* iOS standalone draws the status bar over the app. Keep each
+                   safe-area edge in one box so nested padding cannot create a
+                   second bottom spacer above the home indicator. */
+                [data-testid="stAppViewContainer"] {
+                    padding: 0 !important;
+                    overflow-y: auto;
+                }
                 [data-testid="stMainBlockContainer"] {
-                    padding: .85rem max(.85rem, env(safe-area-inset-right, 0px))
-                        max(1.25rem, env(safe-area-inset-bottom, 0px))
-                        max(.85rem, env(safe-area-inset-left, 0px)) !important;
+                    padding: calc(.85rem + var(--ui-safe-top))
+                        max(.85rem, var(--ui-safe-right))
+                        max(1.25rem, var(--ui-safe-bottom))
+                        max(.85rem, var(--ui-safe-left)) !important;
                 }
                 [data-testid="stSidebar"][aria-expanded="true"] { width: min(88vw, 23rem) !important; max-width: 88vw !important; }
                 [data-testid="stHorizontalBlock"] { flex-wrap: wrap; gap: .75rem; }
