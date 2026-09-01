@@ -827,6 +827,28 @@ def inject_theme_css():
                 outline-offset: 2px !important;
                 box-shadow: 0 0 0 2px var(--ui-canvas) !important;
             }
+            /* Streamlit 1.57 renders selectboxes as React Aria comboboxes.
+               On iOS, the focused text input can collapse to caret width;
+               drawing the global focus outline on that input creates two
+               vertical stripes. Keep the caret clean and draw one complete,
+               accessible focus ring around the actual select control. */
+            [data-testid="stSelectbox"] [role="group"] {
+                min-height: var(--ui-control-height) !important;
+                border-color: var(--ui-border) !important;
+                background: var(--ui-surface) !important;
+                transition: border-color .18s ease, box-shadow .18s ease;
+            }
+            [data-testid="stSelectbox"] input[role="combobox"] {
+                background: transparent !important;
+            }
+            [data-testid="stSelectbox"] input[role="combobox"]:focus-visible {
+                outline: none !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stSelectbox"] [role="group"]:focus-within {
+                border-color: var(--ui-focus) !important;
+                box-shadow: 0 0 0 3px var(--ui-focus) !important;
+            }
             [data-testid="stAlert"] {
                 border: 1px solid var(--ui-border) !important;
                 border-radius: var(--ui-radius-md) !important;
@@ -998,6 +1020,10 @@ def inject_theme_css():
             @media (forced-colors: active) {
                 *, *::before, *::after { forced-color-adjust: auto; }
                 :where(button, a, input, textarea, select, [role="button"]):focus-visible { outline: 3px solid Highlight !important; }
+                [data-testid="stSelectbox"] [role="group"]:focus-within {
+                    outline: 3px solid Highlight !important;
+                    outline-offset: 2px !important;
+                }
             }
             *::-webkit-scrollbar { width: 10px; height: 10px; }
             *::-webkit-scrollbar-track { background: var(--ui-canvas-raised); }
