@@ -25,6 +25,13 @@ _STATUS_LABELS = {
     "INCOMPLETE": "未完成",
 }
 
+_IDENTITY_STATUS_LABELS = {
+    "VERIFIED": "身分已核對",
+    "CONFLICTED": "身分衝突",
+    "UNKNOWN": "身分待確認（暫列）",
+    "MANUAL_APPROVED": "人工核准身分",
+}
+
 _SHARED_REUSE_FALLBACK_NOTE = (
     "共同修課核准僅代表合計額度；列出的課名只是規劃用模擬配置，不代表系所已核准該課程身分。"
     "正式共同修課科目身分須由系所證據確認。"
@@ -102,6 +109,15 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
         st.warning(f"手冊核對提醒：{warning}")
     for warning in report.get("policy_warnings", []):
         st.warning(f"政策／證據提醒：{warning}")
+
+    identity_gate = report.get("identity_gate", {})
+    if isinstance(identity_gate, dict) and identity_gate.get("status") in {"UNKNOWN", "CONFLICTED"}:
+        reasons = identity_gate.get("reasons", [])
+        reason_text = "；".join(str(reason) for reason in reasons if reason)
+        st.warning(
+            "課程身分稽核提醒："
+            + (reason_text or "部分系所課程缺少可核對的開課身分，暫不能作為最終畢業判定。")
+        )
 
     diagnostics = student_info.get("parse_diagnostics", {}) if isinstance(student_info, dict) else {}
     if diagnostics and diagnostics.get("complete") is False:
@@ -1315,9 +1331,38 @@ def _render_course_cards(rows):
             if allocation_note
             else ""
         )
+        identity_status = str(r.get("課程身分") or r.get("identity_status") or "").strip()
+        identity_reason = str(r.get("身分理由") or r.get("identity_reason") or "").strip()
+        identity_scope = str(r.get("身分範圍") or r.get("identity_scope") or "").strip()
+        identity_authority = str(
+            r.get("身分核准單位") or r.get("identity_authority") or r.get("authority") or ""
+        ).strip()
+        identity_evidence = str(
+            r.get("身分證據引用")
+            or r.get("identity_evidence_reference")
+            or r.get("evidence_reference")
+            or ""
+        ).strip()
+        identity_markup = ""
+        if identity_status:
+            identity_label = _IDENTITY_STATUS_LABELS.get(identity_status, identity_status)
+            identity_parts = [identity_label]
+            if identity_scope:
+                identity_parts.append(f"範圍：{identity_scope}")
+            if identity_reason:
+                identity_parts.append(identity_reason)
+            if identity_authority:
+                identity_parts.append(f"核准：{identity_authority}")
+            if identity_evidence:
+                identity_parts.append(f"證據：{identity_evidence}")
+            identity_markup = (
+                "<div class='course-identity-note'>"
+                + "｜".join(escape(part) for part in identity_parts)
+                + "</div>"
+            )
         html.append(
             f"<div class='course-row' role='row'>"
-            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}{allocation_markup}</div>"
+            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}{allocation_markup}{identity_markup}</div>"
             f"<div role='cell' data-label='修課學年'>{safe_year}</div>"
             f"<div role='cell' data-label='學分'>{safe_credit}</div>"
             f"<div role='cell' data-label='成績'>{safe_score}</div>"
@@ -1340,6 +1385,11 @@ def _course_row(c, allocation_context=None):
         "狀態": status,
         "狀態類別": status_type,
         "配置備註": c.get("allocation_note") or (f"計入：{allocation_context}" if allocation_context else ""),
+        "課程身分": c.get("identity_status", ""),
+        "身分範圍": c.get("identity_scope", ""),
+        "身分理由": c.get("identity_reason", ""),
+        "身分核准單位": c.get("identity_authority") or c.get("authority", ""),
+        "身分證據引用": c.get("identity_evidence_reference") or c.get("evidence_reference", ""),
     }
 
 

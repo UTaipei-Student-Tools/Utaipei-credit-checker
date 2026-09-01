@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import math
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -38,6 +39,265 @@ EVIDENCE_VERIFIED = "VERIFIED"
 EVIDENCE_INCOMPLETE = "INCOMPLETE"
 EVIDENCE_CONFLICTED = "CONFLICTED"
 EVIDENCE_MANUAL_REVIEW = "MANUAL_REVIEW"
+
+# Course identity is a separate gate from policy evidence.  A transcript row
+# can have the right title/credits while still lacking enough information to
+# prove which department actually offered it.  Keep these values stable: they
+# are written into report rows and exported audit files.
+COURSE_IDENTITY_VERIFIED = "VERIFIED"
+COURSE_IDENTITY_CONFLICTED = "CONFLICTED"
+COURSE_IDENTITY_UNKNOWN = "UNKNOWN"
+COURSE_IDENTITY_MANUAL_APPROVED = "MANUAL_APPROVED"
+COURSE_IDENTITY_STATUSES = (
+    COURSE_IDENTITY_VERIFIED,
+    COURSE_IDENTITY_CONFLICTED,
+    COURSE_IDENTITY_UNKNOWN,
+    COURSE_IDENTITY_MANUAL_APPROVED,
+)
+
+# Short aliases make the public helper convenient for integrations without
+# forcing callers to know the longer constant names.
+IDENTITY_VERIFIED = COURSE_IDENTITY_VERIFIED
+IDENTITY_CONFLICTED = COURSE_IDENTITY_CONFLICTED
+IDENTITY_UNKNOWN = COURSE_IDENTITY_UNKNOWN
+IDENTITY_MANUAL_APPROVED = COURSE_IDENTITY_MANUAL_APPROVED
+
+
+# The transcript/export formats use several spellings for an offering
+# department.  These are deliberately finite aliases, not substring course
+# matching: a department value either resolves to one of the selected scopes
+# or remains an explicit conflict/unknown.
+_COURSE_SCOPE_ALIASES = {
+    "地生": {
+        "地生",
+        "地生系",
+        "地球環境",
+        "地球環境系",
+        "地球環境暨生物資源",
+        "地球環境暨生物資源學系",
+        "地球環境與生物資源",
+        "地球環境與生物資源學系",
+        "生命科學",
+        "生命科學系",
+    },
+    "地球環境": {
+        "地生",
+        "地生系",
+        "地球環境",
+        "地球環境系",
+        "地球環境暨生物資源",
+        "地球環境暨生物資源學系",
+        "地球環境與生物資源",
+        "地球環境與生物資源學系",
+    },
+    "生命科學": {
+        "地生",
+        "地生系",
+        "生命科學",
+        "生命科學系",
+        "地球環境暨生物資源",
+        "地球環境暨生物資源學系",
+        "地球環境與生物資源",
+        "地球環境與生物資源學系",
+    },
+    "物化": {
+        "物化",
+        "物化系",
+        "物理化學",
+        "物理化學系",
+        "應用物理",
+        "應用物理系",
+        "電子物理",
+        "電子物理系",
+        "應用化學",
+        "應用化學系",
+    },
+    "物理組": {
+        "物化",
+        "物化系",
+        "物化系物理組",
+        "物化系電子物理組",
+        "物理化學",
+        "物理化學系",
+        "應用物理",
+        "應用物理系",
+        "電子物理",
+        "電子物理系",
+    },
+    "化學組": {
+        "物化",
+        "物化系",
+        "物化系化學組",
+        "物化系應用化學組",
+        "物理化學",
+        "物理化學系",
+        "應用化學",
+        "應用化學系",
+    },
+    "資科": {
+        "資科",
+        "資科系",
+        "資訊科學",
+        "資訊科學系",
+    },
+    "數學": {
+        "數學",
+        "數學系",
+        "數據科學與數學",
+        "數據科學與數學系",
+        "數學科學",
+        "數學科學系",
+    },
+}
+
+
+def _normalize_department_value(value: Any) -> str:
+    """Normalize a department field without applying fuzzy course matching."""
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # Department labels in portal exports sometimes contain a column prefix
+    # or parenthesized group marker.  Strip only presentation punctuation; the
+    # group text itself is important when the selected target is chemistry vs
+    # physics, so it must remain available for an explicit conflict check.
+    text = re.sub(r"^(?:開課系所|開課單位|系所)\s*[:：]\s*", "", text)
+    text = re.sub(r"[\s　]+", "", text)
+    text = text.replace("（", "(").replace("）", ")")
+    text = text.replace("(", "").replace(")", "")
+    return text
+
+
+def _identity_scope_key(expected_scope: Any) -> str:
+    """Map a UI/engine scope label to the finite alias-table key."""
+
+    text = _normalize_department_value(expected_scope)
+    if "物理" in text:
+        return "物理組"
+    if "化學" in text:
+        return "化學組"
+    if "物化" in text or "應用物理" in text or "應用化學" in text:
+        return "物化"
+    if "資科" in text or "資訊科學" in text:
+        return "資科"
+    if "數學" in text:
+        return "數學"
+    if "生命科學" in text:
+        return "生命科學"
+    if "地球環境" in text or text in {"地生", "地生系"}:
+        return "地球環境"
+    return text
+
+
+def _manual_identity_fields(value: Any) -> dict[str, str]:
+    """Extract the complete source→target approval fields if present."""
+
+    value = value if isinstance(value, Mapping) else {}
+    source_id = str(value.get("source_attempt_id") or value.get("attempt_id") or "").strip()
+    target_id = str(
+        value.get("target_requirement_id")
+        or value.get("target_id")
+        or value.get("requirement_id")
+        or ""
+    ).strip()
+    authority = str(value.get("authority") or value.get("approving_authority") or "").strip()
+    evidence = str(
+        value.get("evidence_reference") or value.get("evidence") or value.get("evidence_ref") or ""
+    ).strip()
+    return {
+        "source_attempt_id": source_id,
+        "target_requirement_id": target_id,
+        "authority": authority,
+        "evidence_reference": evidence,
+    }
+
+
+def assess_course_identity(
+    course: Any,
+    expected_scope: Any,
+    *,
+    manual_approval: Any = None,
+) -> dict[str, str]:
+    """Assess whether a scoped transcript row proves its offering identity.
+
+    ``VERIFIED`` requires both a course code and an explicit offering
+    department that belongs to the selected scope.  A missing field is an
+    ``UNKNOWN`` provisional match, while an explicit department outside the
+    scope is a known ``CONFLICTED`` match.  A fully bound source-attempt →
+    target-requirement approval is allowed to override missing/contradictory
+    transcript metadata and is reported as ``MANUAL_APPROVED``.
+
+    The helper intentionally does not reject common/general/free courses;
+    callers invoke it only for department-scoped allocations.
+    """
+
+    course = course if isinstance(course, Mapping) else {}
+    scope_label = str(expected_scope or "").strip()
+    scope_key = _identity_scope_key(scope_label)
+    scope_aliases = {
+        _normalize_department_value(alias)
+        for alias in _COURSE_SCOPE_ALIASES.get(scope_key, {scope_key})
+        if _normalize_department_value(alias)
+    }
+    course_code = str(course.get("course_code") or course.get("課號") or "").strip()
+    offering_department = str(
+        course.get("offering_department") or course.get("開課系所") or course.get("department") or ""
+    ).strip()
+    normalized_department = _normalize_department_value(offering_department)
+    approval = _manual_identity_fields(manual_approval)
+    approval_complete = bool(
+        approval["source_attempt_id"]
+        and approval["target_requirement_id"]
+        and approval["authority"]
+        and approval["evidence_reference"]
+    )
+    if approval_complete:
+        return {
+            "identity_status": COURSE_IDENTITY_MANUAL_APPROVED,
+            "identity_scope": scope_label,
+            "identity_reason": "已由完整的來源修課→目標門檻核准綁定覆蓋成績單身分欄位。",
+            "identity_authority": approval["authority"],
+            "identity_evidence_reference": approval["evidence_reference"],
+            "identity_source_attempt_id": approval["source_attempt_id"],
+            "identity_target_requirement_id": approval["target_requirement_id"],
+        }
+    if normalized_department and normalized_department not in scope_aliases:
+        return {
+            "identity_status": COURSE_IDENTITY_CONFLICTED,
+            "identity_scope": scope_label,
+            "identity_reason": f"成績單標示開課系所「{offering_department}」，不屬於目前要求的{scope_label}範圍。",
+            "identity_authority": "",
+            "identity_evidence_reference": "",
+            "identity_source_attempt_id": "",
+            "identity_target_requirement_id": "",
+        }
+    if not course_code or not normalized_department:
+        missing = []
+        if not course_code:
+            missing.append("課號")
+        if not normalized_department:
+            missing.append("開課系所")
+        return {
+            "identity_status": COURSE_IDENTITY_UNKNOWN,
+            "identity_scope": scope_label,
+            "identity_reason": f"成績單缺少{'／'.join(missing)}，目前僅能依課名與學分暫列，需系所確認。",
+            "identity_authority": "",
+            "identity_evidence_reference": "",
+            "identity_source_attempt_id": "",
+            "identity_target_requirement_id": "",
+        }
+    return {
+        "identity_status": COURSE_IDENTITY_VERIFIED,
+        "identity_scope": scope_label,
+        "identity_reason": f"課號與開課系所「{offering_department}」均符合{scope_label}範圍。",
+        "identity_authority": "",
+        "identity_evidence_reference": "",
+        "identity_source_attempt_id": "",
+        "identity_target_requirement_id": "",
+    }
+
+
+check_course_identity = assess_course_identity
 
 # Shared-course evidence is intentionally separate from the numeric amount:
 # an unanswered field must not be serialized as a confirmed zero.

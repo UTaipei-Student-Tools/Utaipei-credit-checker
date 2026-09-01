@@ -41,6 +41,133 @@ def setup_page():
         '<a class="skip-link" href="#main-content">跳到主要內容</a>',
         unsafe_allow_html=True,
     )
+    _inject_update_menu_script()
+
+
+def _build_update_menu_script():
+    """Build the small DOM bridge that adds the latest-version menu action.
+
+    Streamlit owns the header menu, so there is no Python callback to attach to
+    here.  The bridge is deliberately idempotent: one observer is kept on the
+    parent document and the menu item is keyed by a stable test id.  This lets
+    Streamlit recreate the popover whenever it opens without accumulating
+    duplicate controls.
+    """
+
+    return """
+<script>
+(() => {
+    const LABEL = "更新至最新版";
+    const ITEM_TEST_ID = "utMainMenuItem-update";
+    const STATE_KEY = "__utaipeiGraduationMenuEnhancer";
+
+    function markScriptHost() {
+        try {
+            const candidate = window.frameElement || document.currentScript;
+            const element = candidate && candidate.closest
+                ? candidate.closest('[data-testid="stElementContainer"]')
+                : null;
+            if (element) {
+                element.setAttribute("data-utaipei-menu-script-host", "true");
+                element.style.display = "none";
+            }
+        } catch (_error) {
+            // The bridge is an optional enhancement; a blocked parent must not
+            // stop Streamlit from rendering the graduation checker.
+        }
+    }
+
+    function installUpdateItem(parentWindow) {
+        const document = parentWindow.document;
+        const menu = document.querySelector('[data-testid="stMainMenuList"][role="menu"]')
+            || document.querySelector('[data-testid="stMainMenuList"]');
+        if (!menu || menu.querySelector('[data-testid="' + ITEM_TEST_ID + '"]')) {
+            return;
+        }
+
+        // Streamlit 1.57 exposes Print/Record screen while newer releases add
+        // Rerun/Clear cache.  The first action is stable across both versions.
+        const insertionAnchor = menu.querySelector('[data-testid="stMainMenuItem-rerun"]')
+            || menu.querySelector('[data-testid="stMainMenuItem-clearCache"]')
+            || menu.querySelector('[data-testid="stMainMenuItem-print"]')
+            || menu.querySelector('button[role="menuitem"]');
+        // This element must belong to the parent document.  A click handler
+        // owned by the sandboxed st.iframe cannot navigate its parent, whereas
+        // a normal same-document anchor keeps the browser's native activation
+        // and navigation behavior (including keyboard Enter) intact.
+        const item = document.createElement("a");
+        const url = new URL(parentWindow.location.href);
+        url.searchParams.set("_ut_update", String(Date.now()));
+        item.setAttribute("href", url.toString());
+        item.setAttribute("target", "_self");
+        item.setAttribute("type", "button");
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("tabindex", "-1");
+        item.setAttribute("aria-label", LABEL);
+        item.setAttribute("data-testid", ITEM_TEST_ID);
+        item.classList.add("utaipei-update-menu-item");
+        item.replaceChildren();
+
+        const label = document.createElement("span");
+        label.setAttribute("data-testid", "stMainMenuItemLabel");
+        label.textContent = LABEL;
+        item.appendChild(label);
+
+        item.addEventListener("keydown", (event) => {
+            if (event.key === " " || event.key === "Spacebar") {
+                event.preventDefault();
+                event.stopPropagation();
+                item.click();
+            }
+        });
+
+        if (insertionAnchor) {
+            menu.insertBefore(item, insertionAnchor);
+        } else {
+            menu.appendChild(item);
+        }
+    }
+
+    markScriptHost();
+    try {
+        const parentWindow = window.parent;
+        if (!parentWindow || parentWindow === window || !parentWindow.document) {
+            return;
+        }
+
+        let state = parentWindow[STATE_KEY];
+        if (!state) {
+            state = {
+                install: () => installUpdateItem(parentWindow),
+                observer: null,
+            };
+            parentWindow[STATE_KEY] = state;
+            state.observer = new parentWindow.MutationObserver(() => state.install());
+            state.observer.observe(parentWindow.document.documentElement, {
+                childList: true,
+                subtree: true,
+            });
+        }
+        state.install();
+        parentWindow.requestAnimationFrame(state.install);
+    } catch (_error) {
+        // The bridge is an optional enhancement; keep the app usable if the
+        // embedding browser blocks same-origin DOM access.
+    }
+})();
+</script>
+"""
+
+
+def _inject_update_menu_script():
+    """Run the parent-document bridge without rendering a visible page control."""
+
+    script = _build_update_menu_script()
+    # ``st.html`` sanitizes script-only fragments in some deployed Streamlit
+    # builds even when ``unsafe_allow_javascript`` is available.  The legacy
+    # component bridge is intentionally used here because it guarantees a
+    # same-origin executable document on the pinned 1.57 runtime.
+    components.html(script, height=1, width=1)
 
 
 def collapse_sidebar_if_needed():
@@ -749,21 +876,55 @@ def inject_theme_css():
             .sidebar-meta { color: var(--ui-text-muted); font-size: .72rem; line-height: 1.55; overflow-wrap: anywhere; }
             .admin-help { color: var(--ui-text-muted) !important; font-size: .84rem !important; line-height: 1.6; }
 
+            /* The updater lives in an HTML element only as a DOM bridge.  It
+               must never reserve a row in the visible report layout. */
+            [data-testid="stElementContainer"][data-utaipei-menu-script-host="true"] {
+                display: none !important;
+            }
+            [data-testid="stMainMenuList"] .utaipei-update-menu-item {
+                display: flex !important;
+                align-items: center;
+                min-width: 100% !important;
+                min-height: var(--ui-control-height) !important;
+                justify-content: flex-start;
+                padding: .5rem .55rem !important;
+                border: 0 !important;
+                border-radius: var(--ui-radius-sm) !important;
+                background: transparent !important;
+                color: var(--ui-text) !important;
+                font: inherit;
+                text-align: left;
+                text-decoration: none !important;
+                cursor: pointer;
+                touch-action: manipulation;
+            }
+            [data-testid="stMainMenuList"] .utaipei-update-menu-item:hover {
+                border-color: transparent !important;
+                background: var(--ui-accent-soft) !important;
+                color: var(--ui-text) !important;
+                box-shadow: none;
+            }
+            [data-testid="stMainMenuList"] .utaipei-update-menu-item:focus-visible {
+                outline: 3px solid var(--ui-focus) !important;
+                outline-offset: -2px !important;
+                box-shadow: none !important;
+            }
+
             /* ----- responsive layout ---------------------------------------------- */
             @media (max-width: 1100px) {
                 .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
                 .info-flex { grid-template-columns: minmax(0, 1fr); }
             }
             @media (max-width: 768px) {
-                /* iOS standalone draws the status bar over the app. Keep each
-                   safe-area edge in one box so nested padding cannot create a
-                   second bottom spacer above the home indicator. */
+                /* The standalone viewport already starts below iOS's status
+                   bar.  Keep Streamlit's main section as the only scrolling
+                   owner and apply side/bottom insets only where content can
+                   actually meet a device edge. */
                 [data-testid="stAppViewContainer"] {
                     padding: 0 !important;
-                    overflow-y: auto;
                 }
                 [data-testid="stMainBlockContainer"] {
-                    padding: calc(.85rem + var(--ui-safe-top))
+                    padding: .85rem
                         max(.85rem, var(--ui-safe-right))
                         max(1.25rem, var(--ui-safe-bottom))
                         max(.85rem, var(--ui-safe-left)) !important;
@@ -813,7 +974,10 @@ def inject_theme_css():
                 .course-status-col { justify-content: flex-start !important; text-align: left !important; }
             }
             @media (max-width: 480px) {
-                [data-testid="stMainBlockContainer"] { padding-inline: .65rem !important; }
+                [data-testid="stMainBlockContainer"] {
+                    padding-inline: max(.65rem, var(--ui-safe-left))
+                        max(.65rem, var(--ui-safe-right)) !important;
+                }
                 [data-testid="column"] { min-width: 100%; flex-basis: 100% !important; }
                 .metric-grid { grid-template-columns: minmax(0, 1fr); }
                 .parsed-summary { grid-template-columns: minmax(0, 1fr); }

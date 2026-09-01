@@ -155,6 +155,24 @@ def flatten_allocation_rows(report: Mapping[str, Any] | None = None) -> list[dic
                 {
                     "bucket": bucket,
                     "course_name": str(course.get("name") or course.get("raw_name") or ""),
+                    "course_code": str(course.get("course_code") or ""),
+                    "offering_department": str(course.get("offering_department") or ""),
+                    "identity_status": str(course.get("identity_status") or ""),
+                    "identity_scope": str(course.get("identity_scope") or ""),
+                    "identity_reason": str(course.get("identity_reason") or ""),
+                    "identity_authority": str(course.get("identity_authority") or course.get("authority") or ""),
+                    "identity_evidence_reference": str(
+                        course.get("identity_evidence_reference") or course.get("evidence_reference") or ""
+                    ),
+                    # Keep the established equivalency names in the flat row as
+                    # well; manual approvals should remain auditable by either
+                    # schema consumer.
+                    "authority": str(course.get("authority") or course.get("identity_authority") or ""),
+                    "evidence_reference": str(
+                        course.get("evidence_reference") or course.get("identity_evidence_reference") or ""
+                    ),
+                    "target_requirement_id": str(course.get("target_requirement_id") or ""),
+                    "target_requirement_name": str(course.get("target_requirement_name") or ""),
                     "allocated_completed_credits": completed,
                     "allocated_ip_credits": in_progress,
                     "allocation_note": str(course.get("allocation_note") or ""),
@@ -290,6 +308,12 @@ def build_audit_payload(audit: Mapping[str, Any] | None = None) -> dict[str, Any
     cohort_match = source.get("cohort_match", report.get("cohort_match", {}))
     if not isinstance(cohort_match, Mapping):
         cohort_match = {"status": cohort_match}
+    identity_gate = source.get("identity_gate", report.get("identity_gate", {}))
+    if not isinstance(identity_gate, Mapping):
+        identity_gate = {"status": identity_gate}
+    identity_issues = source.get("identity_issues", report.get("identity_issues", []))
+    if not isinstance(identity_issues, (list, tuple)):
+        identity_issues = []
     return {
         "cohort": source.get("cohort", source.get("admission_cohort", report.get("handbook_year", ""))),
         "primary_program": source.get("primary_program", source.get("program", report.get("primary_plan", {}).get("primary_program", ""))),
@@ -302,6 +326,8 @@ def build_audit_payload(audit: Mapping[str, Any] | None = None) -> dict[str, Any
         "status": source.get("status", source.get("graduation_status", report_summary.get("graduation_status", "UNKNOWN"))),
         "requirements": dict(requirements),
         "gate_results": dict(gate_results) if isinstance(gate_results, Mapping) else gate_results,
+        "identity_gate": dict(identity_gate),
+        "identity_issues": [dict(item) if isinstance(item, Mapping) else {"value": item} for item in identity_issues],
         "manual_gates": dict(manual_gates) if isinstance(manual_gates, Mapping) else manual_gates,
         "warnings": [str(item) for item in warnings],
         "citations": [dict(item) if isinstance(item, Mapping) else {"citation": str(item)} for item in citations],
@@ -326,6 +352,7 @@ def audit_csv_bytes(audit: Mapping[str, Any] | None = None) -> bytes:
     eligibility = payload["eligibility"]
     shared_reuse = payload["shared_reuse"]
     equivalency = payload["equivalency"]
+    identity_gate = payload["identity_gate"]
     row = {
         "cohort": payload["cohort"],
         "primary_program": payload["primary_program"],
@@ -343,6 +370,9 @@ def audit_csv_bytes(audit: Mapping[str, Any] | None = None) -> bytes:
         "cohort_mismatch_confirmed": application.get("cohort_mismatch_confirmed", False),
         "eligibility": eligibility.get("status", eligibility.get("state", payload["status"])),
         "status": payload["status"],
+        "identity_gate_status": identity_gate.get("status", identity_gate.get("state", "")),
+        "identity_gate_reasons": _json_value(identity_gate.get("reasons", [])),
+        "identity_issues": _json_value(payload["identity_issues"]),
         "evidence_states": _json_value(payload["evidence_states"]),
         "cohort_match": _json_value(payload["cohort_match"]),
         "requirements": _json_value(payload["requirements"]),

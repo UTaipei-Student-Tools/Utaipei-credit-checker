@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 import secrets
+import unicodedata
 from typing import Any, Iterable, Mapping
 
 from handbook_rules import get_apc_target_requirements, normalize_course_name
@@ -165,24 +166,63 @@ def normalize_decision_state(value: Any) -> str:
     return _STATE_ALIASES.get(text.lower(), _STATE_ALIASES.get(text, INVALID))
 
 
+ATTEMPT_ID_VERSION = "v2"
+
+
+def _normalize_identity_token(value: Any) -> str:
+    """Normalize a code/department token without fuzzy matching semantics."""
+
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    return re.sub(r"\s+", "", text).upper()
+
+
+def source_attempt_identity(course: Mapping[str, Any] | None = None) -> tuple[Any, ...]:
+    """Return the authoritative normalized identity tuple for one attempt.
+
+    The tuple deliberately contains offering metadata in addition to the
+    title/credit/term fields.  This is the single contract shared by the
+    standalone equivalency audit and credit-engine canonicalization.
+    """
+
+    course = course or {}
+    name = normalize_course_name(course.get("name") or course.get("raw_name") or "")
+    total = _number(course.get("total_credit"), 0.0) or 0.0
+    return (
+        ATTEMPT_ID_VERSION,
+        name,
+        round(total, 6),
+        _normalize_identity_token(course.get("academic_year")),
+        _normalize_identity_token(course.get("semester")),
+        _normalize_identity_token(course.get("sem1_credit")),
+        _normalize_identity_token(course.get("sem2_credit")),
+        _normalize_identity_token(course.get("course_code") or course.get("課號")),
+        _normalize_identity_token(
+            course.get("offering_department")
+            or course.get("開課系所")
+            or course.get("department")
+        ),
+    )
+
+
+get_source_attempt_identity = source_attempt_identity
+
+
 def source_attempt_id(course: Mapping[str, Any] | None = None) -> str:
-    """Return the same deterministic attempt key used by ``credit_engine``."""
+    """Return a versioned deterministic attempt ID.
+
+    Explicit non-``attempt:`` IDs remain supported for standalone integrations
+    (for example, a portal's opaque source key).  Legacy ``attempt:...`` IDs
+    are never returned: they are recomputed as v2, so an old approval cannot
+    silently bind to a newer transcript row.
+    """
 
     course = course or {}
     existing = str(course.get("attempt_id") or course.get("source_attempt_id") or "").strip()
-    if existing:
+    if existing and not existing.startswith("attempt:"):
         return existing
-    name = normalize_course_name(course.get("name") or course.get("raw_name") or "")
-    total = _number(course.get("total_credit"), 0.0) or 0.0
-    values = (
-        name,
-        round(total, 6),
-        str(course.get("academic_year") or ""),
-        str(course.get("semester") or ""),
-        str(course.get("sem1_credit") or ""),
-        str(course.get("sem2_credit") or ""),
-    )
-    return "attempt:" + "|".join(str(value) for value in values)
+    payload = json.dumps(source_attempt_identity(course), ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"attempt:{ATTEMPT_ID_VERSION}:{digest}"
 
 
 get_source_attempt_id = source_attempt_id
@@ -817,7 +857,10 @@ def audit_equivalency_decisions(
     by_id: dict[str, list[Mapping[str, Any]]] = {}
     for course in raw_courses:
         copied = dict(course)
-        copied.setdefault("attempt_id", source_attempt_id(copied))
+        # Always canonicalize legacy ``attempt:...`` values to the current
+        # contract.  A decision carrying that literal legacy value must still
+        # fail closed in ``_resolve_source`` rather than being trusted here.
+        copied["attempt_id"] = source_attempt_id(copied)
         canonical_courses.append(copied)
         by_id.setdefault(copied["attempt_id"], []).append(copied)
 

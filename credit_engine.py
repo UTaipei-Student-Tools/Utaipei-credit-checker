@@ -17,13 +17,19 @@ from equivalency_audit import (
     apply_equivalency_audit_to_report,
     audit_equivalency_decisions,
     source_attempt_id,
+    source_attempt_identity,
 )
 from policy_audit import (
     GRADUATION_UNKNOWN,
     GRADUATION_NOT_SATISFIED,
     GRADUATION_SATISFIED,
     UNKNOWN,
+    COURSE_IDENTITY_CONFLICTED,
+    COURSE_IDENTITY_MANUAL_APPROVED,
+    COURSE_IDENTITY_UNKNOWN,
+    COURSE_IDENTITY_VERIFIED,
     assess_cohort_match,
+    assess_course_identity,
     assess_cs_manual_gate,
     assess_double_major_eligibility,
     get_double_structure,
@@ -119,33 +125,128 @@ def _course_credit_matches(course, expected_credit):
         return False
 
 
-def _course_matches_rule(course, rule_name, expected_credit=None, aliases=()):
+def _record_identity_issue(issues, course, rule_name, evidence, *, requirement_id=""):
+    """Append one deterministic identity conflict for report/export review."""
+
+    if not isinstance(issues, list) or not isinstance(evidence, dict):
+        return
+    item = {
+        "course_name": str(course.get("name") or course.get("raw_name") or ""),
+        "course_code": str(course.get("course_code") or ""),
+        "offering_department": str(course.get("offering_department") or ""),
+        "requirement_name": str(rule_name or ""),
+        "requirement_id": str(requirement_id or ""),
+        "identity_scope": evidence.get("identity_scope", ""),
+        "identity_status": evidence.get("identity_status", COURSE_IDENTITY_CONFLICTED),
+        "identity_reason": evidence.get("identity_reason", ""),
+        "identity_authority": evidence.get("identity_authority", ""),
+        "identity_evidence_reference": evidence.get("identity_evidence_reference", ""),
+        "attempt_id": str(course.get("attempt_id") or _stable_attempt_id(course)),
+    }
+    key = (
+        item["attempt_id"],
+        normalize_course_name(item["requirement_name"]),
+        item["requirement_id"],
+        item["identity_status"],
+    )
+    if not any(
+        (
+            str(existing.get("attempt_id") or ""),
+            normalize_course_name(existing.get("requirement_name") or ""),
+            str(existing.get("requirement_id") or ""),
+            str(existing.get("identity_status") or ""),
+        )
+        == key
+        for existing in issues
+        if isinstance(existing, dict)
+    ):
+        issues.append(item)
+
+
+def _dedupe_identity_issues(issues):
+    """Return stable, deterministic identity issue rows for reports/exports."""
+
+    unique = {}
+    for item in issues or []:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("attempt_id") or ""),
+            str(item.get("identity_scope") or ""),
+            str(item.get("identity_status") or ""),
+            # A single allocated UNKNOWN source is one evidence gap even if
+            # a reporting pass exposes it through duplicate target slices.
+            "" if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN else normalize_course_name(item.get("requirement_name") or ""),
+            "" if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN else str(item.get("requirement_id") or ""),
+        )
+        unique.setdefault(key, dict(item))
+    return [unique[key] for key in sorted(unique)]
+
+
+def _course_matches_rule(
+    course,
+    rule_name,
+    expected_credit=None,
+    aliases=(),
+    *,
+    scope=None,
+    identity_issues=None,
+    manual_approval=None,
+    requirement_id="",
+):
     accepted = {normalize_course_name(rule_name)}
     accepted.update(normalize_course_name(alias) for alias in aliases)
     accepted.discard("")
     course_name = normalize_course_name(course.get("name", "") or "")
     raw_name = normalize_course_name(course.get("raw_name", "") or "")
-    return (course_name in accepted or raw_name in accepted) and _course_credit_matches(course, expected_credit)
+    if not (course_name in accepted or raw_name in accepted) or not _course_credit_matches(course, expected_credit):
+        return False
+    if scope:
+        evidence = assess_course_identity(course, scope, manual_approval=manual_approval)
+        # Keep the evidence on the source row so every later report bucket,
+        # drilldown, and export can explain the provisional allocation.
+        course.update(evidence)
+        if evidence.get("identity_status") == COURSE_IDENTITY_CONFLICTED:
+            _record_identity_issue(identity_issues, course, rule_name, evidence, requirement_id=requirement_id)
+            return False
+    return True
 
 
 def _explicit_aliases(alias_sets, scope, rule_name):
     return alias_sets.get(scope, {}).get(rule_name, [])
 
 
-def _find_best_alternative(courses, options, consumed_set):
+def _find_best_alternative(courses, options, consumed_set, *, scope=None, identity_issues=None):
     candidates = []
     for option_name, expected_credit in options.items():
         for course in courses:
             if id(course) in consumed_set:
                 continue
-            if _course_matches_rule(course, option_name, expected_credit):
+            if _course_matches_rule(
+                course,
+                option_name,
+                expected_credit,
+                scope=scope,
+                identity_issues=identity_issues,
+            ):
                 rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
-                candidates.append((rank, option_name, course))
+                identity_rank = {
+                    COURSE_IDENTITY_VERIFIED: 2,
+                    COURSE_IDENTITY_MANUAL_APPROVED: 2,
+                    COURSE_IDENTITY_UNKNOWN: 1,
+                }.get(course.get("identity_status"), 0)
+                candidates.append((rank, identity_rank, option_name, course))
     if not candidates:
         return None
-    _, _, selected = max(
+    _, _, _, selected = max(
         candidates,
-        key=lambda item: (item[0], _record_quality(item[2]), normalize_course_name(item[1]), _course_stable_key(item[2])),
+        key=lambda item: (
+            item[0],
+            item[1],
+            _record_quality(item[3]),
+            normalize_course_name(item[2]),
+            _course_stable_key(item[3]),
+        ),
     )
     consumed_set.add(id(selected))
     return selected
@@ -332,6 +433,7 @@ def _course_status_rank(course):
 def _course_stable_key(course):
     """Stable order independent of transcript row order."""
 
+    identity = source_attempt_identity(course)
     return (
         normalize_course_name(course.get("name", "") or ""),
         round(float(course.get("total_credit") or 0.0), 6),
@@ -341,30 +443,21 @@ def _course_stable_key(course):
         str(course.get("academic_year", "") or ""),
         str(course.get("semester", "") or ""),
         normalize_course_name(course.get("raw_name", "") or ""),
+        str(identity[-2]),
+        str(identity[-1]),
     )
 
 
 def _attempt_identity(course):
-    """Identity of one offering/term, excluding score quality."""
+    """Compatibility wrapper around the authoritative identity contract."""
 
-    try:
-        total_credit = round(float(course.get("total_credit") or 0.0), 6)
-    except (TypeError, ValueError):
-        total_credit = 0.0
-    return (
-        normalize_course_name(course.get("name", "") or ""),
-        total_credit,
-        str(course.get("academic_year", "") or ""),
-        str(course.get("semester", "") or ""),
-        str(course.get("sem1_credit", "") or ""),
-        str(course.get("sem2_credit", "") or ""),
-    )
+    return source_attempt_identity(course)
 
 
 def _stable_attempt_id(course):
-    """Stable human-readable ID for allocation/audit joins."""
+    """Compatibility wrapper around the authoritative versioned ID contract."""
 
-    return "attempt:" + "|".join(str(value) for value in _attempt_identity(course))
+    return source_attempt_id(course)
 
 
 def _stable_course_id(course):
@@ -597,6 +690,21 @@ def _empty_threshold_report(plan, requirements, config, target_plan=None, target
         "manual_gates": {},
         "audit": {"input_course_count": len(config.get("courses", []) or []), "canonical_course_count": 0, "deduplicated_count": 0},
         "shared_reuse": _empty_shared_reuse(),
+        "identity_issues": [],
+        "identity_gate": {
+            "status": "NOT_APPLICABLE",
+            "state": "NOT_APPLICABLE",
+            "scoped_course_count": 0,
+            "verified_count": 0,
+            "unknown_count": 0,
+            "conflicted_count": 0,
+            "allocated_conflicted_count": 0,
+            "allocated_unknown_count": 0,
+            "rejected_conflicted_count": 0,
+            "manual_approved_count": 0,
+            "reasons": [],
+            "issues": [],
+        },
     }
 
 
@@ -633,6 +741,236 @@ def _target_course_rules(target_plan):
         str(row.get("name")): float(row.get("credits", 0.0) or 0.0)
         for row in target_plan.get("requirements", [])
         if isinstance(row, dict) and row.get("kind", "course") == "course" and row.get("name")
+    }
+
+
+def _target_requirement_rows_by_name(target_plan):
+    """Return exact target rows for identity/approval joins."""
+
+    if not isinstance(target_plan, dict):
+        return {}
+    return {
+        normalize_course_name(row.get("name")): row
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("name") and row.get("kind", "course") == "course"
+    }
+
+
+def _identity_scope_for_primary(domain):
+    """Department scope for the detailed Earth/Life primary catalogue."""
+
+    # Earth/Life tracks are two tracks of the same 地生 department.  Keep the
+    # user-facing track in the reason while matching the shared department
+    # aliases in ``assess_course_identity``.
+    return "地生系"
+
+
+def _identity_scope_for_target(target_dept):
+    """Department scope for a selected cross-department target."""
+
+    text = str(target_dept or "")
+    if "物理" in text:
+        return "物化系物理組"
+    if "化學" in text:
+        return "物化系化學組"
+    if "物化" in text:
+        return "物化系"
+    if "資科" in text or "資訊" in text:
+        return "資科系"
+    if "數學" in text:
+        return "數學系"
+    return str(target_dept or "")
+
+
+def _approved_identity_bindings(courses, target_plan, config, target_dept, program):
+    """Validate existing source→target approvals for identity overrides.
+
+    This is deliberately a read-only validation pass.  The normal equivalency
+    audit still runs after classification and remains the only path that can
+    add shared/reclassified credits.  Here we only expose a complete approved
+    binding to the exact matcher so a missing transcript identity can be shown
+    as ``MANUAL_APPROVED`` instead of silently as verified.
+    """
+
+    if not isinstance(target_plan, dict) or not target_plan.get("requirements"):
+        return {}
+    decisions = config.get("equivalency_decisions") or []
+    if not decisions:
+        return {}
+    context = dict(config.get("equivalency_context") or {})
+    context.update(
+        {
+            "admission_cohort": config.get("handbook_year") or config.get("admission_cohort"),
+            "target_program": "物化" if "物化" in str(target_dept or "") else target_dept,
+            "target_dept": target_dept,
+            "target_track": "物理組" if "物理" in str(target_dept or "") else "化學組" if "化學" in str(target_dept or "") else config.get("target_track", ""),
+            "program_type": program,
+        }
+    )
+    try:
+        audit = audit_equivalency_decisions(
+            courses,
+            target_plan,
+            decisions,
+            context=context,
+            include_candidates=False,
+        )
+    except (TypeError, ValueError, KeyError):
+        return {}
+    bindings = {}
+    for mapping in audit.get("approved_mappings", []) if isinstance(audit, dict) else []:
+        if not isinstance(mapping, dict) or mapping.get("counts") is not True:
+            continue
+        source_id = str(mapping.get("source_attempt_id") or "").strip()
+        target_id = str(mapping.get("target_requirement_id") or "").strip()
+        if source_id and target_id and mapping.get("authority") and mapping.get("evidence_reference"):
+            bindings[(source_id, target_id)] = mapping
+    return bindings
+
+
+def _annotate_manual_equivalency_identity(report, target_scope):
+    """Mark applied equivalency rows as manual identity evidence."""
+
+    if not isinstance(report, dict):
+        return
+    equivalency = report.get("equivalency", {})
+    mappings = equivalency.get("applied_mappings", []) if isinstance(equivalency, dict) else []
+    by_key = {
+        (
+            str(item.get("source_attempt_id") or "").strip(),
+            str(item.get("target_requirement_id") or "").strip(),
+        ): item
+        for item in mappings
+        if isinstance(item, dict)
+    }
+    if not by_key:
+        return
+    target = report.get("target", {})
+    if not isinstance(target, dict):
+        return
+    for key in ("basic_core_courses", "compulsory_courses", "elective_courses", "equivalency_courses"):
+        for course in target.get(key, []) or []:
+            if not isinstance(course, dict):
+                continue
+            source_id = str(course.get("attempt_id") or course.get("source_attempt_id") or "").strip()
+            target_id = str(course.get("target_requirement_id") or "").strip()
+            mapping = by_key.get((source_id, target_id))
+            if not mapping:
+                continue
+            course.update(
+                {
+                    "identity_status": COURSE_IDENTITY_MANUAL_APPROVED,
+                    "identity_scope": target_scope,
+                    "identity_reason": "已由完整的來源修課→目標門檻核准綁定覆蓋成績單身分欄位。",
+                    "identity_authority": str(mapping.get("authority") or ""),
+                    "identity_evidence_reference": str(mapping.get("evidence_reference") or ""),
+                    "identity_source_attempt_id": source_id,
+                    "identity_target_requirement_id": target_id,
+                    # Keep the existing names too; equivalency exports already
+                    # consume these fields and users recognize them there.
+                    "authority": str(mapping.get("authority") or course.get("authority") or ""),
+                    "evidence_reference": str(mapping.get("evidence_reference") or course.get("evidence_reference") or ""),
+                }
+            )
+
+
+def _build_identity_gate(report):
+    """Summarize scoped identity evidence without touching credit totals."""
+
+    records = []
+    seen_records = set()
+    for section, keys in (
+        ("major", ("dept_compulsory_courses", "domain_compulsory_courses", "domain_elective_courses", "other_elective_courses")),
+        ("target", ("basic_core_courses", "compulsory_courses", "elective_courses", "equivalency_courses")),
+    ):
+        data = report.get(section, {}) if isinstance(report.get(section, {}), dict) else {}
+        for key in keys:
+            for course in data.get(key, []) or []:
+                if isinstance(course, dict) and course.get("identity_scope"):
+                    record_key = (
+                        str(course.get("attempt_id") or course.get("_origin_id") or ""),
+                        str(course.get("identity_scope") or ""),
+                    )
+                    if record_key in seen_records:
+                        continue
+                    seen_records.add(record_key)
+                    records.append(course)
+    unknown = [item for item in records if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN]
+    manual = [item for item in records if item.get("identity_status") == COURSE_IDENTITY_MANUAL_APPROVED]
+    allocated_conflicts = [
+        item for item in records if item.get("identity_status") == COURSE_IDENTITY_CONFLICTED
+    ]
+    issues = _dedupe_identity_issues(report.get("identity_issues", []))
+    for item in unknown:
+        issues.append(
+            {
+                "course_name": str(item.get("name") or item.get("raw_name") or ""),
+                "course_code": str(item.get("course_code") or ""),
+                "offering_department": str(item.get("offering_department") or ""),
+                "requirement_name": str(
+                    item.get("target_requirement_name") or item.get("name") or ""
+                ),
+                "requirement_id": str(item.get("target_requirement_id") or ""),
+                "identity_scope": str(item.get("identity_scope") or ""),
+                "identity_status": COURSE_IDENTITY_UNKNOWN,
+                "identity_reason": str(item.get("identity_reason") or ""),
+                "identity_authority": str(item.get("identity_authority") or ""),
+                "identity_evidence_reference": str(item.get("identity_evidence_reference") or ""),
+                "attempt_id": str(item.get("attempt_id") or item.get("_origin_id") or ""),
+            }
+        )
+    issues = _dedupe_identity_issues(issues)
+    report["identity_issues"] = issues
+    conflicts = []
+    seen_conflicts = set()
+    for item in [*issues, *records]:
+        if item.get("identity_status") != COURSE_IDENTITY_CONFLICTED:
+            continue
+        conflict_key = (
+            str(item.get("attempt_id") or item.get("_origin_id") or item.get("course_name") or ""),
+            str(item.get("requirement_id") or item.get("target_requirement_id") or ""),
+            str(item.get("identity_scope") or ""),
+        )
+        if conflict_key in seen_conflicts:
+            continue
+        seen_conflicts.add(conflict_key)
+        conflicts.append(item)
+    # UNKNOWN allocated evidence is the most conservative state: it must not
+    # be hidden by a rejected conflict from another transcript row.  Rejected
+    # conflicts remain visible/countable below, but do not block when a
+    # different allocated row is VERIFIED or MANUAL_APPROVED.
+    if unknown:
+        status = COURSE_IDENTITY_UNKNOWN
+    elif allocated_conflicts:
+        status = COURSE_IDENTITY_CONFLICTED
+    elif manual:
+        status = COURSE_IDENTITY_MANUAL_APPROVED
+    elif records:
+        status = COURSE_IDENTITY_VERIFIED
+    else:
+        status = "NOT_APPLICABLE"
+    reasons = []
+    if unknown:
+        reasons.append(f"{len(unknown)} 門系所課程缺少課號／開課系所，只能作暫時配置；需系所確認。")
+    if conflicts:
+        reasons.append(f"{len(conflicts)} 門課程的開課系所與要求範圍衝突，未計入該系所門檻。")
+    if manual:
+        reasons.append(f"{len(manual)} 門課程使用完整人工核准綁定。")
+    if status == COURSE_IDENTITY_VERIFIED:
+        reasons.append("所有已配置的系所課程都有可核對的課號與開課系所。")
+    return {
+        "status": status,
+        "state": status,
+        "scoped_course_count": len(records),
+        "verified_count": sum(item.get("identity_status") == COURSE_IDENTITY_VERIFIED for item in records),
+        "unknown_count": len(unknown),
+        "conflicted_count": len(conflicts),
+        "allocated_conflicted_count": len(allocated_conflicts),
+        "allocated_unknown_count": len(unknown),
+        "rejected_conflicted_count": max(0, len(conflicts) - len(allocated_conflicts)),
+        "manual_approved_count": len(manual),
+        "reasons": list(dict.fromkeys(reasons)),
+        "issues": issues,
     }
 
 
@@ -951,7 +1289,47 @@ def evaluate_graduation(courses, config):
         "audit": canonical_meta,
         "manual_gates": {},
         "shared_reuse": _empty_shared_reuse(),
+        # Department-scoped rows carry their own evidence; this aggregate is
+        # populated again after equivalency mappings are applied.
+        "identity_issues": [],
+        "identity_gate": {
+            "status": "NOT_APPLICABLE",
+            "state": "NOT_APPLICABLE",
+            "scoped_course_count": 0,
+            "verified_count": 0,
+            "unknown_count": 0,
+            "conflicted_count": 0,
+            "allocated_conflicted_count": 0,
+            "allocated_unknown_count": 0,
+            "rejected_conflicted_count": 0,
+            "manual_approved_count": 0,
+            "reasons": [],
+            "issues": [],
+        },
     }
+
+    primary_identity_scope = _identity_scope_for_primary(domain)
+    target_identity_scope = (
+        _identity_scope_for_target(target_dept) if program in {"雙主修", "輔系"} else ""
+    )
+    target_requirement_rows = _target_requirement_rows_by_name(target_requirements)
+    target_quota_id = ""
+    if isinstance(target_requirements, dict):
+        target_quota_id = next(
+            (
+                str(row.get("id") or "")
+                for row in target_requirements.get("requirements", [])
+                if isinstance(row, dict) and row.get("kind") == "quota" and row.get("id")
+            ),
+            "",
+        )
+    identity_bindings = _approved_identity_bindings(
+        courses,
+        target_requirements,
+        {**config, "handbook_year": rule_sets["academic_year"]},
+        target_dept,
+        program,
+    )
 
     consumed = set()
 
@@ -998,7 +1376,14 @@ def evaluate_graduation(courses, config):
 
     # ── PHASE 0.5: 地生系與專業領域必修（主修必修最高優先）────────
     for name, req_cred in earth_life_major["common_compulsory"].items():
-        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+        matched_c = find_and_consume_course(
+            courses,
+            name,
+            consumed,
+            req_cred,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["dept_compulsory_courses"].append(matched_c)
@@ -1011,7 +1396,13 @@ def evaluate_graduation(courses, config):
 
     for group in earth_life_major.get("common_alternatives", []):
         required = float(group.get("required_credits", 0))
-        matched_c = _find_best_alternative(courses, group.get("options", {}), consumed)
+        matched_c = _find_best_alternative(
+            courses,
+            group.get("options", {}),
+            consumed,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["dept_compulsory_courses"].append(matched_c)
@@ -1028,7 +1419,14 @@ def evaluate_graduation(courses, config):
 
     domain_rules = earth_life_major["domains"][domain]
     for name, req_cred in domain_rules.items():
-        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+        matched_c = find_and_consume_course(
+            courses,
+            name,
+            consumed,
+            req_cred,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["domain_compulsory_courses"].append(matched_c)
@@ -1048,7 +1446,17 @@ def evaluate_graduation(courses, config):
             basic_core_rules = _target_course_rules(target_requirements) or apc_rules["basic_core"]
 
             for name, req_cred in basic_core_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["basic_core_courses"].append(matched_c)
@@ -1070,7 +1478,17 @@ def evaluate_graduation(courses, config):
                 )
             )
             for name, req_cred in other_required_pool.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=(target_row.get("id", "") if isinstance(target_row, dict) else "") or target_quota_id,
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
@@ -1108,7 +1526,17 @@ def evaluate_graduation(courses, config):
             comp_rules = rules["compulsory"]
 
             for name, req_cred in comp_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
@@ -1120,12 +1548,17 @@ def evaluate_graduation(courses, config):
                     report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
             for name, req_cred in cs_rules.get("department_courses", {}).items():
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
                 matched_c = find_and_consume_course(
                     courses,
                     name,
                     consumed,
                     req_cred,
                     _explicit_aliases(alias_sets, "cs", name),
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
                 )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
@@ -1304,7 +1737,13 @@ def evaluate_graduation(courses, config):
         c_idx = id(c)
         if c_idx not in consumed:
             for rule_name, rule_credit in domain_elective_rules.items():
-                if _course_matches_rule(c, rule_name, rule_credit):
+                if _course_matches_rule(
+                    c,
+                    rule_name,
+                    rule_credit,
+                    scope=primary_identity_scope,
+                    identity_issues=report["identity_issues"],
+                ):
                     comp_c, ip_c = get_course_credits(c)
                     report["major"]["domain_elective_courses"].append(c)
                     report["major"]["domain_elective_completed"] += comp_c
@@ -1327,6 +1766,8 @@ def evaluate_graduation(courses, config):
                     rule_name,
                     rule_credit,
                     _explicit_aliases(alias_sets, "earth_life_common_electives", rule_name),
+                    scope=primary_identity_scope,
+                    identity_issues=report["identity_issues"],
                 ):
                     comp_c, ip_c = get_course_credits(c)
                     report["major"]["other_elective_courses"].append(c)
@@ -1554,6 +1995,13 @@ def evaluate_graduation(courses, config):
         )
         report = apply_equivalency_audit_to_report(report, equivalency_audit, mutate=True)
 
+    # A complete approved source-attempt → target-requirement mapping is the
+    # only non-transcript override for a department-scoped identity.  Mark the
+    # applied slices before computing the final identity gate so exports and
+    # drilldowns carry the same evidence decision.
+    _annotate_manual_equivalency_identity(report, target_identity_scope)
+    report["identity_gate"] = _build_identity_gate(report)
+
     target_satisfied = target_gate_satisfied()
 
     # Relevant policy contradictions / missing manual evidence are explicit
@@ -1629,10 +2077,10 @@ def evaluate_graduation(courses, config):
         report["policy_warnings"] = list(
             dict.fromkeys(report["policy_warnings"] + cohort_match.get("reasons", []))
         )
-    # Parser course-code/department omissions are non-fatal for the existing
-    # Earth/Life title-based evaluator.  Only explicitly fatal diagnostics
-    # block its definitive gates; threshold-only programs remain UNKNOWN via
-    # their non-detailed path.
+    # Parser course-code/department omissions are evidence gaps, not a global
+    # fatal parse error.  They become a graduation blocker only when the
+    # affected row was actually allocated to a department-scoped requirement;
+    # common/general/free-only allocations therefore remain usable.
     if parser_diagnostics:
         parser_fatal = parser_diagnostics.get("fatal")
         if parser_fatal is None:
@@ -1644,10 +2092,19 @@ def evaluate_graduation(courses, config):
                 parser_fatal = parser_diagnostics.get("complete") is False
     else:
         parser_fatal = False
+    identity_gate = report.get("identity_gate", {})
+    if not isinstance(identity_gate, dict):
+        identity_gate = {"status": "NOT_APPLICABLE"}
+    allocated_unknown = bool(
+        identity_gate.get("allocated_unknown_count", identity_gate.get("unknown_count", 0))
+    )
+    allocated_conflicted = bool(identity_gate.get("allocated_conflicted_count", 0))
+    identity_ok = not allocated_unknown and not allocated_conflicted
     unknown_blocker = bool(parser_fatal)
     unknown_blocker = unknown_blocker or cohort_match.get("status") == UNKNOWN
     unknown_blocker = unknown_blocker or bool(report["policy_warnings"])
-    all_gates = has_enough and has_common and has_ge_categories and has_ge_common_elective and has_major and has_free and has_pe and no_missing and target_satisfied
+    unknown_blocker = unknown_blocker or allocated_unknown
+    all_gates = has_enough and has_common and has_ge_categories and has_ge_common_elective and has_major and has_free and has_pe and no_missing and target_satisfied and identity_ok
     report["graduation_gates"] = {
         "total": has_enough,
         "common_total": has_common,
@@ -1663,6 +2120,10 @@ def evaluate_graduation(courses, config):
         "required_courses": no_missing,
         "target": target_satisfied,
         "target_effective_total": report["target"].get("effective_total_completed", report["target"].get("total_completed", 0.0)) >= requirements["target_total"] if requirements["target_total"] else True,
+        "course_identity": identity_ok,
+        "identity": identity_ok,
+        "course_identity_status": identity_gate.get("status", "NOT_APPLICABLE"),
+        "identity_status": identity_gate.get("status", "NOT_APPLICABLE"),
         "credit_conservation": report["audit"]["credit_conservation"],
     }
     if unknown_blocker:
@@ -1689,7 +2150,18 @@ def evaluate_graduation(courses, config):
     return report
 
 
-def find_and_consume_course(courses, rule_name, consumed_set, expected_credit=None, aliases=()):
+def find_and_consume_course(
+    courses,
+    rule_name,
+    consumed_set,
+    expected_credit=None,
+    aliases=(),
+    *,
+    scope=None,
+    identity_issues=None,
+    requirement_id="",
+    manual_approvals=None,
+):
     """Consume one exact scoped identity, preferring completed attempts.
 
     Substring matching, edit-distance matching and global aliases are forbidden.
@@ -1701,12 +2173,39 @@ def find_and_consume_course(courses, rule_name, consumed_set, expected_credit=No
         c_idx = id(course)
         if c_idx in consumed_set:
             continue
-        if _course_matches_rule(course, rule_name, expected_credit, aliases):
+        manual_approval = None
+        if scope and manual_approvals and requirement_id:
+            manual_approval = manual_approvals.get(
+                (str(course.get("attempt_id") or source_attempt_id(course)), str(requirement_id))
+            )
+        if _course_matches_rule(
+            course,
+            rule_name,
+            expected_credit,
+            aliases,
+            scope=scope,
+            identity_issues=identity_issues,
+            manual_approval=manual_approval,
+            requirement_id=requirement_id,
+        ):
             rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
-            candidates.append((rank, course))
+            identity_rank = {
+                COURSE_IDENTITY_VERIFIED: 2,
+                COURSE_IDENTITY_MANUAL_APPROVED: 2,
+                COURSE_IDENTITY_UNKNOWN: 1,
+            }.get(course.get("identity_status"), 0)
+            candidates.append((rank, identity_rank, course))
     if not candidates:
         return None
-    _, selected = max(candidates, key=lambda item: (item[0], _record_quality(item[1]), tuple(reversed(_course_stable_key(item[1])))))
+    _, _, selected = max(
+        candidates,
+        key=lambda item: (
+            item[0],
+            item[1],
+            _record_quality(item[2]),
+            tuple(reversed(_course_stable_key(item[2]))),
+        ),
+    )
     consumed_set.add(id(selected))
     dbg(
         "find_and_consume: exact scoped match "
