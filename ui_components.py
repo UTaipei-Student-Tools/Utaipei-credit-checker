@@ -827,11 +827,11 @@ def inject_theme_css():
                 outline-offset: 2px !important;
                 box-shadow: 0 0 0 2px var(--ui-canvas) !important;
             }
-            /* Streamlit 1.57 renders selectboxes as React Aria comboboxes.
-               On iOS, the focused text input can collapse to caret width;
-               drawing the global focus outline on that input creates two
-               vertical stripes. Keep the caret clean and draw one complete,
-               accessible focus ring around the actual select control. */
+            /* Streamlit versions render selectboxes as either React Aria or
+               BaseWeb comboboxes. On iOS, BaseWeb collapses the focused input
+               to caret width; drawing the global focus outline there creates
+               two vertical stripes. Keep the caret clean and draw one complete,
+               accessible focus ring around either outer select control. */
             [data-testid="stSelectbox"] [role="group"] {
                 min-height: var(--ui-control-height) !important;
                 border-color: var(--ui-border) !important;
@@ -845,7 +845,8 @@ def inject_theme_css():
                 outline: none !important;
                 box-shadow: none !important;
             }
-            [data-testid="stSelectbox"] [role="group"]:focus-within {
+            [data-testid="stSelectbox"] [role="group"]:focus-within,
+            [data-testid="stSelectbox"] [data-baseweb="select"]:focus-within > div {
                 border-color: var(--ui-focus) !important;
                 box-shadow: 0 0 0 3px var(--ui-focus) !important;
             }
@@ -1020,7 +1021,8 @@ def inject_theme_css():
             @media (forced-colors: active) {
                 *, *::before, *::after { forced-color-adjust: auto; }
                 :where(button, a, input, textarea, select, [role="button"]):focus-visible { outline: 3px solid Highlight !important; }
-                [data-testid="stSelectbox"] [role="group"]:focus-within {
+                [data-testid="stSelectbox"] [role="group"]:focus-within,
+                [data-testid="stSelectbox"] [data-baseweb="select"]:focus-within > div {
                     outline: 3px solid Highlight !important;
                     outline-offset: 2px !important;
                 }
