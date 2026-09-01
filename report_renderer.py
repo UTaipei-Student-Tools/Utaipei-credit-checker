@@ -115,8 +115,15 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
     _render_parsed_course_totals(courses, report["summary"], program_type)
     _render_outcome_headline(report["summary"].get("graduation_status"))
     _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements)
-    _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta)
-    st.markdown("<br><br>", unsafe_allow_html=True)
+    _render_lieflat_threshold_progress(
+        summary,
+        program_type,
+        requirements,
+        rules_meta,
+        courses=courses,
+        report=report,
+    )
+    st.markdown("<div class='section-gap section-gap-compact'></div>", unsafe_allow_html=True)
     _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements)
 
 
@@ -375,6 +382,7 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
 def _render_overview_tab(courses, summary, report, major_domain, program_type, target_dept, requirements):
     st.markdown("### 📊 畢業學分進度總覽")
     _render_overview_progress_cards(courses, summary, report, program_type, target_dept, requirements)
+    _render_subject_detail_expanders(courses, report, summary, requirements, program_type, target_dept)
     st.markdown("---")
 
     missing = []
@@ -397,6 +405,177 @@ def _render_overview_tab(courses, summary, report, major_domain, program_type, t
         st.dataframe(pd.DataFrame(missing), use_container_width=True)
     else:
         st.success("🎓 您已完成所有主修及共同必修科目。")
+
+
+def _missing_course_row(item):
+    """Convert a requirement placeholder to the shared responsive row shape."""
+
+    return {
+        "科目名稱": item.get("name", "待補足課程"),
+        "修課學年": "--",
+        "學分": item.get("credit", item.get("credits", 0.0)),
+        "成績": "--",
+        "狀態": "缺漏" if item.get("status") != "in_progress" else "在修中",
+        "狀態類別": "missing" if item.get("status") != "in_progress" else "ip",
+        "配置備註": item.get("allocation_note", ""),
+    }
+
+
+def _render_subject_detail_expanders(courses, report, summary, requirements, program_type, target_dept):
+    """Render touch-friendly drill-downs for every overview credit subtotal.
+
+    The six main buckets (plus each general-education category and any
+    double-major buckets) remain compact until opened.  This keeps the mobile
+    overview scannable while making the exact completed/in-progress/missing
+    course composition directly discoverable.
+    """
+
+    common = report.get("common", {})
+    major = report.get("major", {})
+    target = report.get("target", {})
+    free = report.get("free", {})
+    groups = [
+        (
+            "校共同課程",
+            common.get("compulsory_courses", [])
+            + [course for category in common.get("categories", {}).values() for course in category.get("courses", [])]
+            + common.get("common_elective_courses", []),
+            common.get("compulsory_missing", []),
+            common.get("compulsory_completed", 0.0)
+            + common.get("category_completed", 0.0)
+            + common.get("common_elective_completed", 0.0),
+            common.get("compulsory_ip", 0.0)
+            + common.get("category_ip", 0.0)
+            + common.get("common_elective_ip", 0.0),
+            requirements.get("common_total", 0.0),
+        ),
+        (
+            "系共同必修",
+            major.get("dept_compulsory_courses", []),
+            major.get("dept_compulsory_missing", []),
+            major.get("dept_compulsory_completed", 0.0),
+            major.get("dept_compulsory_ip", 0.0),
+            requirements.get("major_common_compulsory", 0.0),
+        ),
+        (
+            "專業必修",
+            major.get("domain_compulsory_courses", []),
+            major.get("domain_compulsory_missing", []),
+            major.get("domain_compulsory_completed", 0.0),
+            major.get("domain_compulsory_ip", 0.0),
+            requirements.get("domain_compulsory", 0.0),
+        ),
+        (
+            "專業選修",
+            major.get("domain_elective_courses", []),
+            [],
+            major.get("domain_elective_completed", 0.0),
+            major.get("domain_elective_ip", 0.0),
+            requirements.get("domain_elective", 0.0),
+        ),
+        (
+            "其他本系課程",
+            major.get("other_elective_courses", []),
+            [],
+            major.get("other_elective_completed", 0.0),
+            major.get("other_elective_ip", 0.0),
+            requirements.get("major_other_elective", 0.0),
+        ),
+        (
+            "自由選修",
+            free.get("courses", []),
+            [],
+            free.get("completed", summary.get("free_completed", 0.0)),
+            free.get("ip", summary.get("free_ip", 0.0)),
+            requirements.get("free_elective", 0.0),
+        ),
+    ]
+
+    for category_name, category_data in common.get("categories", {}).items():
+        required = requirements.get("ge_per_category", 4.0)
+        completed = category_data.get("completed", 0.0)
+        in_progress = category_data.get("ip", 0.0)
+        missing = []
+        shortfall = max(float(required) - float(completed) - float(in_progress), 0.0)
+        if shortfall > 0:
+            missing.append({"name": f"{category_name}分類尚缺學分（請依手冊選課）", "credit": shortfall})
+        groups.append((f"通識分類｜{category_name}", category_data.get("courses", []), missing, completed, in_progress, required))
+
+    if program_type != "單主修":
+        target_plan = report.get("target_requirements") or {}
+        if not target_plan:
+            target_plan = (report.get("target_plan") or {}).get("target_requirements") or report.get("target_plan") or {}
+
+        def target_bucket_required(bucket, explicit_key=None):
+            explicit = target_plan.get(explicit_key, None) if explicit_key else None
+            if explicit is not None:
+                return float(explicit or 0.0)
+            bucket_completed = float(target.get(f"{bucket}_completed", 0.0) or 0.0)
+            bucket_ip = float(target.get(f"{bucket}_ip", 0.0) or 0.0)
+            bucket_missing = sum(float(item.get("credit", 0.0) or 0.0) for item in target.get(f"{bucket}_missing", []))
+            return bucket_completed + bucket_ip + bucket_missing
+
+        target_is_apc = "物化" in str(target_dept or "")
+        if target_is_apc:
+            target_base_required = target_bucket_required("basic_core", "base_required")
+            # APC places its remaining quota in ``compulsory_courses``.
+            target_other_required = target_bucket_required("compulsory", "other_required")
+            target_elective_required = target_bucket_required("elective")
+        else:
+            # The CS/other policy plan calls its 15-credit required block
+            # ``base_required`` and its 25-credit pool ``other_required``;
+            # those map to the report's compulsory/elective buckets.  There is
+            # no separate basic-core row to display for these targets.
+            target_base_required = target_bucket_required("basic_core")
+            target_other_required = float(target_plan.get("base_required", 0.0) or 0.0) or target_bucket_required("compulsory")
+            target_elective_required = float(target_plan.get("other_required", 0.0) or 0.0) or target_bucket_required("elective")
+        target_groups = [
+            (
+                f"{target_dept}基礎／共同必修",
+                target.get("basic_core_courses", []),
+                target.get("basic_core_missing", []),
+                target.get("basic_core_completed", 0.0),
+                target.get("basic_core_ip", 0.0),
+                target_base_required,
+            ),
+            (
+                f"{target_dept}指定／專業必修",
+                target.get("compulsory_courses", []),
+                target.get("compulsory_missing", []),
+                target.get("compulsory_completed", 0.0),
+                target.get("compulsory_ip", 0.0),
+                target_other_required,
+            ),
+            (
+                f"{target_dept}專業選修",
+                target.get("elective_courses", []),
+                target.get("elective_missing", []),
+                target.get("elective_completed", 0.0),
+                target.get("elective_ip", 0.0),
+                target_elective_required,
+            ),
+        ]
+        groups.extend(
+            group
+            for group in target_groups
+            if group[1] or group[2]
+        )
+
+    st.markdown("#### 🔎 點開查看每個學分小計的科目組成")
+    st.caption("每個區塊會列出已完成、修讀中、缺漏，以及課程被配置到哪個畢業欄位。")
+    for index, (label, item_courses, missing_items, completed, in_progress, required) in enumerate(groups):
+        title = f"{label}｜已得 {format_credit(completed)}／{format_credit(required)} 學分"
+        if in_progress:
+            title += f"（修讀中 {format_credit(in_progress)}）"
+        with st.expander(title, expanded=False):
+            if item_courses:
+                st.caption(f"已完成／修讀中課程：{len(item_courses)} 門")
+                _render_course_cards([_course_row(course, allocation_context=label) for course in item_courses])
+            if missing_items:
+                st.caption(f"缺漏／待補足：{len(missing_items)} 項")
+                _render_course_cards([_missing_course_row(item) for item in missing_items])
+            if not item_courses and not missing_items:
+                st.info("目前沒有可列出的課程或缺漏項目。")
 
 
 def _get_course_category(c, report):
@@ -507,7 +686,9 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
         },
     ]
 
-    df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
+    df_full = pd.DataFrame(courses).reindex(
+        columns=["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]
+    )
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
     df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
@@ -530,8 +711,15 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
     st.markdown("".join(html_str), unsafe_allow_html=True)
 
 
-def _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta):
-    """Render one Lieflat F5 chart for the principal credit thresholds."""
+def _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta, courses=None, report=None):
+    """Render one Lieflat F5 chart for the principal credit thresholds.
+
+    ``courses`` and ``report`` are optional for compatibility with direct
+    callers.  The old implementation referenced both ``csv_bytes`` and
+    ``report`` without defining them, so the chart raised before the section
+    selector could render.  Build a small, valid CSV payload locally when a
+    full course list is not supplied.
+    """
 
     rows = [
         {
@@ -574,12 +762,30 @@ def _render_lieflat_threshold_progress(summary, program_type, requirements, rule
         render_progress_chart(rows, source=source),
         unsafe_allow_html=True,
     )
+    report = report if isinstance(report, dict) else {}
+    if courses:
+        overview = pd.DataFrame(
+            [
+                {
+                    "科目名稱": course.get("name", ""),
+                    "科目屬性": course.get("type", ""),
+                    "修課學年": course.get("academic_year", ""),
+                    "學分數": course.get("total_credit", 0.0),
+                    "是否完成": course.get("is_completed", False),
+                    "修讀中": course.get("is_in_progress", False),
+                }
+                for course in courses
+            ]
+        )
+    else:
+        overview = pd.DataFrame(rows)
+    csv_bytes = dataframe_csv_bytes(overview)
     st.markdown("<div class='export-group export-group-heading' role='group' aria-label='分類統計匯出'>", unsafe_allow_html=True)
     st.markdown("<div class='export-label'>分類統計匯出</div></div>", unsafe_allow_html=True)
     st.download_button(
         label="📦 全部匯出 CSV",
         data=csv_bytes,
-        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}_Overview.csv",
+        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', rules_meta.get('version', 'unknown'))}_Overview.csv",
         mime="text/csv",
         use_container_width=False,
     )
@@ -901,7 +1107,9 @@ def _render_export_tab(courses, report, summary, requirements):
     st.info("下方為歷年修課總表，您可匯出 CSV 供備查或核對。")
     if report.get("program_type") == "雙主修" or report.get("shared_reuse", {}).get("total", 0.0):
         st.warning(f"匯出提醒：{_shared_reuse_note(report.get('shared_reuse', {}))}")
-    df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
+    df_full = pd.DataFrame(courses).reindex(
+        columns=["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]
+    )
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
     df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
@@ -1100,9 +1308,16 @@ def _render_course_cards(rows):
         safe_credit = escape(format_credit(r.get("學分", "")))
         safe_score = escape(str(r.get("成績", "")))
         safe_status = escape(str(status))
+        allocation_note = str(r.get("配置備註") or r.get("allocation_note") or "").strip()
+        safe_allocation_note = escape(allocation_note)
+        allocation_markup = (
+            f"<div class='course-allocation-note'>配置：{safe_allocation_note}</div>"
+            if allocation_note
+            else ""
+        )
         html.append(
             f"<div class='course-row' role='row'>"
-            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}</div>"
+            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}{allocation_markup}</div>"
             f"<div role='cell' data-label='修課學年'>{safe_year}</div>"
             f"<div role='cell' data-label='學分'>{safe_credit}</div>"
             f"<div role='cell' data-label='成績'>{safe_score}</div>"
@@ -1114,16 +1329,17 @@ def _render_course_cards(rows):
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def _course_row(c):
-    score = c["sem1_score"] if c["sem1_score"] not in (None, "", "--") else c["sem2_score"]
+def _course_row(c, allocation_context=None):
+    score = c.get("sem1_score") if c.get("sem1_score") not in (None, "", "--") else c.get("sem2_score")
     status, status_type = _status_label(score)
     return {
-        "科目名稱": f"{c['name']}（{c['allocation_note']}）" if c.get("allocation_note") else c["name"],
-        "修課學年": f"{c['academic_year']}學年",
-        "學分": c["total_credit"],
+        "科目名稱": c.get("name", ""),
+        "修課學年": f"{c.get('academic_year', '')}學年",
+        "學分": c.get("total_credit", 0.0),
         "成績": score,
         "狀態": status,
         "狀態類別": status_type,
+        "配置備註": c.get("allocation_note") or (f"計入：{allocation_context}" if allocation_context else ""),
     }
 
 

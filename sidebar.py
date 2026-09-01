@@ -8,14 +8,26 @@ from html import escape
 
 import streamlit as st
 
-from handbook_rules import get_available_admission_cohorts, get_default_handbook_year, get_rules_meta
-from policy_audit import get_target_program_options, get_primary_program_options, normalize_primary_program
+from handbook_rules import (
+    get_apc_target_requirements,
+    get_available_admission_cohorts,
+    get_default_handbook_year,
+    get_rule_sets,
+    get_rules_meta,
+)
+from policy_audit import (
+    get_primary_program_options,
+    get_primary_requirements,
+    get_target_program_options,
+    normalize_primary_program,
+)
 from schedule_parser import parse_schedule_html
 from scraper import (
     crawl_course_schedule,
     crawl_transcript_pdf,
     discover_portal_features,
 )
+from ui_components import render_landing_message
 
 
 def _init_session_state():
@@ -37,20 +49,8 @@ def _init_session_state():
         st.session_state["cohort_mismatch_confirmed"] = False
 
 
-def render_sidebar():
-    _init_session_state()
-
-    st.sidebar.markdown("### 🎓 北市大校務整合")
-    with st.sidebar.container():
-        rules_meta = _render_handbook_selector()
-        _render_rules_meta_card(rules_meta)
-        _render_major_settings(st.session_state["handbook_year"])
-        st.sidebar.markdown("---")
-        _render_upload_section()
-        st.sidebar.markdown("---")
-        _render_login_section()
-        st.sidebar.markdown("---")
-        _render_portal_discovery_section()
+def _build_state(rules_meta):
+    """Return the serializable app configuration without portal secrets."""
 
     return {
         "handbook_year": st.session_state["handbook_year"],
@@ -79,20 +79,72 @@ def render_sidebar():
         "transcript_source": st.session_state.get("transcript_pdf_bytes") or st.session_state["transcript_pdf_path"],
         "source_label": st.session_state.get("source_label", "尚未載入"),
         "student_id": st.session_state.get("student_id", ""),
-        "student_pwd": st.session_state.get("student_pwd", ""),
         "portal_features": st.session_state.get("portal_features", None),
     }
 
 
-def _render_handbook_selector():
-    st.sidebar.markdown("### 📚 適用學生手冊")
+def render_setup_panel():
+    """Render the one main-page setup surface and return its current state.
+
+    The project used to put every required control in ``st.sidebar``.  That
+    made the first-run flow effectively invisible on an iPhone.  All controls
+    now render through the main page once per run; the optional sidebar is
+    intentionally left empty so there is no second set of widget keys.
+    """
+
+    _init_session_state()
+    has_transcript = bool(st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path"))
+    if not has_transcript:
+        render_landing_message()
+    panel_title = "⚙️ 審查設定（點開調整）" if has_transcript else "📌 開始設定：先選手冊、主修，再載入成績"
+    with st.expander(panel_title, expanded=not has_transcript):
+        st.caption(
+            "所有必要操作都在這裡完成；手機不需要打開側欄。"
+            if not has_transcript
+            else "可在此切換適用手冊、修讀身分、成績來源或課表。"
+        )
+        rules_meta = _render_handbook_selector(st)
+        _render_rules_meta_card(rules_meta, st)
+        _render_major_settings(st.session_state["handbook_year"], st)
+        st.markdown("---")
+        _render_upload_section(st)
+        st.markdown("---")
+        _render_login_section(st)
+        st.markdown("---")
+        _render_portal_discovery_section(st)
+
+    _render_handbook_preview(
+        st,
+        st.session_state.get("handbook_year"),
+        st.session_state.get("primary_program", "地生"),
+        st.session_state.get("primary_track"),
+        st.session_state.get("program_type", "單主修"),
+        st.session_state.get("target_program"),
+        st.session_state.get("target_track"),
+    )
+    return _build_state(rules_meta)
+
+
+def render_sidebar():
+    """Compatibility alias for callers that still import the old name.
+
+    It deliberately renders the same main-page panel rather than creating a
+    second sidebar widget tree.
+    """
+
+    return render_setup_panel()
+
+
+def _render_handbook_selector(ui=None):
+    ui = ui or st
+    ui.markdown("### 📚 適用學生手冊")
     years = get_available_admission_cohorts()
     if not years:
         raise RuntimeError("目前沒有可用的學生手冊規則。")
     current = st.session_state.get("handbook_year", get_default_handbook_year())
     if current not in years:
         current = get_default_handbook_year()
-    selected = st.sidebar.selectbox(
+    selected = ui.selectbox(
         "入學 cohort／主要手冊",
         options=years,
         index=years.index(current),
@@ -105,9 +157,10 @@ def _render_handbook_selector():
     return get_rules_meta(selected)
 
 
-def _render_upload_section():
-    st.sidebar.markdown("### 📄 上傳成績單")
-    uploaded_pdf = st.sidebar.file_uploader(
+def _render_upload_section(ui=None):
+    ui = ui or st
+    ui.markdown("### 📄 上傳成績單")
+    uploaded_pdf = ui.file_uploader(
         "歷年成績單 PDF",
         type=["pdf"],
         key=f"transcript_upload_{st.session_state['upload_key_version']}",
@@ -116,16 +169,16 @@ def _render_upload_section():
     if uploaded_pdf is not None:
         data = uploaded_pdf.getvalue()
         if len(data) > 20 * 1024 * 1024:
-            st.sidebar.error("PDF 超過 20 MB，請先壓縮後再上傳。")
+            ui.error("PDF 超過 20 MB，請先壓縮後再上傳。")
         elif not data.startswith(b"%PDF-"):
-            st.sidebar.error("檔案內容不是有效的 PDF。")
+            ui.error("檔案內容不是有效的 PDF。")
         elif data != st.session_state.get("transcript_pdf_bytes"):
             st.session_state["transcript_pdf_bytes"] = data
             st.session_state["transcript_pdf_path"] = None
             st.session_state["source_label"] = "自行上傳 PDF"
-            st.sidebar.success("成績單已載入，可以開始審查。")
+            ui.success("成績單已載入，可以開始審查。")
 
-    if st.sidebar.button("🧹 清除目前資料", use_container_width=True):
+    if ui.button("🧹 清除目前資料", use_container_width=True):
         _clear_loaded_data()
         st.session_state["upload_key_version"] += 1
         st.rerun()
@@ -150,12 +203,13 @@ def _clear_loaded_data():
     st.session_state.pop("cohort_mismatch_confirmation", None)
 
 
-def _render_rules_meta_card(rules_meta):
+def _render_rules_meta_card(rules_meta, ui=None):
+    ui = ui or st
     rules_version = escape(str(rules_meta.get("version", "N/A")))
     rules_updated = escape(str(rules_meta.get("last_updated", "N/A")))
     source_file = escape(str(rules_meta.get("evidence_file") or rules_meta.get("source_file", "未標示")))
     verification = escape(str(rules_meta.get("verification", "尚未標示")))
-    st.sidebar.markdown(
+    ui.markdown(
         f"""
         <section class="sidebar-rules-card" aria-label="目前規則版本">
             <div class="sidebar-eyebrow">📋 目前規則版本</div>
@@ -169,14 +223,98 @@ def _render_rules_meta_card(rules_meta):
     )
 
 
-def _render_major_settings(handbook_year):
-    st.sidebar.markdown("### 🛠️ 學業模組設定")
+def _course_preview_lines(courses, limit=18):
+    """Format a compact, readable course catalogue preview."""
+
+    if not courses:
+        return "尚無可顯示的逐課清單。"
+    items = list(courses.items()) if isinstance(courses, dict) else list(courses)
+    labels = []
+    for item in items[:limit]:
+        if isinstance(item, tuple):
+            name, credit = item
+            labels.append(f"{name}（{float(credit):g} 學分）")
+        else:
+            labels.append(str(item))
+    suffix = f"…另有 {len(items) - limit} 門" if len(items) > limit else ""
+    return "、".join(labels) + suffix
+
+
+def _render_handbook_preview(ui, cohort, primary_program, primary_track, program_type, target_program, target_track):
+    """Show a native expandable preview of the selected handbook subjects."""
+
+    cohort = str(cohort or get_default_handbook_year())
+    title = f"📖 {cohort} 學年度手冊｜科目與門檻預覽（點開查看）"
+    with ui.expander(title, expanded=False):
+        try:
+            plan = get_primary_requirements(cohort, primary_program, primary_track)
+            selected_track = plan.get("track") or primary_track
+            selected_label = f"{plan.get('program', primary_program)}{f'（{selected_track}）' if selected_track else ''}"
+            ui.markdown(
+                f"**目前選擇：** {selected_label}"
+            )
+            for item in plan.get("breakdown", []):
+                ui.markdown(f"- **{item.get('label', '門檻')}**：{float(item.get('required', 0.0) or 0.0):g} 學分")
+
+            if primary_program == "地生":
+                rules = get_rule_sets(cohort)
+                earth = rules.get("earth_life_major", {})
+                common = earth.get("common_compulsory", {})
+                if common:
+                    ui.markdown(
+                        f"**系共同必修（{sum(float(value) for value in common.values()):g} 學分）**\n\n"
+                        + _course_preview_lines(common)
+                    )
+                selected_domain = primary_track if primary_track in earth.get("domains", {}) else "地球環境"
+                domain = earth.get("domains", {}).get(selected_domain, {})
+                if domain:
+                    ui.markdown(
+                        f"**{selected_domain} 專業必修（{sum(float(value) for value in domain.values()):g} 學分）**\n\n"
+                        + _course_preview_lines(domain)
+                    )
+                domain_electives = earth.get("domain_electives", {}).get(selected_domain, {})
+                if domain_electives:
+                    ui.markdown(
+                        f"**{selected_domain} 專業選修（可選課目示例）**\n\n"
+                        + _course_preview_lines(domain_electives)
+                    )
+            elif primary_program == "物化":
+                track = "物理組" if primary_track in {"電子物理", "物理組"} else "化學組"
+                target = get_apc_target_requirements(cohort, track, "雙主修" if program_type == "雙主修" else "輔系")
+                ui.markdown(f"**物化系{track}基礎／核心課目**\n\n{_course_preview_lines({row['name']: row['credits'] for row in target['requirements'] if row['kind'] == 'course'})}")
+                if target.get("warnings"):
+                    ui.caption("；".join(target["warnings"]))
+            else:
+                ui.info("此系所目前以官方門檻總額規劃為主；逐課課表仍需依系所資料人工核對。")
+
+            if program_type == "雙主修" and target_program:
+                target_label = "物化系" if target_program == "物化" else f"{target_program}系"
+                ui.markdown(f"#### 🧪 雙主修目標：{target_label}{f'（{target_track}）' if target_track else ''}")
+                if target_program == "資科":
+                    cs = get_rule_sets(cohort).get("cs_rules", {}).get("double_major", {})
+                    ui.markdown(
+                        f"**指定必修（{float(cs.get('compulsory_req', 0.0) or 0.0):g} 學分）**\n\n"
+                        + _course_preview_lines(cs.get("compulsory", {}))
+                    )
+                elif target_program == "物化":
+                    track = "物理組" if target_track in {"電子物理", "物理組"} else "化學組"
+                    target = get_apc_target_requirements(cohort, track, "雙主修")
+                    ui.markdown(f"**基礎必修（{target['base_required']:g} 學分）**\n\n" + _course_preview_lines({row['name']: row['credits'] for row in target['requirements'] if row['kind'] == 'course'}))
+                else:
+                    ui.caption("此目標系目前顯示已核對門檻總額；逐課清單需由系所確認。")
+        except Exception:
+            ui.info("目前無法載入逐課預覽；仍可依上方選定手冊進行成績單分析。")
+
+
+def _render_major_settings(handbook_year, ui=None):
+    ui = ui or st
+    ui.markdown("### 🛠️ 學業模組設定")
     cohort = st.session_state.get("admission_cohort", handbook_year)
     options = get_primary_program_options(cohort)
     current_label = st.session_state.get("primary_program_label", options[0])
     if current_label not in options:
         current_label = options[0]
-    selected_label = st.sidebar.selectbox(
+    selected_label = ui.selectbox(
         "主修系所／組別",
         options=options,
         index=options.index(current_label),
@@ -191,7 +329,7 @@ def _render_major_settings(handbook_year):
     program_type = st.session_state.get("program_type", "單主修")
     if program_type not in {"單主修", "雙主修"}:
         program_type = "單主修"
-    st.session_state["program_type"] = st.sidebar.selectbox(
+    st.session_state["program_type"] = ui.selectbox(
         "修課身分設定",
         options=["單主修", "雙主修"],
         index=["單主修", "雙主修"].index(program_type),
@@ -204,7 +342,7 @@ def _render_major_settings(handbook_year):
     target_options = get_target_program_options(cohort, selected_label)
     if st.session_state.get("target_program_selector") not in target_options:
         st.session_state["target_program_selector"] = target_options[0]
-    target_label = st.sidebar.selectbox(
+    target_label = ui.selectbox(
         "雙主修目標系所／組別",
         options=target_options,
         index=0,
@@ -225,25 +363,25 @@ def _render_major_settings(handbook_year):
         st.session_state["target_dept"] = "數學系"
 
     if st.session_state["program_type"] == "雙主修":
-        st.sidebar.markdown("#### 📅 雙主修申請資訊（不由入學 cohort 推定）")
-        st.session_state["application_year"] = st.sidebar.selectbox(
+        ui.markdown("#### 📅 雙主修申請資訊（不由入學 cohort 推定）")
+        st.session_state["application_year"] = ui.selectbox(
             "申請學年",
             options=["未填寫", *[str(int(cohort) + offset) for offset in range(5)]],
             format_func=lambda year: "未填寫" if year == "未填寫" else f"{year} 學年度",
             key="double_application_year",
             help="校級規則為大二起至正常修業最後一年第一學期。",
         )
-        st.session_state["application_semester"] = st.sidebar.selectbox(
+        st.session_state["application_semester"] = ui.selectbox(
             "申請學期",
             options=["未填寫", "1", "2"],
             key="double_application_semester",
         )
-        st.session_state["application_status"] = st.sidebar.selectbox(
+        st.session_state["application_status"] = ui.selectbox(
             "申請狀態",
             options=["未申請", "申請中", "已核准", "未通過", "不確定"],
             key="double_application_status",
         )
-        shared_state = st.sidebar.selectbox(
+        shared_state = ui.selectbox(
             "共同修課證據狀態",
             options=["unanswered", "confirmed_zero", "approved"],
             format_func=lambda value: {
@@ -256,7 +394,7 @@ def _render_major_settings(handbook_year):
         )
         st.session_state["shared_evidence_state"] = shared_state
         if shared_state == "approved":
-            st.session_state["shared_credits"] = st.sidebar.number_input(
+            st.session_state["shared_credits"] = ui.number_input(
                 "已核准共同修課學分（1–6）", min_value=1.0, max_value=6.0, value=1.0, step=0.5, key="shared_credit_input"
             )
             st.session_state["shared_approved"] = True
@@ -266,7 +404,7 @@ def _render_major_settings(handbook_year):
         else:
             st.session_state["shared_credits"] = None
             st.session_state["shared_approved"] = None
-        st.session_state["interrupted"] = st.sidebar.checkbox(
+        st.session_state["interrupted"] = ui.checkbox(
             "曾休學／中斷修業",
             value=bool(st.session_state.get("interrupted", False)),
             key="interrupted_input",
@@ -285,8 +423,8 @@ def _render_major_settings(handbook_year):
         st.session_state["interrupted"] = False
 
     if primary_program == "資科":
-        st.sidebar.markdown("#### 🧾 資科系人工門檻證據")
-        st.session_state["cs_project_evidence"] = st.sidebar.selectbox(
+        ui.markdown("#### 🧾 資科系人工門檻證據")
+        st.session_state["cs_project_evidence"] = ui.selectbox(
             "專題證據",
             options=["unknown", "completed", "incomplete"],
             format_func=lambda value: {
@@ -296,9 +434,9 @@ def _render_major_settings(handbook_year):
             }.get(value, "不確定／需人工確認"),
             key="cs_project_evidence_input",
         )
-        st.session_state["cs_certification_a"] = st.sidebar.number_input("認證 A 件數", min_value=0, max_value=20, value=0, step=1, key="cs_cert_a_input")
-        st.session_state["cs_certification_b"] = st.sidebar.number_input("認證 B 件數", min_value=0, max_value=20, value=0, step=1, key="cs_cert_b_input")
-        st.session_state["cs_alternative_course"] = st.sidebar.selectbox(
+        st.session_state["cs_certification_a"] = ui.number_input("認證 A 件數", min_value=0, max_value=20, value=0, step=1, key="cs_cert_a_input")
+        st.session_state["cs_certification_b"] = ui.number_input("認證 B 件數", min_value=0, max_value=20, value=0, step=1, key="cs_cert_b_input")
+        st.session_state["cs_alternative_course"] = ui.selectbox(
             "替代課程證據",
             options=["unknown", "completed", "incomplete"],
             format_func=lambda value: {
@@ -310,149 +448,163 @@ def _render_major_settings(handbook_year):
         )
 
 
-def _render_login_section():
-    st.sidebar.markdown("### 🔐 學生入口登入")
-    st.sidebar.caption("校務系統可能封鎖 Hugging Face／雲端出口；抓取失敗時請改用上方 PDF 上傳。")
-    st.session_state["student_id"] = st.sidebar.text_input(
-        "學號 / Account", value=st.session_state.get("student_id", ""), placeholder="請輸入您的學號"
-    )
-    st.session_state["student_pwd"] = st.sidebar.text_input(
-        "密碼 / Password", value="", type="password", placeholder="請輸入校務系統密碼"
-    )
+def _render_login_section(ui=None):
+    """Render a single, clearing credential form on the main page.
 
-    st.sidebar.markdown("#### 📅 課表抓取學期設定")
-    col_y, col_s = st.sidebar.columns(2)
-    with col_y:
-        st.session_state["crawl_year"] = st.selectbox(
-            "課表學年度",
-            options=["113", "114", "115", "116"],
-            index=2,  # Default to 115
-            help="只決定要抓哪一學期的課表；不會改變上方的學生手冊版本。",
+    The password intentionally has no explicit widget key.  It is passed from
+    this local form scope directly to the scraper and is never copied into
+    ``st.session_state`` or the state object returned to ``app.py``.
+    """
+
+    ui = ui or st
+    ui.markdown("### 🔐 校務系統（選用）")
+    ui.caption("雲端出口可能被校務系統封鎖；抓取失敗時可改用上方 PDF。送出後密碼欄位會清除。")
+    with ui.form("portal_credentials_form", clear_on_submit=True):
+        account = ui.text_input(
+            "學號 / Account",
+            value=st.session_state.get("student_id", ""),
+            placeholder="請輸入您的學號",
+            key="portal_account_input",
         )
-    with col_s:
-        st.session_state["crawl_semester"] = st.selectbox(
-            "學期",
-            options=["1", "2"],
-            index=0,  # Default to 1
-            help="選擇要抓取的課表學期",
+        password = ui.text_input(
+            "密碼 / Password",
+            type="password",
+            placeholder="僅本次送出使用，不會保存",
+        )
+        ui.markdown("#### 📅 課表抓取學期設定")
+        col_y, col_s = ui.columns(2)
+        with col_y:
+            year = ui.selectbox(
+                "課表學年度",
+                options=["113", "114", "115", "116"],
+                index=2,
+                key="crawl_year_input",
+                help="只決定要抓哪一學期的課表；不會改變上方的學生手冊版本。",
+            )
+        with col_s:
+            semester = ui.selectbox(
+                "學期",
+                options=["1", "2"],
+                index=0,
+                key="crawl_semester_input",
+                help="選擇要抓取的課表學期",
+            )
+        scrape_clicked = ui.form_submit_button(
+            "🚀 實時抓取成績＋課表",
+            type="primary",
+            use_container_width=True,
+            help="登入並抓取歷年成績與設定學期課表",
+        )
+        schedule_clicked = ui.form_submit_button(
+            "🗓️ 只更新這學期課表",
+            use_container_width=True,
+            help="僅登入抓取所選學期的選課課表並合併",
+        )
+        discover_clicked = ui.form_submit_button(
+            "🔧 探勘可用校務功能",
+            use_container_width=True,
+            help="檢查帳號可存取哪些校務系統額外查詢功能",
         )
 
-    if st.sidebar.button("🚀 實時抓取", use_container_width=True, help="登入並抓取歷年成績與設定學期之課表"):
-        _attempt_live_scrape()
+    if scrape_clicked or schedule_clicked or discover_clicked:
+        account = account.strip()
+        st.session_state["student_id"] = account
+        if scrape_clicked:
+            _attempt_live_scrape(account, password, year=year, semester=semester, ui=ui)
+        elif schedule_clicked:
+            _attempt_schedule_crawl(account, password, year=year, semester=semester, ui=ui)
+        else:
+            _discover_portal_capabilities(account, password, ui=ui)
 
-    if st.sidebar.button("🗓️ 抓取並更新下學期課表", use_container_width=True, help="僅登入抓取所選學期之選課課表並合併"):
-        _attempt_schedule_crawl()
     if st.session_state.get("schedule_courses"):
         schedule_courses = st.session_state["schedule_courses"]
         schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
-        st.sidebar.caption(
-            f"已載入 {len(schedule_courses)} 門課表課程、共 {schedule_credits:g} 學分，將以修讀中納入進度條。"
-        )
+        ui.caption(f"已載入 {len(schedule_courses)} 門課表課程、共 {schedule_credits:g} 學分，將以修讀中納入進度條。")
 
 
-def _render_portal_discovery_section():
-    st.sidebar.markdown("### 🔎 校務系統功能探勘")
-    if st.sidebar.button(
-        "🔧 發現可用校務功能", use_container_width=True, help="檢查您的帳號可存取哪些校務系統額外查詢功能"
-    ):
-        _discover_portal_capabilities()
+def _render_portal_discovery_section(ui=None):
+    """Show previously discovered portal capabilities without credentials."""
+
+    ui = ui or st
     features = st.session_state.get("portal_features")
     if features:
-        st.sidebar.markdown("#### 可用功能清單")
-        for item in features:
-            st.sidebar.markdown(f"- **{item['fncid']}**：{item['name']}，狀態：`{item['status']}`")
+        with ui.expander("🔎 已發現的校務系統功能", expanded=False):
+            for item in features:
+                ui.markdown(f"- **{item.get('fncid', '功能')}**：{item.get('name', '')}，狀態：`{item.get('status', '')}`")
 
 
-def _discover_portal_capabilities():
-    try:
-        features = discover_portal_features(
-            st.session_state["student_id"].strip(),
-            st.session_state["student_pwd"],
-        )
-        st.session_state["portal_features"] = features
-        st.sidebar.success("已完成校務功能探勘，請查看下方清單。")
-    except Exception as exc:
-        st.sidebar.error(f"功能探勘失敗：{exc!s}")
-    finally:
-        # Capability discovery is also a portal request; do not retain the
-        # password in Streamlit session state after either outcome.
-        st.session_state["student_pwd"] = ""
+def _portal_error(ui, message):
+    """Display a non-sensitive portal error message."""
+
+    (ui or st).error(message)
 
 
-def _attempt_live_scrape():
-    if not st.session_state["student_id"].strip() or not st.session_state["student_pwd"]:
-        st.sidebar.error(
-            "⚠️ 請先輸入您的學號與校務系統密碼！在輸入完畢後，請按 Enter 鍵確認或點選輸入框外，然後再點擊「實時抓取」。"
-        )
+def _discover_portal_capabilities(account, password, ui=None):
+    ui = ui or st
+    account = str(account or "").strip()
+    if not account or not password:
+        _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
         return
     try:
+        features = discover_portal_features(account, password)
+        st.session_state["portal_features"] = features
+        ui.success("已完成校務功能探勘，請查看下方清單。")
+    except Exception:
+        _portal_error(ui, "功能探勘失敗；請確認帳號密碼，或改用 PDF 上傳。")
+
+
+def _attempt_live_scrape(account, password, year=None, semester=None, ui=None):
+    ui = ui or st
+    account = str(account or "").strip()
+    if not account or not password:
+        _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
+        return
+    year = year or st.session_state.get("crawl_year_input", "115")
+    semester = semester or st.session_state.get("crawl_semester_input", "1")
+    try:
         scr_dir = tempfile.gettempdir()
-        # 1. 抓取歷年成績單
-        pdf_content = crawl_transcript_pdf(
-            st.session_state["student_id"].strip(),
-            st.session_state["student_pwd"],
-            scr_dir,
-        )
-        # The crawler returns validated bytes and removes its temporary file
-        # before returning; keep only in-memory content for this session.
+        pdf_content = crawl_transcript_pdf(account, password, scr_dir)
         st.session_state["transcript_pdf_path"] = None
         st.session_state["transcript_pdf_bytes"] = pdf_content
         st.session_state["source_label"] = "校務系統即時抓取"
         st.session_state["collapse_sidebar_flag"] = True
 
-        # 2. 自動嘗試抓取下學期課表
-        year = st.session_state.get("crawl_year", "115")
-        semester = st.session_state.get("crawl_semester", "1")
         try:
-            schedule_html = crawl_course_schedule(
-                st.session_state["student_id"].strip(), st.session_state["student_pwd"], year=year, semester=semester
-            )
+            schedule_html = crawl_course_schedule(account, password, year=year, semester=semester)
             st.session_state["schedule_html"] = schedule_html
             parsed_courses = parse_schedule_html(schedule_html, academic_year=year, semester=semester)
             st.session_state["schedule_courses"] = parsed_courses
             if parsed_courses:
                 credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
-                st.sidebar.success(
-                    f"歷年成績抓取成功；另找到 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分。"
-                )
+                ui.success(f"歷年成績抓取成功；另找到 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分。")
             else:
-                st.sidebar.info(f"歷年成績抓取成功；{year}-{semester} 課表目前沒有可納入的課程。")
-        except Exception as schedule_exc:
+                ui.info(f"歷年成績抓取成功；{year}-{semester} 課表目前沒有可納入的課程。")
+        except Exception:
             st.session_state["schedule_courses"] = []
-            st.sidebar.warning(f"動態歷年成績抓取成功！但自動抓取 {year}-{semester} 課表失敗：{schedule_exc!s}")
-
-    except Exception as exc:
-        st.sidebar.error(f"抓取失敗: {exc!s}。若目前是 HF／雲端環境，請改用 PDF 上傳。")
-    finally:
-        # Never retain the portal password in Streamlit session state after a
-        # fetch attempt; the user can re-enter it for a later request.
-        st.session_state["student_pwd"] = ""
+            ui.warning(f"歷年成績抓取成功，但自動抓取 {year}-{semester} 課表失敗；可稍後重試或上傳課表。")
+    except Exception:
+        _portal_error(ui, "抓取失敗；請確認帳號密碼，若目前是雲端環境請改用 PDF 上傳。")
 
 
-def _attempt_schedule_crawl():
-    if not st.session_state["student_id"].strip() or not st.session_state["student_pwd"]:
-        st.sidebar.error("⚠️ 請先輸入您的學號與校務系統密碼！")
+def _attempt_schedule_crawl(account, password, year=None, semester=None, ui=None):
+    ui = ui or st
+    account = str(account or "").strip()
+    if not account or not password:
+        _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
         return
+    year = year or st.session_state.get("crawl_year_input", "115")
+    semester = semester or st.session_state.get("crawl_semester_input", "1")
     try:
-        year = st.session_state.get("crawl_year", "115")
-        semester = st.session_state.get("crawl_semester", "1")
-        schedule_html = crawl_course_schedule(
-            st.session_state["student_id"].strip(), st.session_state["student_pwd"], year=year, semester=semester
-        )
+        schedule_html = crawl_course_schedule(account, password, year=year, semester=semester)
         st.session_state["schedule_html"] = schedule_html
         parsed_courses = parse_schedule_html(schedule_html, academic_year=year, semester=semester)
         st.session_state["schedule_courses"] = parsed_courses
-
         if parsed_courses:
             credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
-            st.sidebar.success(
-                f"成功解析 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分，已納入修讀中進度。"
-            )
+            ui.success(f"成功解析 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分，已納入修讀中進度。")
         else:
-            st.sidebar.warning(f"已抓取 {year}-{semester} 頁面，但未解析出任何選課。可能是該學期尚無選課紀錄。")
-    except Exception as exc:
+            ui.warning(f"已抓取 {year}-{semester} 頁面，但未解析出任何選課。可能是該學期尚無選課紀錄。")
+    except Exception:
         st.session_state["schedule_html"] = None
         st.session_state["schedule_courses"] = []
-        st.sidebar.error(f"課表抓取失敗: {exc!s}。若目前是 HF／雲端環境，請改用 PDF 上傳。")
-    finally:
-        st.session_state["student_pwd"] = ""
+        _portal_error(ui, "課表抓取失敗；請確認帳號密碼，若目前是雲端環境請改用 PDF 上傳。")

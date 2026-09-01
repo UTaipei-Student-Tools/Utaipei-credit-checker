@@ -9,11 +9,10 @@ from equivalency_ui import render_equivalency_workflow
 from pdf_parser import parse_transcript_pdf
 from report_renderer import render_report
 from schedule_parser import merge_schedule_courses
-from sidebar import render_sidebar
+from sidebar import render_setup_panel
 from ui_components import (
     collapse_sidebar_if_needed,
     render_header_card,
-    render_landing_message,
     setup_page,
 )
 
@@ -51,9 +50,9 @@ def _evaluation_config(sidebar_state, courses=None, parser_diagnostics=None):
 
 def main():
     setup_page()
-    render_header_card("北市大畢業學分審查系統", "🎓 快速檢查你的畢業進度", landmark_id="main-content")
+    render_header_card("北市大畢業通", "依入學年度規劃畢業與雙主修", landmark_id="main-content")
 
-    sidebar_state = render_sidebar()
+    sidebar_state = render_setup_panel()
     collapse_sidebar_if_needed()
 
     transcript_source = sidebar_state["transcript_source"]
@@ -63,25 +62,7 @@ def main():
     target_dept = sidebar_state["target_dept"]
 
     if not transcript_source:
-        render_landing_message()
-        try:
-            report = evaluate_graduation([], _evaluation_config(sidebar_state))
-            render_equivalency_workflow(
-                [],
-                report,
-                _evaluation_config(sidebar_state),
-            )
-            render_report(
-                {"name": "", "student_id": "", "department": "", "admission_year": "", "print_date": ""},
-                [],
-                report,
-                sidebar_state.get("primary_track") or major_domain,
-                program_type,
-                target_dept,
-                source_label,
-            )
-        except Exception:
-            st.info("目前先顯示門檻規劃；上傳成績單或完成校務系統抓取後，才會開始個人學分審查。")
+        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；載入後這裡會顯示你的學分進度。")
         return
 
     try:
@@ -132,7 +113,6 @@ def main():
         st.error(f"無法完成學分審查：{exc!s}")
         st.info("請確認檔案為北市大歷年成績單。若校務系統最近更新版面，PDF 解析規則可能也需要同步更新。")
 
-    st.write("")
 
 
 if __name__ == "__main__":

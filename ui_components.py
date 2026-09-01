@@ -34,7 +34,7 @@ def setup_page():
         page_title="北市大畢業通",
         page_icon=str(page_icon) if page_icon.exists() else "🎓",
         layout="wide",
-        initial_sidebar_state="auto",
+        initial_sidebar_state="collapsed",
     )
     inject_theme_css()
     st.markdown(
@@ -409,6 +409,7 @@ def inject_theme_css():
             }
             .section-heading { margin: 0 0 .8rem; color: var(--ui-text) !important; }
             .section-gap { height: .55rem; }
+            .section-gap-compact { height: .2rem; }
             .category-card {
                 margin-bottom: .75rem;
                 padding: .9rem 1rem;
@@ -618,6 +619,14 @@ def inject_theme_css():
             .course-row > div, .course-header > div { min-width: 0; overflow-wrap: anywhere; }
             .course-row > div:not(.course-name-col):not(.course-status-col) { color: var(--ui-text-muted) !important; font-variant-numeric: tabular-nums; }
             .course-name-col { color: var(--ui-text) !important; font-weight: 700; }
+            .course-allocation-note {
+                margin-top: .25rem;
+                color: var(--ui-text-muted) !important;
+                font-size: .76rem;
+                font-weight: 500;
+                line-height: 1.45;
+                overflow-wrap: anywhere;
+            }
             .course-status-col { justify-self: start; }
             .report-table-wrap + .stDownloadButton,
             .course-list + .stDownloadButton { margin-top: .75rem; }
@@ -745,8 +754,8 @@ def inject_theme_css():
             }
             @media (max-width: 768px) {
                 [data-testid="stMainBlockContainer"] {
-                    padding: 1.25rem max(.85rem, env(safe-area-inset-right, 0px))
-                        max(4rem, env(safe-area-inset-bottom, 0px))
+                    padding: .85rem max(.85rem, env(safe-area-inset-right, 0px))
+                        max(1.25rem, env(safe-area-inset-bottom, 0px))
                         max(.85rem, env(safe-area-inset-left, 0px)) !important;
                 }
                 [data-testid="stSidebar"][aria-expanded="true"] { width: min(88vw, 23rem) !important; max-width: 88vw !important; }
@@ -758,10 +767,12 @@ def inject_theme_css():
                 .progress-label-row { flex-direction: column; align-items: flex-start; gap: .2rem; }
                 .progress-label-row .progress-number { text-align: left; }
                 .stButton > button, .stDownloadButton > button { width: 100%; }
-                .header-card { padding: 1.25rem; border-radius: var(--ui-radius-md); }
+                .header-card { margin-bottom: 1rem; padding: 1.05rem; border-radius: var(--ui-radius-md); }
                 .header-title { font-size: clamp(1.45rem, 7vw, 2rem); }
                 .header-subtitle { font-size: .9rem; }
-                .card-panel { border-radius: var(--ui-radius-md); }
+                .card-panel { margin-block: .7rem; border-radius: var(--ui-radius-md); }
+                .hero-callout { margin-bottom: .9rem; padding: .8rem .9rem; line-height: 1.55; }
+                [data-testid="stExpander"] summary { min-height: var(--ui-control-height); }
                 .table-container table, .report-table-wrap table { min-width: 34rem; }
                 .course-header { display: none; }
                 .course-row {
@@ -870,9 +881,9 @@ def render_landing_message():
     st.markdown(
         """
         <section class="hero-callout" aria-label="開始方式">
-            <b>📌 開始你的畢業盤點</b><br>
-            上傳歷年成績單 PDF，或登入校務系統即時抓取成績與指定學期課表。檔案只在目前工作階段中分析。<br>
-            <small>本工具提供自我檢查，不取代教務處或系所的正式畢業資格審核。</small>
+            <b>開始畢業盤點</b><br>
+            先選入學年度與主修，再上傳成績單或登入校務系統。資料只在本次工作階段分析。<br>
+            <small>結果供自我檢查；正式畢業資格仍以校方審核為準。</small>
         </section>
         """,
         unsafe_allow_html=True,
