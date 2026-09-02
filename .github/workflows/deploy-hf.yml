@@ -52,6 +52,11 @@ jobs:
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "HF_TOKEN or HF_SPACE_REPO is not configured; skipping Hugging Face deploy."
           fi
+      - name: Validate Hugging Face token
+        if: steps.hf.outputs.configured == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${HF_TOKEN}" https://huggingface.co/api/whoami-v2
       - name: Push to Hugging Face Space
         if: steps.hf.outputs.configured == 'true'
         env:
@@ -60,5 +65,5 @@ jobs:
         run: |
           git config user.email "actions@github.com"
           git config user.name "github-actions"
-          git remote add hf "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
+          git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
           git push hf HEAD:main
