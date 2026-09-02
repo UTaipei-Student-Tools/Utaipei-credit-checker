@@ -14,7 +14,6 @@ import unicodedata
 import warnings
 from copy import deepcopy
 
-
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules_config.json")
 ADMISSION_COHORTS = ["111", "112", "113", "114", "115"]
 
@@ -196,30 +195,71 @@ def normalize_handbook_year(year=None):
 
 
 def _make_planning_handbook(selected):
-    """Build a review-gated compatibility table for 111/115.
+    """Build a threshold-only compatibility record for 111/115.
 
-    This enables the old parser/engine callers to continue operating while
-    policy_audit supplies the verified threshold facts.  It is never treated
-    as proof that a course identity is valid for the selected cohort.
+    The old implementation copied the nearest configured handbook, which
+    silently applied 112 rules to 111 and 114 rules to 115.  Keep the legacy
+    shape so callers can still read aggregate thresholds, but deliberately
+    leave every course catalogue empty.  The registry and evaluator therefore
+    expose ``coverage_state=NONE``/``PARTIAL`` and cannot produce a PASS until
+    the cohort-specific source tables are transcribed.
     """
 
-    base_year = "112" if selected == "111" else "114"
-    if base_year not in _CFG.get("handbooks", {}):
+    if selected not in _PLANNING_COHORTS:
         return {}
-    handbook = deepcopy(_CFG["handbooks"][base_year])
-    meta = handbook.setdefault("_meta", {})
-    meta.update(
-        {
+    if selected == "111":
+        domain_elective = 22
+        other_elective = 13
+    else:
+        domain_elective = 20
+        other_elective = 27
+    handbook = {
+        "_meta": {
             "version": selected,
             "academic_year": selected,
+            "college": "理學院",
             "source_file": _EVIDENCE_SOURCE_NAMES[selected],
             "evidence_file": _EVIDENCE_SOURCE_NAMES[selected],
+            "total_graduation_credits": 128,
+            "coverage_state": "NONE",
+            "course_catalog_coverage": "NONE",
             "document_warnings": [
-                f"{selected} 學年度目前採核對過的門檻規劃；逐課課號／課程表資料尚未完整建置，結果需人工複核。"
+                f"{selected} 學年度僅建立官方 aggregate 門檻；未以相鄰年度課程表填入逐課清單，結果需人工複核。"
             ],
+        },
+        "earth_life_major": {
+            "total_req": 85,
+            "common_compulsory": {"total_req": 24, "courses": {}},
+            "common_alternatives": [],
+            "domains": {
+                "domain_req": 14,
+                "domain_elective_req": domain_elective,
+                "other_elective_req": other_elective,
+                "地球環境": {"compulsory": {}, "electives": {}},
+                "生命科學": {"compulsory": {}, "electives": {}},
+            },
+            "common_electives": {},
+        },
+        "apc_rules": {
+            "basic_core": {},
+            "shared_other_required": {},
+            "divisions": {"物理組": {"compulsory": {}}, "化學組": {"compulsory": {}}},
+            "minor": {"basic_req": 16, "other_req": 4, "total_req": 20},
+            "double_major": {"basic_req": 16, "other_req": 24, "total_req": 40},
+        },
+        "cs_rules": {
+            "department_courses": {},
+            "minor": {"compulsory": {}, "compulsory_req": 6, "other_req": 14, "total_req": 20},
+            "double_major": {"compulsory": {}, "compulsory_req": 15, "other_req": 25, "total_req": 40},
+        },
+        "academic_year": selected,
+    }
+    if selected == "115":
+        handbook["apc_rules"] = {
+            **handbook["apc_rules"],
+            "minor": {"basic_req": 20, "other_req": 0, "total_req": 20},
+            "double_major": {"basic_req": 20, "other_req": 20, "total_req": 40},
         }
-    )
-    handbook["academic_year"] = selected
     return handbook
 
 

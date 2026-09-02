@@ -1,118 +1,454 @@
+"""北市大畢業通 Streamlit entrypoint.
+
+The page has one evaluation boundary: parser/crawler rows are confirmed by
+the user, ``graduation_service.evaluate`` creates a ``DecisionSnapshot``, and
+presentation/export functions consume that same object.  No legacy evaluator
+is used here.
 """
-Modular Streamlit app entrypoint for the UTaipei graduation credit checker.
-"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import streamlit as st
 
-from credit_engine import evaluate_graduation
-from equivalency_ui import render_equivalency_workflow
+from course_input_adapter import adapt_legacy_result
+from graduation_service import EvaluationRequest, evaluate
+from input_confirmation import (
+    ConfirmationState,
+    CourseConfirmation,
+    InputDiagnostic,
+    confirm_confirmation,
+    edit_confirmation,
+    fingerprint_course_rows,
+    mask_person_name,
+    mask_student_id,
+    release_formal_attempts,
+)
 from pdf_parser import parse_transcript_pdf
-from report_renderer import render_report
 from schedule_parser import merge_schedule_courses
 from sidebar import render_setup_panel
-from ui_components import (
-    collapse_sidebar_if_needed,
-    render_header_card,
-    setup_page,
-)
+from ui_components import collapse_sidebar_if_needed, render_header_card, setup_page
 
 
-def _evaluation_config(sidebar_state, courses=None, parser_diagnostics=None):
-    """Build one cohort-aware config while retaining legacy engine fields."""
+def _load_presentation_api():
+    """Load the snapshot-only renderer/export contract on demand."""
 
-    config = {
-        "admission_cohort": sidebar_state.get("admission_cohort") or sidebar_state.get("handbook_year"),
-        "primary_program": sidebar_state.get("primary_program") or "地生",
-        "primary_track": sidebar_state.get("primary_track"),
-        "program_type": sidebar_state.get("program_type", "單主修"),
-        "target_program": sidebar_state.get("target_program"),
-        "target_track": sidebar_state.get("target_track"),
-        "target_dept": sidebar_state.get("target_dept"),
-        "application_year": sidebar_state.get("application_year"),
-        "application_semester": sidebar_state.get("application_semester"),
-        "application_status": sidebar_state.get("application_status"),
-        "shared_credits": sidebar_state.get("shared_credits"),
-        "shared_approved": sidebar_state.get("shared_approved"),
-        "shared_evidence_state": sidebar_state.get("shared_evidence_state"),
-        "cohort_mismatch_confirmed": bool(sidebar_state.get("cohort_mismatch_confirmed", False)),
-        "interrupted": bool(sidebar_state.get("interrupted", False)),
-        "cs_project_evidence": sidebar_state.get("cs_project_evidence"),
-        "cs_certification_a": sidebar_state.get("cs_certification_a"),
-        "cs_certification_b": sidebar_state.get("cs_certification_b"),
-        "cs_alternative_course": sidebar_state.get("cs_alternative_course"),
-        "equivalency_decisions": st.session_state.get("equivalency_decisions", []),
-        "courses": courses or [],
+    from snapshot_exports import build_allocation_csv, build_audit_json, build_pdf
+    from snapshot_renderer import render_snapshot
+
+    return render_snapshot, build_pdf, build_allocation_csv, build_audit_json
+
+
+def _safe_error_message(error: BaseException | object) -> str:
+    """Return a fixed user-facing error without exposing exception text."""
+
+    from input_confirmation import classify_user_error
+
+    return classify_user_error(error).message
+
+
+def _log_safe_failure(stage: str, error: BaseException) -> str:
+    """Log only exception type and code locations, never values or messages."""
+
+    frames = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        code = traceback.tb_frame.f_code
+        frames.append(f"{code.co_name}:{traceback.tb_lineno}")
+        traceback = traceback.tb_next
+    diagnostic = f"{stage}:{type(error).__name__}:{','.join(frames)}"
+    print(f"UTAIPEI_SAFE_FAILURE {diagnostic}")
+    return diagnostic
+
+
+def _empty_confirmation() -> CourseConfirmation:
+    return CourseConfirmation(
+        rows=(),
+        fingerprint=fingerprint_course_rows(()),
+        state=ConfirmationState.UNCONFIRMED,
+        diagnostics=(
+            InputDiagnostic(
+                code="INPUT_CONFIRMATION_REQUIRED",
+                message="尚未確認成績資料，不能作為正式審查輸入。",
+            ),
+        ),
+    )
+
+
+def _safe_source_digest(
+    source: object,
+    schedule_rows: Iterable[Mapping[str, Any]] = (),
+    *,
+    source_label: str = "",
+) -> str:
+    """Hash source identity without retaining its bytes or account details."""
+
+    if isinstance(source, bytes):
+        source_part = hashlib.sha256(source).hexdigest()
+    elif isinstance(source, str):
+        source_part = source
+    else:
+        source_part = ""
+    safe_rows = []
+    for row in schedule_rows:
+        if isinstance(row, Mapping):
+            safe_rows.append(
+                {
+                    key: row.get(key)
+                    for key in ("name", "course_code", "academic_year", "semester", "total_credit", "source")
+                }
+            )
+    payload = json.dumps(
+        {"source": source_part, "source_label": str(source_label or ""), "schedule": safe_rows},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _safe_student_display(student_info: Mapping[str, Any] | None) -> dict[str, str]:
+    """Keep only masked student display values in session/UI state."""
+
+    student_info = student_info if isinstance(student_info, Mapping) else {}
+    return {
+        "name": mask_person_name(student_info.get("name")),
+        "student_id": mask_student_id(student_info.get("student_id")),
     }
-    if parser_diagnostics is not None:
-        config["parser_diagnostics"] = parser_diagnostics
-    return config
+
+
+def _mark_confirmation_unconfirmed(
+    confirmation: CourseConfirmation,
+    *,
+    code: str,
+    message: str,
+) -> CourseConfirmation:
+    """Attach a safe blocker without copying parser diagnostics or payloads."""
+
+    return CourseConfirmation(
+        rows=confirmation.rows,
+        fingerprint=confirmation.fingerprint,
+        state=ConfirmationState.UNCONFIRMED,
+        diagnostics=(*confirmation.diagnostics, InputDiagnostic(code=code, message=message)),
+        confirmed_fingerprint=None,
+    )
+
+
+def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation:
+    """Parse current PDF/portal input and create or reuse parsed confirmation."""
+
+    source = st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path")
+    schedule_rows = st.session_state.get("schedule_courses", ())
+    if not source:
+        st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
+        return _empty_confirmation()
+
+    source_digest = _safe_source_digest(source, schedule_rows, source_label=sidebar_state.get("source_label", ""))
+    cached_digest = st.session_state.get("_source_fingerprint")
+    cached_confirmation = st.session_state.get("_parsed_confirmation")
+    cached_has_cohort_blocker = bool(
+        isinstance(cached_confirmation, CourseConfirmation)
+        and any(item.code == "COHORT_MISMATCH" for item in cached_confirmation.diagnostics)
+    )
+    if cached_digest == source_digest and isinstance(cached_confirmation, CourseConfirmation) and not cached_has_cohort_blocker:
+        return cached_confirmation
+
+    try:
+        student_info, courses = parse_transcript_pdf(source)
+        courses, _ = merge_schedule_courses(courses, schedule_rows)
+        adapted = adapt_legacy_result(courses, source_kind="transcript")
+        confirmation = adapted.confirmation
+        st.session_state["_student_display"] = _safe_student_display(student_info)
+        parse_diagnostics = student_info.get("parse_diagnostics", {}) if isinstance(student_info, Mapping) else {}
+        if isinstance(parse_diagnostics, Mapping) and parse_diagnostics.get("complete") is False:
+            confirmation = _mark_confirmation_unconfirmed(
+                confirmation,
+                code="PARSER_INCOMPLETE",
+                message="成績單解析尚未完整，請逐列檢視或改用其他來源。",
+            )
+        detected_cohort = ""
+        if isinstance(parse_diagnostics, Mapping):
+            detected_cohort = str(parse_diagnostics.get("detected_admission_cohort") or "").strip()
+        detected_cohort = detected_cohort or (
+            str(student_info.get("admission_cohort") or "").strip() if isinstance(student_info, Mapping) else ""
+        )
+        selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
+        if detected_cohort and selected_cohort and detected_cohort != selected_cohort:
+            st.warning(
+                f"成績資料辨識為 {detected_cohort} 學年度，與目前選定 {selected_cohort} 學年度手冊不同；"
+                "請核對規則後再繼續。"
+            )
+            mismatch_confirmed = st.checkbox(
+                "我已核對適用規定，仍使用目前選定手冊",
+                value=bool(sidebar_state.get("cohort_mismatch_confirmed", False)),
+                key="cohort_mismatch_confirmation",
+            )
+            if not mismatch_confirmed:
+                confirmation = _mark_confirmation_unconfirmed(
+                    confirmation,
+                    code="COHORT_MISMATCH",
+                    message="成績資料與選定入學 cohort 不一致，需人工確認。",
+                )
+        if adapted.diagnostics:
+            st.session_state["_parser_diagnostics"] = tuple(item.message for item in adapted.diagnostics)
+        else:
+            st.session_state["_parser_diagnostics"] = ()
+    except Exception as error:
+        # Never expose parser details or retain the parser's student record.
+        st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
+        st.session_state["_parser_diagnostics"] = (_safe_error_message(error),)
+        confirmation = _empty_confirmation()
+
+    if (
+        isinstance(cached_confirmation, CourseConfirmation)
+        and cached_digest not in (None, source_digest)
+        and cached_confirmation.state is ConfirmationState.CONFIRMED
+    ):
+        confirmation = CourseConfirmation(
+            rows=confirmation.rows,
+            fingerprint=confirmation.fingerprint,
+            state=ConfirmationState.STALE,
+            diagnostics=(
+                *confirmation.diagnostics,
+                InputDiagnostic(code="SOURCE_CHANGED", message="來源資料已變更，請重新檢視並確認。"),
+            ),
+            confirmed_fingerprint=cached_confirmation.confirmed_fingerprint,
+        )
+
+    # Any source change creates a new parsed state and invalidates a prior
+    # confirmation.  The stored object contains normalized scalar rows only.
+    st.session_state["_source_fingerprint"] = source_digest
+    st.session_state["_parsed_confirmation"] = confirmation
+    st.session_state["_editor_rows"] = tuple(row.as_dict() for row in confirmation.rows)
+    st.session_state["_analysis_exported"] = False
+    return confirmation
+
+
+def _as_editor_records(value: object) -> tuple[Mapping[str, Any], ...] | None:
+    if isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, (str, bytes, bytearray)) or value is None:
+        return None
+    if hasattr(value, "to_dict"):
+        try:
+            value = value.to_dict("records")
+        except TypeError:
+            return None
+    if not isinstance(value, Iterable):
+        return None
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfirmation:
+    """Render normalized rows and return the current lifecycle state."""
+
+    display = st.session_state.get("_student_display")
+    if isinstance(display, Mapping):
+        st.caption(f"成績資料：{display.get('name', '＊＊')}／學號 {display.get('student_id', '••••')}（預設遮罩）")
+    diagnostics = st.session_state.get("_parser_diagnostics", ())
+    if diagnostics:
+        st.warning("成績資料尚有待確認項目，請檢視下方列資料後再確認。")
+
+    current = confirmation
+    editor_rows = [row.as_dict() for row in confirmation.rows]
+    if editor_rows:
+        try:
+            edited = st.data_editor(
+                editor_rows,
+                key="transcript_rows_editor",
+                hide_index=True,
+                num_rows="dynamic",
+                use_container_width=True,
+                disabled=["attempt_group"],
+            )
+            records = _as_editor_records(edited)
+            current_records = tuple(row.as_dict() for row in current.rows)
+            if records is not None and tuple(dict(record) for record in records) != current_records:
+                current = edit_confirmation(current, records)
+        except (AttributeError, TypeError, ValueError):
+            # A missing editor keeps the formal release gate closed.
+            current = confirmation
+    else:
+        st.info("目前沒有可供確認的課程列；請重新上傳或改用手動輸入。")
+
+    if current.state is ConfirmationState.CONFIRMED:
+        st.success("目前課程列已確認；若修改任何欄位，必須重新確認。")
+    else:
+        if current.state is ConfirmationState.STALE:
+            st.warning("課程列在上次確認後已變更，請重新檢視並確認。")
+        elif current.state is ConfirmationState.UNCONFIRMED:
+            st.warning("課程列尚未通過安全檢查，不能產生正式通過判定。")
+        if st.button("確認目前成績列", type="primary", use_container_width=True, key="confirm_transcript_rows"):
+            confirmed = confirm_confirmation(current, current.fingerprint)
+            if confirmed.state is ConfirmationState.CONFIRMED:
+                current = confirmed
+                st.success("已確認目前課程列；後續分析將使用這份固定指紋。")
+            else:
+                st.warning("目前課程列仍有待確認資料，請先修正或補齊。")
+
+    st.session_state["_parsed_confirmation"] = current
+    st.session_state["_editor_rows"] = tuple(row.as_dict() for row in current.rows)
+    return current
+
+
+def _confirmed_rows(confirmation: object) -> tuple[Any, ...]:
+    """Release only rows protected by the exact confirmation fingerprint."""
+
+    if not isinstance(confirmation, CourseConfirmation):
+        return ()
+    return release_formal_attempts(confirmation, confirmation.fingerprint)
+
+
+def _build_evaluation_request(
+    sidebar_state: Mapping[str, Any],
+    confirmation: CourseConfirmation | object | None = None,
+    *,
+    released_rows: Iterable[Any] | None = None,
+) -> EvaluationRequest:
+    """Build the privacy-safe service request from settings and formal rows."""
+
+    confirmation = confirmation if isinstance(confirmation, CourseConfirmation) else None
+    state = confirmation.state.value if confirmation is not None else "UNCONFIRMED"
+    fingerprint = confirmation.fingerprint if confirmation is not None else ""
+    released = _confirmed_rows(confirmation) if released_rows is None else tuple(released_rows)
+    transcript_confirmed = bool(
+        confirmation is not None
+        and confirmation.state is ConfirmationState.CONFIRMED
+        and confirmation.valid
+        and confirmation.confirmed_fingerprint == fingerprint
+    )
+    primary_id = sidebar_state.get("primary_curriculum_id") or ""
+    target_id = sidebar_state.get("target_curriculum_id")
+    target_candidate = sidebar_state.get("target_curriculum_version_candidate") or target_id
+    return EvaluationRequest(
+        admission_cohort=str(sidebar_state.get("admission_cohort") or ""),
+        primary_curriculum_id=str(primary_id),
+        confirmed_course_rows=tuple(released),
+        confirmed_course_fingerprint=fingerprint,
+        transcript_confirmed=transcript_confirmed,
+        confirmation_state=state,
+        program_type=str(sidebar_state.get("program_type") or "單主修"),
+        target_curriculum_id=str(target_id) if target_id else None,
+        target_curriculum_version_candidate=str(target_candidate) if target_candidate else None,
+        target_program=sidebar_state.get("target_program"),
+        target_track=sidebar_state.get("target_track"),
+        application_year=sidebar_state.get("application_year"),
+        application_semester=sidebar_state.get("application_semester"),
+        application_status=sidebar_state.get("application_self_report") or sidebar_state.get("application_status"),
+        school_approval_status=sidebar_state.get("school_approval_self_report") or sidebar_state.get("school_approval_status"),
+    )
+
+
+def _render_official_decisions(snapshot: object) -> None:
+    decisions = getattr(snapshot, "decisions", {})
+    if not isinstance(decisions, Mapping):
+        return
+    st.markdown("### 官方判定（來自同一份分析快照）")
+    labels = (
+        ("primary_graduation", "主修畢業"),
+        ("double_major_qualification", "雙主修資格"),
+        ("formal_double_major_award", "正式授予雙主修"),
+        ("overall", "整體結果"),
+    )
+    for key, label in labels:
+        item = decisions.get(key, {})
+        status = item.get("status", "UNKNOWN") if isinstance(item, Mapping) else "UNKNOWN"
+        st.write(f"{label}：{status}")
+
+
+def _render_snapshot_outputs(snapshot: object) -> None:
+    """Send exactly one snapshot to renderer and each exporter."""
+
+    try:
+        render_snapshot, build_pdf, build_allocation_csv, build_audit_json = _load_presentation_api()
+    except (ImportError, ModuleNotFoundError):
+        st.info("報表元件尚在載入，分析快照已保留；請稍後重新整理。")
+        return
+
+    try:
+        rendered_html = render_snapshot(snapshot)
+    except Exception as error:
+        _log_safe_failure("snapshot-render", error)
+        st.error("分析資料暫時無法轉為報表；固定分析快照仍保留，請重新整理後再試。")
+        return
+    try:
+        # The report is already complete, sanitized HTML.  Sending it through
+        # Markdown can terminate a raw-HTML block at embedded chart boundaries
+        # and silently drop later charts and requirement expanders.
+        st.html(rendered_html)
+    except Exception as error:
+        _log_safe_failure("snapshot-html", error)
+        st.error("分析報表暫時無法顯示；固定分析快照仍保留，請重新整理後再試。")
+        return
+
+    downloads = (
+        ("下載列印 PDF", build_pdf, "utaipei-graduation-report.pdf", "application/pdf"),
+        ("下載課程配置 CSV", build_allocation_csv, "utaipei-allocation.csv", "text/csv"),
+        ("下載規則與判定摘要", build_audit_json, "utaipei-audit.json", "application/json"),
+    )
+    for label, builder, filename, mime in downloads:
+        try:
+            payload = builder(snapshot)
+            clicked = st.download_button(
+                label,
+                data=payload,
+                file_name=filename,
+                mime=mime,
+                use_container_width=True,
+            )
+        except Exception as error:
+            _log_safe_failure(f"snapshot-export:{filename}", error)
+            st.error(f"{label.replace('下載', '')}暫時無法建立；畫面仍使用同一份固定分析快照。")
+            continue
+        if clicked:
+            st.session_state["_analysis_exported"] = True
+
+
+def _render_analysis_state_marker(*, active: bool) -> None:
+    exported = bool(st.session_state.get("_analysis_exported", False))
+    st.markdown(
+        f"<div id='utaipei-analysis-state' data-analysis-active='{str(bool(active)).lower()}' "
+        f"data-exported='{str(exported).lower()}'></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def main():
     setup_page()
     render_header_card("北市大畢業通", "依入學年度規劃畢業與雙主修", landmark_id="main-content")
-
     sidebar_state = render_setup_panel()
     collapse_sidebar_if_needed()
 
-    transcript_source = sidebar_state["transcript_source"]
-    source_label = sidebar_state["source_label"]
-    major_domain = sidebar_state["major_domain"]
-    program_type = sidebar_state["program_type"]
-    target_dept = sidebar_state["target_dept"]
+    confirmation = _parser_confirmation(sidebar_state)
+    has_source = bool(sidebar_state.get("has_transcript"))
+    if has_source:
+        confirmation = _render_confirmation_editor(confirmation)
+    released_rows = _confirmed_rows(confirmation)
+    request = _build_evaluation_request(sidebar_state, confirmation, released_rows=released_rows)
 
-    if not transcript_source:
-        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；載入後這裡會顯示你的學分進度。")
+    # This is intentionally the only production evaluation call in this file.
+    try:
+        snapshot = evaluate(request)
+    except Exception as error:
+        st.error(_safe_error_message(error))
+        _render_analysis_state_marker(active=False)
+        return
+    if not has_source:
+        _render_analysis_state_marker(active=False)
+        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；確認資料後這裡會顯示學分進度。")
         return
 
+    _render_official_decisions(snapshot)
     try:
-        student_info, courses = parse_transcript_pdf(transcript_source)
-        courses, added_schedule_courses = merge_schedule_courses(
-            courses,
-            st.session_state.get("schedule_courses", []),
-        )
-        if added_schedule_courses:
-            credits = sum(float(course.get("total_credit") or 0.0) for course in added_schedule_courses)
-            st.toast(f"已將課表中的 {len(added_schedule_courses)} 門、{credits:g} 學分納入修讀中進度。")
-        parser_diagnostics = student_info.get("parse_diagnostics", {})
-        selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
-        detected_cohort = str(parser_diagnostics.get("detected_admission_cohort") or "").strip()
-        if detected_cohort and selected_cohort and detected_cohort != selected_cohort:
-            st.warning(
-                f"成績單辨識到 {detected_cohort} 學年度入學，但目前選定 {selected_cohort} 學年度手冊；"
-                "未確認前，審查結果會保守標示為需人工確認。"
-            )
-            sidebar_state["cohort_mismatch_confirmed"] = st.checkbox(
-                "我已核對適用規定，仍要使用目前選定的手冊",
-                value=bool(sidebar_state.get("cohort_mismatch_confirmed", False)),
-                key="cohort_mismatch_confirmation",
-                help="這是稽核確認，不會自動替換入學 cohort 或學生手冊。",
-            )
-        else:
-            sidebar_state["cohort_mismatch_confirmed"] = False
-            st.session_state.pop("cohort_mismatch_confirmation", None)
-        report = evaluate_graduation(
-            courses,
-            _evaluation_config(sidebar_state, courses, parser_diagnostics),
-        )
-        render_equivalency_workflow(
-            courses,
-            report,
-            _evaluation_config(sidebar_state, courses, parser_diagnostics),
-        )
-        render_report(
-            student_info,
-            courses,
-            report,
-            sidebar_state.get("primary_track") or major_domain,
-            program_type,
-            target_dept,
-            source_label,
-        )
-    except Exception as exc:
-        st.error(f"無法完成學分審查：{exc!s}")
-        st.info("請確認檔案為北市大歷年成績單。若校務系統最近更新版面，PDF 解析規則可能也需要同步更新。")
-
+        _render_snapshot_outputs(snapshot)
+    except Exception as error:
+        st.error(_safe_error_message(error))
+    _render_analysis_state_marker(active=bool(has_source and (confirmation.rows or released_rows)))
 
 
 if __name__ == "__main__":

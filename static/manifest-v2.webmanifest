@@ -1,15 +1,15 @@
 {
   "id": "/utaipei-graduation-credit-planner",
   "name": "北市大畢業通",
-  "short_name": "UT畢業通",
+  "short_name": "畢業通",
   "description": "依北市大學生手冊與成績單規劃畢業門檻、雙主修與學分缺口。",
   "lang": "zh-TW",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#081f5c",
-  "theme_color": "#081f5c",
+  "background_color": "#F8FAFC",
+  "theme_color": "#1E3A5F",
   "icons": [
     {
       "src": "icons/ut-graduation-v2-32.png",
@@ -34,6 +34,12 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "icons/ut-graduation-v2-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

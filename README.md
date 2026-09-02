@@ -10,27 +10,87 @@ pinned: false
 license: mit
 ---
 
-# 北市大畢業學分自我審查系統
+# 北市大畢業通
 
-這是一套以 Streamlit 製作的學分自我檢查工具，依據臺北市立大學 111–115 學年度理學院學生手冊，解析歷年成績單 PDF，將課程分類至校共同、通識、地生系主修、自由選修，以及支援的雙主修規劃模組。111、115 與非地生逐課資料不足的情況只顯示已核對門檻，結果保守標示 `UNKNOWN`，不猜測課程身份。
+「北市大畢業通」是臺北市立大學學生使用的畢業學分規劃與規則核對工具；加入手機主畫面後的短名稱為「畢業通」。它提供個人規劃與可稽核的初步判定，不取代教務處、系所或學分審查會議的正式認定。
 
-> 本工具提供個人規劃與初步核對，不取代教務處、系所或學分審查會議的正式認定。規則更新後，應先由熟悉校規的人員核對 `rules_config.json`。
+## 核心流程
 
-## 功能
+所有畫面、圖表與匯出都使用同一份不可變 `DecisionSnapshot`，不在不同模組重跑規則或重新配置學分：
 
-- 上傳歷年成績單 PDF，不必提供校務系統帳密。
-- 在左側選擇入學 cohort 111–115；cohort 決定主要手冊，且不會被課表學年度或雙主修申請年度取代。
-- 選擇地生（生命科學／地球環境）、物化（電子物理／應用化學）、資科或數學（115 標示為數據科學與數學），以及單主修／雙主修身分。
-- 追蹤校共同必修、四類通識、體育、系共同必修、領域必選修及自由選修。
-- 雙主修依校級「大二起至正常修業最後一年第一學期、至少40學分、共同課程最多6學分且須系所核准」規則顯示四狀態資格；各系更嚴格規定與申請證據仍須人工確認。
-- 可登入校務系統抓取成績單與指定學期課表；此功能可能受校方維護、頁面改版或網路區域限制影響。
-- 合併規劃中課程、模擬排課，並匯出 CSV。
-- 報告以固定的 10 區塊下拉導覽切換明細，避免較窄畫面把後段分頁裁掉。
-- 以 Lieflat F5 二十格圖呈現各門檻完成率；手機版保留可左右滑動的圖表與文字表格替代內容。
-- 支援深色模式、手機／平板響應式排版，以及以定稿 UT 圖示加入 iOS／Android 主畫面（PWA metadata，不快取個人成績）。
-- 畢業門檻由 `rules_config.json` 統一驅動；每個手冊年度都有獨立課名、學分、必選修與雙主修／輔系規則。
-- 課程採「手冊年度＋學系範圍＋完整正規化課名＋正式學分」嚴格配對。例如 `微積分`、`微積分(I)`、`微積分(II)`、`微積分(一)`、`微積分(二)` 都是不同課程。
-- 普物、普化、微積分等跨系課只會成為認定候選；必須逐筆綁定來源修課紀錄、目標必修、核准單位與證據，才可在最多 6 學分範圍內共同計入。舊版只填合計學分的資料不會增加畢業進度。
+```text
+PDF／校務系統／手動資料
+        ↓
+逐列確認 CourseConfirmation（未確認前不能正式分析）
+        ↓
+graduation_service.evaluate(...)
+        ↓
+DecisionSnapshot
+        ├─ 響應式報告與科目展開明細
+        ├─ Lieflat F5／F7／F11 統計圖表
+        └─ PDF／CSV／規則與判定摘要匯出
+```
+
+全域配置器會依整體缺額在相容要求間配置實得學分，而不是在讀入時把課程永久鎖定在單一分類。它會遵守單一計分、必修優先、重修有效成績、共享上限、抵認與免修不憑空產生學分等限制；找不到唯一安全配置或正式證據不足時，結果為 `UNKNOWN`／需人工確認，不會製造 `PASS`。
+
+報告中的每門課都會顯示最後配置的要求、實際使用學分、配置理由、其他候選配置、雙主修共享情況，以及待確認原因。每個要求（例如「已完成 6／9 學分」）都可以展開查看科目、必修／選修條件、修課狀態、實際計入學分、缺額、規則來源與判定理由。
+
+## 規則與手冊範圍
+
+介面可依入學年度選擇 111–115 學年度適用手冊，並分別保存：
+
+- 入學年度與主修適用手冊。
+- 雙主修申請學期／申請年度。
+- 雙主修目標課表版本。
+- 申請狀態、校方核准狀態、是否正式取得資格，以及是否達到正式授予雙主修的畢業條件。
+
+目前可選的主修與雙主修目標包括：
+
+- 地球環境暨生物資源學系。
+- 應用物理暨化學系－物理組。
+- 應用物理暨化學系－化學組。
+- 資訊科學系。
+- 數學系。
+
+`rules_config.json`、`policy_audit.py` 與 `research/` 保存規則來源、適用年度、原始條文或表格位置、核對狀態、自動判定資格與人工確認原因。111–115 的官方資料完整度並不相同；目前取得的課表、規章或個案核准不足以唯一判定時，系統會保留證據並顯示 `UNKNOWN`。
+
+特別規則不以課名猜測：
+
+- 普通物理、普通化學只能先列為認定候選；沒有正式等同／替代依據、開課系所、課號或核准證據時，不會自動抵認物化系的對應必修。
+- 化學組雙主修的微積分要求依目標課表年度判斷，不能把某一年度套用到所有 cohort。
+- 同名課、改名課、跨系合開課、替代科目與等同科目都要有可追溯正式依據；講授課與實驗課不因名稱相似自動互抵。
+- 免修、抵免或採認若沒有正式實得學分，不會增加配置學分。
+
+雙主修的「已申請」只是使用者提供的狀態，不等於校方核准、正式資格或正式授予。共享學分必須先有來源端的有效配置，且符合正式規則與上限；沒有來源配置或無法核對時一律待確認。
+
+目前採用的主要正式來源包括[學生手冊索引](https://curr.utaipei.edu.tw/p/412-1032-5.php?Lang=zh-tw)、[臺北市立大學雙主修規定](https://reg.utaipei.edu.tw/var/file/31/1031/img/926/316980591.pdf)與[資訊科學系規則](https://cs.utaipei.edu.tw/var/file/81/1081/img/1416/276427143.pdf)。來源未涵蓋的個案不會被推定為通過。
+
+## 成績資料與隱私
+
+- 可上傳歷年成績單 PDF；解析結果須逐列檢視並按「確認目前成績列」後，才可成為正式分析輸入。也可以手動修正辨識結果。
+- 可選擇校務系統登入抓取成績單或課表。密碼不持久保存；登入憑證、Session Cookie、完整成績單與原始例外內容不寫入日誌。
+- 抓取失敗會顯示可理解的原因與復原方式，使用者仍可改用 PDF。任何未確認或來源變更的資料都會阻擋正式評估。
+- 公開畫面、錯誤訊息與匯出預設遮罩學號與姓名；測試只使用去識別化合成成績單。
+
+## UI、統計與匯出
+
+介面使用 Noto Sans TC 與系統字型，提供真正獨立的淺色／深色主題。使用者明確選擇的主題優先於作業系統設定；版面處理 iPhone Safe Area、單一主要捲動區、44×44 px 以上操作控制與 375–1440 px 寬度，手機不需要開啟側欄才能完成入學年度、主修、雙主修及申請資訊設定。
+
+Lieflat Charts 以可閱讀、可展開的 F5、F7、F11 圖表呈現總畢業學分、主修／雙主修完成度、必修／選修／通識／自由學分分布、已完成／修習中／尚缺／待確認、配置結果、阻塞項目與補修建議。圖表、明細與匯出都由相同 `DecisionSnapshot` 產生，並帶有同一 `snapshot_id`。
+
+可下載：
+
+- 適合列印的 PDF 報告。
+- 課程配置明細 CSV。
+- 可稽核的規則與判定摘要 JSON。
+
+匯出會保留配置理由、規則來源、警告與 `UNKNOWN` 原因，並套用公式注入與個資遮罩防護；匯出的數字與畫面使用同一份快照。
+
+## PWA 與更新
+
+`static/manifest-v2.webmanifest` 設定正式名稱「北市大畢業通」、短名稱「畢業通」、`display: standalone`、`start_url`、主題色與背景色。指定 UT 深藍學士帽／勾選圖示提供 favicon、Apple touch icon 180×180、PWA 192×192／512×512 與 maskable icon。
+
+Service Worker 只處理必要的靜態外殼（manifest 與圖示等），不快取成績單、分析結果或其他個人資料。右上角三個點選單中的「更新至最新版」會檢查網站版本或新版 Service Worker、清理必要的前端快取並重新載入；偵測到尚未匯出的分析資料時會先提示，不直接丟失目前結果。
 
 ## 本機執行
 
@@ -40,80 +100,68 @@ license: mit
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-streamlit run app.py
+streamlit run app.py --server.fileWatcherType none --server.port 8505
 ```
 
-啟動後開啟終端顯示的本機網址，通常是 `http://localhost:8501`。
-
-## 測試
+若要在本機修改 PWA bootstrap，可在安裝固定依賴後以 checkout 版本覆蓋套件：
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m pip install -e .\streamlit_bootstrap --no-deps
 ```
 
-測試涵蓋三個手冊年度隔離、課名與學分嚴格配對、科系別名範圍、含實驗課程、年度增刪、替代必修、成績狀態、非 PDF 防護、課表解析，以及分類前後總學分守恆。
+## 測試與瀏覽器驗收
 
-## 隱私與安全
+單元與整合測試：
 
-- 建議使用「上傳 PDF」模式。上傳內容只保存在目前 Streamlit 工作階段記憶體中。
-- 即時抓取只在處理期間使用唯一暫存檔，讀回記憶體後立即刪除；不會留下學生 PDF 或寫入固定的 `student_transcript.pdf`。
-- 校務帳密不會寫入專案檔案、規則檔或匯出檔。
-- 請勿將真實成績單、匯出 CSV、`.env` 或 `.streamlit/secrets.toml` 提交到 Git；`.gitignore` 已包含這些規則。
-- 管理員功能不再內建密碼。若要啟用，請設定環境變數或 Streamlit secret：`UTAIPEI_ADMIN_PASSWORD`。
+```powershell
+python -m pytest -q
+python -m unittest discover -s tests -v
+ruff check .
+```
 
-## 更新畢業規則
+`tests/browser_acceptance.py` 不是 pytest 自動收集的測試，必須在 Streamlit 啟動後明確執行。它使用合成成績單驗證主題矩陣、PWA metadata／manifest／Service Worker、確認閘門、UNKNOWN 判定、要求展開、三種匯出、更新防遺失提示，以及 375、390、414、橫向手機、768、1024、1440 px 響應式版面：
 
-主要門檻與課程清單位於 `rules_config.json`：
+```powershell
+python -m playwright install chromium webkit
+python tests/browser_acceptance.py --url http://127.0.0.1:8505/ --browser chromium
+python tests/browser_acceptance.py --url http://127.0.0.1:8505/ --browser webkit
+```
 
-- `_meta`：結構版本、預設手冊年度與配對政策。
-- `shared`：三個年度共用的校共同、明示安全別名、自由選修與體育設定。
-- `handbooks.112`、`handbooks.113`、`handbooks.114`：已建置逐課規則；111、115 的門檻規劃與 PDF 頁碼引用由 `policy_audit.py` 提供，逐課結果保持人工複核。
-
-雙主修校級規則來源：[臺北市立大學雙主修規定 PDF](https://reg.utaipei.edu.tw/var/file/31/1031/img/926/316980591.pdf)；資科系專題／認證門檻來源：[資科系規則 PDF](https://cs.utaipei.edu.tw/var/file/81/1081/img/1416/276427143.pdf)。
-
-修改流程：
-
-1. 取得校方最新正式規章並逐項核對。
-2. 先備份 `rules_config.json`。
-3. 在對應 `handbooks.<學年度>` 節點修改來源、門檻與正式課程清單；不要用全域模糊別名合併不同科系的同名或近似課程。
-4. 若成績單只有可靠的格式差異，才在指定學系範圍加入明示別名，並保留 I／II、一／二、上／下、實驗與含實驗等課程身分資訊。
-5. 執行完整測試。
-6. 使用一份去識別化測試成績單人工核對分類結果。
-7. 重新啟動 Streamlit；規則在程式載入時讀取。
+部署到公開 Space 後，將 `--url` 換成正式網址並重新執行兩個瀏覽器 smoke test。WebKit 模擬可作為 Safari 行為檢查；它不等同於實體 iPhone 驗收。
 
 ## 專案結構
 
-- `app.py`：應用程式入口與整體流程。
-- `sidebar.py`：上傳、登入、身分與領域設定。
-- `pdf_parser.py`：成績單 PDF 解析及課程狀態建立。
-- `scraper.py`：校務系統登入、成績單與課表抓取。
-- `schedule_parser.py`：課表 HTML 解析。
-- `credit_engine.py`：課程分類與畢業門檻判定。
-- `handbook_rules.py`：規則載入、課名標準化與門檻介面。
-- `policy_audit.py`：cohort／系所門檻、雙主修資格、人工證據與來源引用。
-- `audit_export.py`：含公式注入防護的 CSV／JSON 稽核匯出。
-- `report_renderer.py`：審查結果、明細與匯出畫面。
-- `ui_components.py`：共用視覺元件與響應式樣式。
-- `schedule_planner.py`：模擬排課。
-- `rules_config.json`：可維護的規則資料。
-- `tests/`：不依賴真實個資的自動測試。
+- `app.py`：入口、來源確認閘門與單一快照流程。
+- `sidebar.py`：入學年度、主修、雙主修與資料來源設定。
+- `pdf_parser.py`、`scraper.py`、`schedule_parser.py`：PDF、校務系統與課表資料擷取。
+- `input_confirmation.py`、`course_input_adapter.py`：逐列確認、遮罩與來源狀態。
+- `graduation_service.py`、`allocation_engine.py`：規則評估與全域學分配置。
+- `decision_snapshot.py`、`snapshot_renderer.py`：不可變決策快照與報告明細。
+- `lieflat_progress_chart.py`：F5／F7／F11 Lieflat Charts。
+- `snapshot_exports.py`：PDF、CSV 與規則／判定摘要匯出。
+- `curriculum_registry.py`、`handbook_rules.py`、`policy_audit.py`、`rules_config.json`：課表、手冊規則與來源稽核。
+- `ui_components.py`、`streamlit_bootstrap/`、`static/`：主題、響應式外殼與 PWA 資產。
+- `research/`、`tests/`：規則研究紀錄與不含真實個資的自動／瀏覽器驗收工具。
+
+## 更新規則的安全流程
+
+1. 取得校方最新正式手冊、規章或系所公告，逐項記錄 URL、條文／表格位置與適用年度。
+2. 更新對應 cohort 與目標課表版本，不使用全域模糊別名合併不同系所的同名或近似課程。
+3. 為同名、改名、跨系合開、替代、等同、共享與抵認規則保留正式依據、核對狀態及人工確認原因。
+4. 先跑單元／整合測試，再使用去識別化成績單跑瀏覽器驗收，檢查畫面、圖表與三種匯出使用相同 `snapshot_id`。
+5. 證據不足時維持 `UNKNOWN`，不可用使用者自述、課名相似或舊年度規則代替核准證據。
+
+## 部署到既有 Hugging Face Space
+
+正式網站為 <https://sapphirejimmy-utaipei-credit-checker.hf.space/>；部署時只更新這個既有 Space，不建立另一個 Space。部署前必須先通過完整測試與瀏覽器驗收，再以明確 allowlist 上傳程式、規則、PWA 靜態檔與固定依賴。`HF資訊.txt` 僅能在本機部署階段讀取，絕不提交、輸出或寫入日誌。
+
+Streamlit 固定為 `streamlit==1.57.0`。PWA bootstrap 使用 `0.2.0`，部署依賴固定到不可變 artifact commit `593c7137262901b8cc1c5372d55d98888e66a83f` 與 SHA-256 `858a7d9fe2a82ea7d181dd9c3912b0021ab09c02838ebf0319cd876ba63c871e`。不可使用未固定版本、相對路徑或把 token 放進 requirements、Git 或 build log。
+
+部署完成的驗收順序：等待 Space 建置、確認公開首頁載入、檢查 manifest／180×180 Apple touch icon／PWA 名稱／Service Worker／右上角更新選單，再以公開網址執行 Chromium 與 WebKit smoke test，並確認部署 commit 與本次程式碼一致。未完成上述公開驗證前，不得宣稱已部署完成。
 
 ## 已知限制
 
-- PDF 解析依賴北市大目前的成績單欄位位置；校方版面更新後可能需要調整欄位座標。
-- 成績單目前沒有穩定提供開課系所與課號；完全同名、同學分但分屬不同系所，或抵免／採認個案，仍須由系所人工確認。
-- 系統不使用子字串、編輯距離或關鍵字來猜測系所課程；沒有可靠學分的課表列也不會自動假設為 2 學分。
-- 物化、資科、數學目前以已核對門檻規劃為主；成績單缺少課號／開課系所、人工核准或資科專題／認證證據時，系統不應宣稱已完成正式審查。
-
-## 部署
-
-Hugging Face Spaces 會依本檔案最上方的 YAML 使用免費的 Streamlit SDK 啟動，版本固定為 `streamlit==1.57.0`。需求檔最後一行使用公開 Space 的不可變 wheel：artifact commit `7e9599f19f75f0481e615fe3fc2a7f9ddb07a2dd`（bootstrap `0.1.1`），並固定 wheel 的 SHA-256；wheel 不含 token 或其他憑證。HF 會在掛載 `/tmp/requirements.txt` 的依賴階段先安裝它，再複製應用程式檔案，因此不能使用尚未存在於該階段的本機相對路徑。套件提供 Python `sitecustomize`，在 Streamlit 啟動前直接修補初始 HTML，寫入 `北市大畢業通`、iOS 主畫面名稱、manifest v2、UT 圖示與手機版 metadata；`0.1.1` 使用 opaque iOS 狀態列，避免主畫面模式把 Streamlit 工具列壓在時間與電池圖示下方。升級 Streamlit 或 bootstrap 時必須重新建立並驗證不可變 artifact、完整 commit pin 與 SHA-256，不可只放寬版本範圍。
-
-PWA 圖示由 `static/icons/ut-graduation-v2-source.png` 產出的不透明 32／180／192／512 PNG 組成。系統不註冊 service worker，也不快取成績單或個人審查結果。若 iPhone 已加入舊捷徑，部署後先完全關閉既有 PWA，再用 Safari 開啟同一個 Space 網址一次並重新冷啟動；只有伺服器 metadata 已確認正確、但多次冷啟動仍保留舊外殼時，才刪除並重新加入主畫面。新捷徑名稱會預填為 `北市大畢業通`。
-
-本機開發時可先執行 `python -m pip install -r requirements.txt` 安裝與線上環境相同的固定依賴，再執行 `python -m pip install -e .\streamlit_bootstrap --no-deps`，讓目前 checkout 的 bootstrap 原始碼覆蓋 wheel 以便修改與測試；重新建立環境時請再次執行前一個指令。HF 依賴檔則固定使用上述公開 commit 的 direct wheel 與 hash，確保在 app checkout 複製前也能安裝。正式部署只需將本專案內容推送至原本的 Streamlit Space；repo slug 與公開網址不需變更。部署前請確認：
-
-- 未包含真實學生 PDF、CSV 或帳密。
-- `rules_config.json` 已經人工核對。
-- `python -m unittest discover -s tests -v` 全數通過。
-- 即時抓取功能在部署地區可連線至校務系統；若不可用，使用者仍可上傳 PDF。
+- PDF 解析依賴校方成績單欄位與版面；版面變更後可能需要重新核對欄位。
+- 成績單或校務資料可能缺少課號、開課系所、核准單或正式等同證據；這些情況會保留為 `UNKNOWN`／人工確認。
+- 校務系統可能因維護、頁面改版或網路區域限制無法抓取；可改用上傳 PDF。
+- 本專案的瀏覽器驗收使用自動化 Chromium／WebKit 與合成資料；沒有實體 iPhone、Safari 或 iOS PWA 的實機證據時，不宣稱已完成實機驗收。

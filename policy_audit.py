@@ -8,11 +8,27 @@ course tables are not encoded in the application.
 
 from __future__ import annotations
 
-import re
 import math
+import re
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
+from curriculum_registry import (
+    COMPLETE as REGISTRY_COMPLETE,
+)
+from curriculum_registry import (
+    CONFLICTED as REGISTRY_CONFLICTED,
+)
+from curriculum_registry import (
+    COVERAGE_NONE as REGISTRY_COVERAGE_NONE,
+)
+from curriculum_registry import (
+    MISSING as REGISTRY_MISSING,
+)
+from curriculum_registry import (
+    get_curriculum as get_registered_curriculum,
+)
 
 SATISFIED = "SATISFIED"
 UNSATISFIED = "UNSATISFIED"
@@ -619,6 +635,107 @@ def _math_plan(cohort: str) -> dict[str, Any]:
     }
 
 
+def _registry_program_slug(program: str) -> str:
+    return {"地生": "earth", "物化": "apc", "資科": "cs", "數學": "math"}[program]
+
+
+def _registry_track_slug(program: str, track: str | None) -> str | None:
+    if program == "地生":
+        value = str(track or "").strip().lower()
+        return "life_science" if value in {"life_science", "生命科學"} or "生命" in value else "earth_environment"
+    if program == "物化":
+        value = str(track or "").strip().lower()
+        return "chemistry" if value in {"chemistry", "應用化學"} or "化學" in value else "physics"
+    return None
+
+
+def _registry_primary_metadata(cohort: str, program: str, track: str | None) -> dict[str, Any] | None:
+    try:
+        return get_registered_curriculum(
+            ":".join(
+                item
+                for item in (
+                    "primary",
+                    str(cohort),
+                    _registry_program_slug(program),
+                    _registry_track_slug(program, track),
+                )
+                if item
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _registry_target_metadata(cohort: str, program: str, track: str | None) -> dict[str, Any] | None:
+    try:
+        return get_registered_curriculum(
+            ":".join(
+                item
+                for item in (
+                    "target",
+                    "double_major",
+                    str(cohort),
+                    _registry_program_slug(program),
+                    _registry_track_slug(program, track),
+                )
+                if item
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _attach_registry_metadata(plan: dict[str, Any], curriculum: dict[str, Any] | None, *, target: bool = False) -> dict[str, Any]:
+    """Attach source/coverage metadata without changing legacy aggregate keys."""
+
+    if not curriculum:
+        plan.setdefault("registry_status", REGISTRY_MISSING)
+        plan.setdefault("evidence_state", REGISTRY_MISSING)
+        plan.setdefault("coverage_state", REGISTRY_COVERAGE_NONE)
+        plan.setdefault("source_assertions", [])
+        plan.setdefault("assertions", [])
+        plan.setdefault("blockers", [{"code": REGISTRY_MISSING, "reason": "registry 找不到此版本。"}])
+        plan["verified"] = False
+        plan["status"] = UNKNOWN
+        return plan
+
+    evidence_state = str(curriculum.get("evidence_state") or REGISTRY_MISSING)
+    coverage_state = str(curriculum.get("coverage_state") or REGISTRY_COVERAGE_NONE)
+    registry_status = str(curriculum.get("status") or evidence_state)
+    plan.update(
+        {
+            "curriculum_id": curriculum.get("curriculum_id"),
+            "curriculum_kind": curriculum.get("kind"),
+            "curriculum_type": curriculum.get("type"),
+            "curriculum_version": curriculum.get("version"),
+            "program_slug": curriculum.get("program_slug"),
+            "track_slug": curriculum.get("track_slug"),
+            "evidence_state": evidence_state,
+            "coverage_state": coverage_state,
+            "coverage": coverage_state,
+            "registry_status": registry_status,
+            "source_assertions": deepcopy(curriculum.get("source_assertions", [])),
+            "assertions": deepcopy(curriculum.get("assertions", [])),
+            "registry_citations": deepcopy(curriculum.get("citations", [])),
+            "pass_eligible": bool(curriculum.get("pass_eligible")),
+            "registry_blockers": deepcopy(curriculum.get("blockers", [])),
+        }
+    )
+    existing_warnings = list(plan.get("warnings", []))
+    existing_warnings.extend(curriculum.get("warnings", []))
+    plan["warnings"] = list(dict.fromkeys(str(item) for item in existing_warnings if item))
+    # ``status`` historically used SATISFIED for an aggregate plan.  Preserve
+    # that readable value only when the registry proves both source evidence
+    # and course-level coverage; conflicted/partial plans are UNKNOWN.
+    plan["verified"] = evidence_state == "VERIFIED" and coverage_state == REGISTRY_COMPLETE
+    if evidence_state == REGISTRY_CONFLICTED or coverage_state != REGISTRY_COMPLETE:
+        plan["status"] = UNKNOWN
+    elif not target:
+        plan["status"] = SATISFIED
+    return plan
+
+
 def get_primary_requirements(cohort: Any, primary_program: Any, track: Any = None) -> dict[str, Any]:
     """Return verified threshold facts for a primary program.
 
@@ -652,7 +769,7 @@ def get_primary_requirements(cohort: Any, primary_program: Any, track: Any = Non
     else:
         plan["common_required"] = plan.get("program_common_required")
     plan["free"] = plan.get("free_required", 15.0)
-    return plan
+    return _attach_registry_metadata(plan, _registry_primary_metadata(cohort_value, program, selected_track))
 
 
 # Short aliases make the policy API discoverable to existing callers and
@@ -666,32 +783,37 @@ def get_double_structure(cohort: Any, target_program: Any, track: Any = None) ->
     program, inferred_track = normalize_primary_program(target_program, cohort_value)
     selected_track = str(track or inferred_track or "").strip() or inferred_track
     citation = _citation(_source_file(cohort_value), _DOUBLE_CITATION_PAGES[program][cohort_value], "雙主修課程結構")
+    registered = _registry_target_metadata(cohort_value, program, selected_track)
     if program == "地生":
-        base, other, status = 24.0, 16.0, SATISFIED
+        base, other = 24.0, 16.0
     elif program == "資科":
-        base, other, status = 15.0, 25.0, SATISFIED
+        base, other = 15.0, 25.0
     elif program == "數學":
         if cohort_value in {"111", "112"}:
-            base, other, status = 21.0, 18.0, UNKNOWN
+            base, other = 21.0, 18.0
         else:
-            base, other, status = 14.0, 26.0, SATISFIED
+            base, other = 14.0, 26.0
     else:
         if cohort_value == "115":
-            base, other, status = 20.0, 20.0, SATISFIED
+            base, other = 20.0, 20.0
         else:
-            base, other, status = 16.0, 24.0, SATISFIED
-    warnings = []
-    if status == UNKNOWN:
-        warnings.append("手冊同時寫明雙主修40學分，但分項21＋18學分不相加為40；須由系所確認。")
+            base, other = 16.0, 24.0
+    registry_evidence = str((registered or {}).get("evidence_state") or EVIDENCE_MANUAL_REVIEW)
+    registry_coverage = str((registered or {}).get("coverage_state") or REGISTRY_COVERAGE_NONE)
+    # Keep the old status vocabulary readable to existing callers: an
+    # aggregate that is conflicted or not fully covered is UNKNOWN, while the
+    # precise source state is exposed in ``evidence_state``/``registry_status``.
+    status = UNKNOWN if registry_evidence == REGISTRY_CONFLICTED or registry_coverage != REGISTRY_COMPLETE else SATISFIED
+    warnings = list((registered or {}).get("warnings", []))
     evidence_states = {
-        "threshold": EVIDENCE_CONFLICTED if status == UNKNOWN else EVIDENCE_VERIFIED,
-        "course_catalog": EVIDENCE_INCOMPLETE,
+        "threshold": EVIDENCE_CONFLICTED if registry_evidence == REGISTRY_CONFLICTED else EVIDENCE_VERIFIED,
+        "course_catalog": EVIDENCE_VERIFIED if registry_coverage == REGISTRY_COMPLETE else EVIDENCE_INCOMPLETE,
         "eligibility": EVIDENCE_MANUAL_REVIEW,
     }
     citations = [citation, _citation(DOUBLE_MAJOR_RULE_URL, "official rule", "校級雙主修申請與40學分規定", DOUBLE_MAJOR_RULE_URL)]
     if program == "資科":
         citations.append(_citation(CS_RULE_URL, "official rule", "資科系專題／認證門檻", CS_RULE_URL))
-    return {
+    plan = {
         "cohort": cohort_value,
         "program": program,
         "track": selected_track,
@@ -704,6 +826,7 @@ def get_double_structure(cohort: Any, target_program: Any, track: Any = None) ->
         "warnings": warnings,
         "citations": citations,
     }
+    return _attach_registry_metadata(plan, registered, target=True)
 
 
 def _manual_state(value: Any) -> str:

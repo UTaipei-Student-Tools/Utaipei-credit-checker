@@ -45,13 +45,12 @@ def setup_page():
 
 
 def _build_update_menu_script():
-    """Build the small DOM bridge that adds the latest-version menu action.
+    """Build the hidden parent-document bridges for menu updates and theme.
 
     Streamlit owns the header menu, so there is no Python callback to attach to
-    here.  The bridge is deliberately idempotent: one observer is kept on the
-    parent document and the menu item is keyed by a stable test id.  This lets
-    Streamlit recreate the popover whenever it opens without accumulating
-    duplicate controls.
+    here.  Both bridges are deliberately idempotent: stable state is kept on the
+    parent window, the menu item is keyed by a stable test id, and the theme is
+    reflected from Streamlit's checked theme choice or effective header signal.
     """
 
     return """
@@ -60,6 +59,218 @@ def _build_update_menu_script():
     const LABEL = "更新至最新版";
     const ITEM_TEST_ID = "utMainMenuItem-update";
     const STATE_KEY = "__utaipeiGraduationMenuEnhancer";
+    const ANALYSIS_STATE_SELECTOR = "#utaipei-analysis-state[data-analysis-active='true'][data-exported='false']";
+    const STATIC_CACHE_PREFIX = "utaipei-graduation-static-";
+    const THEME_STATE_KEY = "__utaipeiGraduationThemeBridge";
+    const THEME_STATE_VERSION = 2;
+    const THEME_ATTRIBUTE = "data-utaipei-theme";
+    const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
+
+    function themePreferenceFromElement(element) {
+        if (!element || element.getAttribute("aria-checked") !== "true") return "";
+        const testId = element.getAttribute("data-testid");
+        if (testId === "stMainMenuItem-theme-Light") return "light";
+        if (testId === "stMainMenuItem-theme-Dark") return "dark";
+        if (testId === "stMainMenuItem-theme-System") return "system";
+        return "";
+    }
+
+    function readCheckedThemePreference(parentWindow) {
+        const document = parentWindow.document;
+        const themeItems = [
+            "stMainMenuItem-theme-Light",
+            "stMainMenuItem-theme-Dark",
+            "stMainMenuItem-theme-System",
+        ];
+        for (const testId of themeItems) {
+            const item = document.querySelector('[data-testid="' + testId + '"]');
+            const preference = themePreferenceFromElement(item);
+            if (preference) return preference;
+        }
+        return "";
+    }
+
+    function readThemePreferenceFromMutations(mutations) {
+        for (const record of mutations || []) {
+            if (record.type !== "attributes" || record.attributeName !== "aria-checked") continue;
+            const preference = themePreferenceFromElement(record.target);
+            if (preference) return preference;
+        }
+        return "";
+    }
+
+    function themeFromHeaderBackground(value) {
+        const normalized = String(value || "").trim().toLowerCase();
+        if (!normalized || normalized === "transparent") return "";
+        const channels = normalized.match(/[0-9.]+/g);
+        if (!channels || channels.length < 3) return "";
+
+        const red = Number(channels[0]);
+        const green = Number(channels[1]);
+        const blue = Number(channels[2]);
+        let alpha = channels.length >= 4 ? Number(channels[3]) : 1;
+        if (normalized.includes("%") && channels.length >= 4) alpha /= 100;
+        if (![red, green, blue, alpha].every(Number.isFinite) || alpha <= 0.01) return "";
+
+        const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+        return luminance >= 0.5 ? "light" : "dark";
+    }
+
+    function readHeaderTheme(parentWindow) {
+        const header = parentWindow.document.querySelector('[data-testid="stHeader"]');
+        if (!header || typeof parentWindow.getComputedStyle !== "function") return "";
+
+        try {
+            const computed = parentWindow.getComputedStyle(header);
+            const background = computed && (computed.backgroundColor
+                || (typeof computed.getPropertyValue === "function"
+                    ? computed.getPropertyValue("background-color")
+                    : ""));
+            return themeFromHeaderBackground(background);
+        } catch (_error) {
+            return "";
+        }
+    }
+
+    function readAppColorScheme(parentWindow) {
+        const app = parentWindow.document.querySelector(".stApp");
+        if (!app || typeof parentWindow.getComputedStyle !== "function") {
+            return "";
+        }
+
+        try {
+            const computed = parentWindow.getComputedStyle(app);
+            const values = [
+                computed && computed.colorScheme,
+                computed && typeof computed.getPropertyValue === "function"
+                    ? computed.getPropertyValue("color-scheme")
+                    : "",
+            ];
+            for (const value of values) {
+                const scheme = String(value || "")
+                    .toLowerCase()
+                    .split(/\\s+/)
+                    .find((candidate) => candidate === "light" || candidate === "dark");
+                if (scheme) return scheme;
+            }
+        } catch (_error) {
+            // Parent DOM access can be unavailable in embedded deployments.
+        }
+        return "";
+    }
+
+    function readMediaTheme(parentWindow, mediaQuery) {
+        if (mediaQuery) return mediaQuery.matches ? "dark" : "light";
+        if (typeof parentWindow.matchMedia !== "function") return "";
+        try {
+            const currentMediaQuery = parentWindow.matchMedia(DARK_MEDIA_QUERY);
+            return currentMediaQuery.matches ? "dark" : "light";
+        } catch (_error) {
+            return "";
+        }
+    }
+
+    function syncTheme(parentWindow, state, mutations) {
+        const root = parentWindow.document.documentElement;
+        if (!root) return;
+
+        const checkedPreference = readCheckedThemePreference(parentWindow);
+        if (checkedPreference) {
+            state.preference = checkedPreference;
+        } else {
+            const mutationPreference = readThemePreferenceFromMutations(mutations);
+            if (mutationPreference) state.preference = mutationPreference;
+        }
+
+        let theme = "";
+        if (checkedPreference === "light" || state.preference === "light") {
+            state.preference = "light";
+            theme = "light";
+        } else if (checkedPreference === "dark" || state.preference === "dark") {
+            state.preference = "dark";
+            theme = "dark";
+        } else if (checkedPreference === "system" || state.preference === "system") {
+            state.preference = "system";
+            theme = readMediaTheme(parentWindow, state.mediaQuery);
+        } else {
+            // Streamlit's header is outside the app palette we inject.  It is
+            // therefore the useful startup/reload signal before .stApp can be
+            // trusted, because our own media CSS can affect .stApp's computed
+            // color-scheme.
+            theme = readHeaderTheme(parentWindow);
+            if (!theme) theme = readAppColorScheme(parentWindow);
+            if (!theme) theme = readMediaTheme(parentWindow, state.mediaQuery);
+        }
+        if (!theme || root.getAttribute(THEME_ATTRIBUTE) === theme) return;
+        root.setAttribute(THEME_ATTRIBUTE, theme);
+    }
+
+    function installThemeBridge(parentWindow) {
+        const document = parentWindow.document;
+        const root = document.documentElement;
+        if (!root) return;
+
+        let state = parentWindow[THEME_STATE_KEY];
+        if (!state || state.version !== THEME_STATE_VERSION || typeof state.sync !== "function") {
+            if (state && state.observer && typeof state.observer.disconnect === "function") {
+                state.observer.disconnect();
+            }
+            if (state && state.mediaQuery && state.mediaListener) {
+                if (typeof state.mediaQuery.removeEventListener === "function") {
+                    state.mediaQuery.removeEventListener("change", state.mediaListener);
+                } else if (typeof state.mediaQuery.removeListener === "function") {
+                    state.mediaQuery.removeListener(state.mediaListener);
+                }
+            }
+
+            let mediaQuery = null;
+            try {
+                if (typeof parentWindow.matchMedia === "function") {
+                    mediaQuery = parentWindow.matchMedia(DARK_MEDIA_QUERY);
+                }
+            } catch (_error) {
+                mediaQuery = null;
+            }
+
+            state = {
+                version: THEME_STATE_VERSION,
+                mediaQuery,
+                mediaListener: null,
+                observer: null,
+                preference: "",
+                sync: null,
+            };
+            state.sync = (mutations) => syncTheme(parentWindow, state, mutations);
+            parentWindow[THEME_STATE_KEY] = state;
+
+            if (typeof parentWindow.MutationObserver === "function") {
+                state.observer = new parentWindow.MutationObserver((mutations) => state.sync(mutations));
+                state.observer.observe(root, {
+                    attributes: true,
+                    attributeFilter: [
+                        "class",
+                        "style",
+                        "aria-checked",
+                        "data-theme",
+                        "data-streamlit-theme",
+                        "data-testid",
+                    ],
+                    childList: true,
+                    subtree: true,
+                });
+            }
+
+            if (state.mediaQuery) {
+                state.mediaListener = () => state.sync();
+                if (typeof state.mediaQuery.addEventListener === "function") {
+                    state.mediaQuery.addEventListener("change", state.mediaListener);
+                } else if (typeof state.mediaQuery.addListener === "function") {
+                    state.mediaQuery.addListener(state.mediaListener);
+                }
+            }
+        }
+        state.sync();
+    }
 
     function markScriptHost() {
         try {
@@ -72,8 +283,88 @@ def _build_update_menu_script():
                 element.style.display = "none";
             }
         } catch (_error) {
-            // The bridge is an optional enhancement; a blocked parent must not
-            // stop Streamlit from rendering the graduation checker.
+            // The bridge is optional; a blocked parent must not stop the app.
+        }
+    }
+
+    function waitForWorkerActivation(parentWindow, worker) {
+        if (!worker || !worker.addEventListener) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            worker.addEventListener("statechange", () => {
+                if (worker.state === "activated" || worker.state === "redundant") finish();
+            }, { once: false });
+            if (parentWindow.navigator && parentWindow.navigator.serviceWorker) {
+                parentWindow.navigator.serviceWorker.addEventListener("controllerchange", finish, { once: true });
+            }
+            // A worker is allowed to finish activation during the reload.  Do
+            // not hold the menu open indefinitely when that happens.
+            parentWindow.setTimeout(finish, 2500);
+        });
+    }
+
+    async function clearStaticCaches(parentWindow) {
+        const caches = parentWindow.caches;
+        if (!caches || typeof caches.keys !== "function") return;
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames
+            .filter((cacheName) => cacheName.startsWith(STATIC_CACHE_PREFIX))
+            .map((cacheName) => caches.delete(cacheName)));
+    }
+
+    async function activateUpdate(parentWindow, item) {
+        const document = parentWindow.document;
+        const unsavedAnalysis = document.querySelector(ANALYSIS_STATE_SELECTOR);
+        // Check before touching the worker or Cache Storage.  Cancel therefore
+        // has no mutation and no navigation side effect.
+        if (unsavedAnalysis) {
+            if (!parentWindow.confirm("分析資料尚未匯出，更新可能需要重新確認上傳內容。仍要更新嗎？")) {
+                return;
+            }
+        }
+
+        item.setAttribute("aria-busy", "true");
+        item.setAttribute("aria-disabled", "true");
+        try {
+            const serviceWorker = parentWindow.navigator && parentWindow.navigator.serviceWorker;
+            if (serviceWorker && typeof serviceWorker.getRegistration === "function") {
+                const registration = await serviceWorker.getRegistration().catch(() => null);
+                if (registration && typeof registration.update === "function") {
+                    await registration.update().catch(() => undefined);
+                }
+                if (registration && registration.active && typeof registration.active.postMessage === "function") {
+                    registration.active.postMessage({ type: "GET_VERSION" });
+                    registration.active.postMessage({ type: "CHECK_VERSION" });
+                }
+                const waitingWorker = registration && (registration.waiting || registration.installing);
+                if (waitingWorker && typeof waitingWorker.postMessage === "function") {
+                    waitingWorker.postMessage({ type: "SKIP_WAITING" });
+                    await waitForWorkerActivation(parentWindow, waitingWorker);
+                }
+            }
+
+            if (serviceWorker && serviceWorker.controller && typeof serviceWorker.controller.postMessage === "function") {
+                serviceWorker.controller.postMessage({ type: "CLEAR_STATIC_CACHES" });
+            }
+            await clearStaticCaches(parentWindow);
+            const url = new URL(parentWindow.location.href);
+            url.searchParams.set("_ut_update", String(Date.now()));
+            // Keep the marker non-sensitive and reload the same document.  No
+            // local/session storage, cookie, or uploaded student data is cleared.
+            parentWindow.history.replaceState(null, "", url.toString());
+            parentWindow.location.reload();
+        } catch (_error) {
+            // A missing or unavailable SW/cache API must not make the update
+            // action destructive.  The app remains usable and can be retried.
+            item.removeAttribute("aria-busy");
+            item.removeAttribute("aria-disabled");
         }
     }
 
@@ -85,16 +376,10 @@ def _build_update_menu_script():
             return;
         }
 
-        // Streamlit 1.57 exposes Print/Record screen while newer releases add
-        // Rerun/Clear cache.  The first action is stable across both versions.
         const insertionAnchor = menu.querySelector('[data-testid="stMainMenuItem-rerun"]')
             || menu.querySelector('[data-testid="stMainMenuItem-clearCache"]')
             || menu.querySelector('[data-testid="stMainMenuItem-print"]')
             || menu.querySelector('button[role="menuitem"]');
-        // This element must belong to the parent document.  A click handler
-        // owned by the sandboxed st.iframe cannot navigate its parent, whereas
-        // a normal same-document anchor keeps the browser's native activation
-        // and navigation behavior (including keyboard Enter) intact.
         const item = document.createElement("a");
         const url = new URL(parentWindow.location.href);
         url.searchParams.set("_ut_update", String(Date.now()));
@@ -106,13 +391,18 @@ def _build_update_menu_script():
         item.setAttribute("aria-label", LABEL);
         item.setAttribute("data-testid", ITEM_TEST_ID);
         item.classList.add("utaipei-update-menu-item");
-        item.replaceChildren();
 
         const label = document.createElement("span");
         label.setAttribute("data-testid", "stMainMenuItemLabel");
         label.textContent = LABEL;
         item.appendChild(label);
 
+        item.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (item.getAttribute("aria-disabled") === "true") return;
+            void activateUpdate(parentWindow, item);
+        });
         item.addEventListener("keydown", (event) => {
             if (event.key === " " || event.key === "Spacebar") {
                 event.preventDefault();
@@ -135,6 +425,7 @@ def _build_update_menu_script():
             return;
         }
 
+        installThemeBridge(parentWindow);
         let state = parentWindow[STATE_KEY];
         if (!state) {
             state = {
@@ -151,8 +442,7 @@ def _build_update_menu_script():
         state.install();
         parentWindow.requestAnimationFrame(state.install);
     } catch (_error) {
-        // The bridge is an optional enhancement; keep the app usable if the
-        // embedding browser blocks same-origin DOM access.
+        // The bridge is optional; keep the app usable if parent DOM access fails.
     }
 })();
 </script>
@@ -206,76 +496,79 @@ def inject_theme_css():
 
     Streamlit's theme variables are not consistently exposed across releases.
     These tokens therefore have explicit light defaults, a system dark override,
-    and selectors for the data-theme attributes used by newer Streamlit builds.
+    legacy data-theme fallbacks, and a final parent-document bridge override.
     """
 
     st.markdown(
         """
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&family=Noto+Serif+TC:wght@500;600;700;800&display=swap');
+            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&display=swap');
 
             /* ----- semantic palette ------------------------------------------------ */
             :root {
                 color-scheme: light;
-                --ui-canvas: #f8fafc;
-                --ui-canvas-raised: #e9eef6;
-                --ui-surface: #ffffff;
-                --ui-surface-raised: #ffffff;
-                --ui-surface-soft: #f1f5fb;
-                --ui-surface-strong: #e9eef6;
-                --ui-text: #1e3a8a;
+                --ui-canvas: #F8FAFC;
+                --ui-canvas-raised: #F1F5F9;
+                --ui-surface: #FFFFFF;
+                --ui-surface-raised: #FFFFFF;
+                --ui-surface-soft: #F8FAFC;
+                --ui-surface-strong: #E2E8F0;
+                --ui-text: #0F172A;
                 --ui-text-muted: #475569;
-                --ui-text-faint: #64748b;
-                --ui-border: #dbeafe;
-                --ui-border-strong: #93c5fd;
-                --ui-accent: #1e40af;
-                --ui-accent-strong: #1e3a8a;
-                --ui-accent-soft: rgba(30, 64, 175, .12);
+                --ui-text-faint: #64748B;
+                --ui-border: #E2E8F0;
+                --ui-border-strong: #CBD5E1;
+                --ui-academic-primary: #1E3A5F;
+                --ui-accent: #2563EB;
+                --ui-accent-strong: #1E3A5F;
+                --ui-accent-soft: rgba(37, 99, 235, .12);
                 --ui-success: #087f5b;
                 --ui-success-soft: rgba(8, 127, 91, .12);
                 --ui-warning: #9a5b00;
                 --ui-warning-soft: rgba(154, 91, 0, .13);
                 --ui-danger: #dc2626;
                 --ui-danger-soft: rgba(220, 38, 38, .11);
-                --ui-info: #2563eb;
+                --ui-info: #2563EB;
                 --ui-info-soft: rgba(37, 99, 235, .12);
-                --ui-focus: #1e40af;
+                --ui-focus: #2563EB;
                 --ui-shadow: 0 16px 38px rgba(33, 61, 85, .11);
                 --ui-shadow-soft: 0 8px 22px rgba(33, 61, 85, .07);
                 --ui-radius-sm: 8px;
-                --ui-radius-md: 13px;
-                --ui-radius-lg: 20px;
-                --ui-control-height: 44px;
+                    --ui-radius-md: 13px;
+                    --ui-radius-lg: 20px;
+                    --ui-control-height: 44px;
+                    --ui-header-height: 3.75rem;
 
                 /* aliases from the project design system */
-                --color-primary: #1e40af;
-                --color-on-primary: #ffffff;
-                --color-secondary: #3b82f6;
+                --color-primary: #1E3A5F;
+                --color-on-primary: #FFFFFF;
+                --color-secondary: #2563EB;
                 --color-accent: #d97706;
-                --color-background: #f8fafc;
-                --color-foreground: #1e3a8a;
-                --color-muted: #e9eef6;
-                --color-border: #dbeafe;
+                --color-background: #F8FAFC;
+                --color-foreground: #0F172A;
+                --color-muted: #F1F5F9;
+                --color-border: #E2E8F0;
                 --color-destructive: #dc2626;
-                --color-ring: #1e40af;
+                --color-ring: #2563EB;
             }
 
             @media (prefers-color-scheme: dark) {
                 :root {
                     color-scheme: dark;
-                    --ui-canvas: #020617;
-                    --ui-canvas-raised: #0f172a;
+                    --ui-canvas: #0B1120;
+                    --ui-canvas-raised: #111827;
                     --ui-surface: #111827;
-                    --ui-surface-raised: #1e293b;
-                    --ui-surface-soft: #1a1e2f;
+                    --ui-surface-raised: #172033;
+                    --ui-surface-soft: #172033;
                     --ui-surface-strong: #334155;
-                    --ui-text: #f8fafc;
-                    --ui-text-muted: #cbd5e1;
-                    --ui-text-faint: #94a3b8;
+                    --ui-text: #F8FAFC;
+                    --ui-text-muted: #CBD5E1;
+                    --ui-text-faint: #CBD5E1;
                     --ui-border: #334155;
-                    --ui-border-strong: #64748b;
-                    --ui-accent: #60a5fa;
-                    --ui-accent-strong: #3b82f6;
+                    --ui-border-strong: #64748B;
+                    --ui-academic-primary: #60A5FA;
+                    --ui-accent: #60A5FA;
+                    --ui-accent-strong: #60A5FA;
                     --ui-accent-soft: rgba(96, 165, 250, .16);
                     --ui-success: #65d5ab;
                     --ui-success-soft: rgba(101, 213, 171, .14);
@@ -283,22 +576,22 @@ def inject_theme_css():
                     --ui-warning-soft: rgba(245, 194, 118, .16);
                     --ui-danger: #ff9a92;
                     --ui-danger-soft: rgba(255, 154, 146, .15);
-                    --ui-info: #93c5fd;
+                    --ui-info: #60A5FA;
                     --ui-info-soft: rgba(147, 197, 253, .16);
-                    --ui-focus: #93c5fd;
+                    --ui-focus: #60A5FA;
                     --ui-shadow: 0 18px 46px rgba(0, 0, 0, .34);
                     --ui-shadow-soft: 0 8px 24px rgba(0, 0, 0, .25);
 
-                    --color-primary: #0f172a;
-                    --color-on-primary: #f8fafc;
-                    --color-secondary: #3b82f6;
+                    --color-primary: #172033;
+                    --color-on-primary: #F8FAFC;
+                    --color-secondary: #60A5FA;
                     --color-accent: #fbbf24;
-                    --color-background: #020617;
-                    --color-foreground: #f8fafc;
-                    --color-muted: #1a1e2f;
+                    --color-background: #0B1120;
+                    --color-foreground: #F8FAFC;
+                    --color-muted: #172033;
                     --color-border: #334155;
                     --color-destructive: #ef4444;
-                    --color-ring: #93c5fd;
+                    --color-ring: #60A5FA;
                 }
             }
 
@@ -314,19 +607,20 @@ def inject_theme_css():
             html:has([data-testid="stAppViewContainer"][data-theme="dark"]),
             html:has([data-streamlit-theme="dark"]) {
                 color-scheme: dark;
-                --ui-canvas: #020617;
-                --ui-canvas-raised: #0f172a;
+                --ui-canvas: #0B1120;
+                --ui-canvas-raised: #111827;
                 --ui-surface: #111827;
-                --ui-surface-raised: #1e293b;
-                --ui-surface-soft: #1a1e2f;
+                --ui-surface-raised: #172033;
+                --ui-surface-soft: #172033;
                 --ui-surface-strong: #334155;
-                --ui-text: #f8fafc;
-                --ui-text-muted: #cbd5e1;
-                --ui-text-faint: #94a3b8;
+                --ui-text: #F8FAFC;
+                --ui-text-muted: #CBD5E1;
+                --ui-text-faint: #CBD5E1;
                 --ui-border: #334155;
-                --ui-border-strong: #64748b;
-                --ui-accent: #60a5fa;
-                --ui-accent-strong: #3b82f6;
+                --ui-border-strong: #64748B;
+                --ui-academic-primary: #60A5FA;
+                --ui-accent: #60A5FA;
+                --ui-accent-strong: #60A5FA;
                 --ui-accent-soft: rgba(96, 165, 250, .16);
                 --ui-success: #65d5ab;
                 --ui-success-soft: rgba(101, 213, 171, .14);
@@ -334,22 +628,161 @@ def inject_theme_css():
                 --ui-warning-soft: rgba(245, 194, 118, .16);
                 --ui-danger: #ff9a92;
                 --ui-danger-soft: rgba(255, 154, 146, .15);
-                --ui-info: #93c5fd;
+                --ui-info: #60A5FA;
                 --ui-info-soft: rgba(147, 197, 253, .16);
-                --ui-focus: #93c5fd;
+                --ui-focus: #60A5FA;
                 --ui-shadow: 0 18px 46px rgba(0, 0, 0, .34);
                 --ui-shadow-soft: 0 8px 24px rgba(0, 0, 0, .25);
 
-                --color-primary: #0f172a;
-                --color-on-primary: #f8fafc;
-                --color-secondary: #3b82f6;
+                --color-primary: #172033;
+                --color-on-primary: #F8FAFC;
+                --color-secondary: #60A5FA;
                 --color-accent: #fbbf24;
-                --color-background: #020617;
-                --color-foreground: #f8fafc;
-                --color-muted: #1a1e2f;
+                --color-background: #0B1120;
+                --color-foreground: #F8FAFC;
+                --color-muted: #172033;
                 --color-border: #334155;
                 --color-destructive: #ef4444;
-                --color-ring: #93c5fd;
+                --color-ring: #60A5FA;
+            }
+
+            /* Explicit user preference must win over the OS media query.  These
+               selectors intentionally follow the media block above so a light
+               choice remains light on an iPhone set to dark (and vice versa). */
+            html[data-theme="light"],
+            body[data-theme="light"],
+            .stApp[data-theme="light"],
+            [data-testid="stAppViewContainer"][data-theme="light"],
+            [data-streamlit-theme="light"],
+            html:has(body[data-theme="light"]),
+            html:has(.stApp[data-theme="light"]),
+            html:has([data-testid="stAppViewContainer"][data-theme="light"]),
+            html:has([data-streamlit-theme="light"]) {
+                color-scheme: light;
+                --ui-canvas: #F8FAFC;
+                --ui-canvas-raised: #F1F5F9;
+                --ui-surface: #FFFFFF;
+                --ui-surface-raised: #FFFFFF;
+                --ui-surface-soft: #F8FAFC;
+                --ui-surface-strong: #E2E8F0;
+                --ui-text: #0F172A;
+                --ui-text-muted: #475569;
+                --ui-text-faint: #64748B;
+                --ui-border: #E2E8F0;
+                --ui-border-strong: #CBD5E1;
+                --ui-academic-primary: #1E3A5F;
+                --ui-accent: #2563EB;
+                --ui-accent-strong: #1E3A5F;
+                --ui-accent-soft: rgba(37, 99, 235, .12);
+                --ui-info: #2563EB;
+                --ui-info-soft: rgba(37, 99, 235, .12);
+                --ui-focus: #2563EB;
+                --color-primary: #1E3A5F;
+                --color-on-primary: #FFFFFF;
+                --color-secondary: #2563EB;
+                --color-background: #F8FAFC;
+                --color-foreground: #0F172A;
+                --color-muted: #F1F5F9;
+                --color-border: #E2E8F0;
+                --color-ring: #2563EB;
+            }
+
+            /* The parent-document bridge mirrors .stApp's computed
+               color-scheme here.  Keep these rules last so an explicit
+               Streamlit choice wins over both the OS media query and any
+               legacy theme attributes on app containers. */
+            :root[data-utaipei-theme="dark"],
+            html[data-utaipei-theme="dark"],
+            html:root[data-utaipei-theme="dark"],
+            html[data-utaipei-theme="dark"] body,
+            html[data-utaipei-theme="dark"] .stApp,
+            html[data-utaipei-theme="dark"] [data-testid="stAppViewContainer"],
+            html[data-utaipei-theme="dark"] [data-streamlit-theme] {
+                color-scheme: dark;
+                --ui-canvas: #0B1120;
+                --ui-canvas-raised: #111827;
+                --ui-surface: #111827;
+                --ui-surface-raised: #172033;
+                --ui-surface-soft: #172033;
+                --ui-surface-strong: #334155;
+                --ui-text: #F8FAFC;
+                --ui-text-muted: #CBD5E1;
+                --ui-text-faint: #CBD5E1;
+                --ui-border: #334155;
+                --ui-border-strong: #64748B;
+                --ui-academic-primary: #60A5FA;
+                --ui-accent: #60A5FA;
+                --ui-accent-strong: #60A5FA;
+                --ui-accent-soft: rgba(96, 165, 250, .16);
+                --ui-success: #65d5ab;
+                --ui-success-soft: rgba(101, 213, 171, .14);
+                --ui-warning: #f5c276;
+                --ui-warning-soft: rgba(245, 194, 118, .16);
+                --ui-danger: #ff9a92;
+                --ui-danger-soft: rgba(255, 154, 146, .15);
+                --ui-info: #60A5FA;
+                --ui-info-soft: rgba(147, 197, 253, .16);
+                --ui-focus: #60A5FA;
+                --ui-shadow: 0 18px 46px rgba(0, 0, 0, .34);
+                --ui-shadow-soft: 0 8px 24px rgba(0, 0, 0, .25);
+
+                --color-primary: #172033;
+                --color-on-primary: #F8FAFC;
+                --color-secondary: #60A5FA;
+                --color-accent: #fbbf24;
+                --color-background: #0B1120;
+                --color-foreground: #F8FAFC;
+                --color-muted: #172033;
+                --color-border: #334155;
+                --color-destructive: #ef4444;
+                --color-ring: #60A5FA;
+            }
+
+            :root[data-utaipei-theme="light"],
+            html[data-utaipei-theme="light"],
+            html:root[data-utaipei-theme="light"],
+            html[data-utaipei-theme="light"] body,
+            html[data-utaipei-theme="light"] .stApp,
+            html[data-utaipei-theme="light"] [data-testid="stAppViewContainer"],
+            html[data-utaipei-theme="light"] [data-streamlit-theme] {
+                color-scheme: light;
+                --ui-canvas: #F8FAFC;
+                --ui-canvas-raised: #F1F5F9;
+                --ui-surface: #FFFFFF;
+                --ui-surface-raised: #FFFFFF;
+                --ui-surface-soft: #F8FAFC;
+                --ui-surface-strong: #E2E8F0;
+                --ui-text: #0F172A;
+                --ui-text-muted: #475569;
+                --ui-text-faint: #64748B;
+                --ui-border: #E2E8F0;
+                --ui-border-strong: #CBD5E1;
+                --ui-academic-primary: #1E3A5F;
+                --ui-accent: #2563EB;
+                --ui-accent-strong: #1E3A5F;
+                --ui-accent-soft: rgba(37, 99, 235, .12);
+                --ui-success: #087f5b;
+                --ui-success-soft: rgba(8, 127, 91, .12);
+                --ui-warning: #9a5b00;
+                --ui-warning-soft: rgba(154, 91, 0, .13);
+                --ui-danger: #dc2626;
+                --ui-danger-soft: rgba(220, 38, 38, .11);
+                --ui-info: #2563EB;
+                --ui-info-soft: rgba(37, 99, 235, .12);
+                --ui-focus: #2563EB;
+                --ui-shadow: 0 16px 38px rgba(33, 61, 85, .11);
+                --ui-shadow-soft: 0 8px 22px rgba(33, 61, 85, .07);
+
+                --color-primary: #1E3A5F;
+                --color-on-primary: #FFFFFF;
+                --color-secondary: #2563EB;
+                --color-accent: #d97706;
+                --color-background: #F8FAFC;
+                --color-foreground: #0F172A;
+                --color-muted: #F1F5F9;
+                --color-border: #E2E8F0;
+                --color-destructive: #dc2626;
+                --color-ring: #2563EB;
             }
 
             /* ----- reset and page frame ------------------------------------------ */
@@ -384,7 +817,8 @@ def inject_theme_css():
                 max-width: 1400px !important;
                 min-width: 0;
                 margin-inline: auto;
-                padding: 2.25rem clamp(1rem, 3vw, 2.75rem) 4.5rem !important;
+                padding: calc(var(--ui-header-height) + 1rem) clamp(1rem, 3vw, 2.75rem)
+                    clamp(1.25rem, 3vw, 2.5rem) !important;
             }
             [data-testid="stMainBlockContainer"] > div { min-width: 0; }
             .stMarkdown, .stMarkdown p, .stMarkdown li,
@@ -402,7 +836,7 @@ def inject_theme_css():
             [data-testid="stWidgetLabel"] small { color: var(--ui-text-muted) !important; }
             h1, h2, h3, h4, h5, h6 {
                 color: var(--ui-text) !important;
-                font-family: "Noto Serif TC", "Noto Sans TC", "Microsoft JhengHei", serif;
+                font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, -apple-system, sans-serif;
                 text-wrap: balance;
                 scroll-margin-top: 1.5rem;
                 letter-spacing: -.015em;
@@ -413,6 +847,9 @@ def inject_theme_css():
             h4 { font-size: 1.05rem; line-height: 1.4; }
             a { color: var(--ui-accent); text-underline-offset: 3px; }
             a:hover { color: var(--ui-accent-strong); }
+            /* Streamlit's 16px heading deep-link glyph is not part of the app's
+               task flow and cannot meet the 44px touch-target contract. */
+            a[aria-label="Link to heading"] { display: none !important; }
             code, pre, .course-row, .dataframe, [data-testid="stDataFrame"] {
                 font-variant-numeric: tabular-nums;
             }
@@ -434,28 +871,13 @@ def inject_theme_css():
 
             /* ----- shared surfaces ------------------------------------------------ */
             .header-card {
-                position: relative;
-                overflow: hidden;
                 margin: 0 0 1.75rem;
                 padding: clamp(1.35rem, 3vw, 2.4rem);
                 border: 1px solid var(--ui-border);
                 border-radius: var(--ui-radius-lg);
-                background:
-                    radial-gradient(circle at 92% 15%, var(--ui-accent-soft), transparent 34%),
-                    linear-gradient(135deg, var(--ui-surface-raised), var(--ui-surface-soft));
+                background: var(--ui-surface-raised);
                 box-shadow: var(--ui-shadow-soft);
                 text-align: left;
-            }
-            .header-card::after {
-                position: absolute;
-                right: 1.4rem;
-                bottom: -2.6rem;
-                width: 9rem;
-                height: 9rem;
-                border: 1px solid var(--ui-border);
-                border-radius: 50%;
-                content: "";
-                opacity: .55;
             }
             .header-title {
                 position: relative;
@@ -509,7 +931,7 @@ def inject_theme_css():
                 border-radius: var(--ui-radius-md);
             }
             .info-card-highlight {
-                background: linear-gradient(135deg, var(--ui-accent-soft), var(--ui-surface)) !important;
+                background: var(--ui-accent-soft) !important;
                 border-color: color-mix(in srgb, var(--ui-accent) 42%, var(--ui-border)) !important;
             }
             .info-card .eyebrow,
@@ -657,7 +1079,7 @@ def inject_theme_css():
                 font-size: .76rem;
                 font-weight: 750;
                 line-height: 1.2;
-                white-space: nowrap;
+                overflow-wrap: anywhere;
             }
             .status-completed { border-color: color-mix(in srgb, var(--ui-success) 58%, var(--ui-border)); background: var(--ui-success-soft); color: var(--ui-success) !important; }
             .status-ip { border-color: color-mix(in srgb, var(--ui-info) 58%, var(--ui-border)); background: var(--ui-info-soft); color: var(--ui-info) !important; }
@@ -670,9 +1092,8 @@ def inject_theme_css():
             .course-list {
                 width: 100%;
                 max-width: 100%;
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-                overscroll-behavior-x: contain;
+                min-width: 0;
+                overflow-x: clip;
                 border: 1px solid var(--ui-border);
                 border-radius: var(--ui-radius-md);
                 background: var(--ui-surface);
@@ -680,7 +1101,9 @@ def inject_theme_css():
             .table-container table,
             .report-table-wrap table {
                 width: 100%;
-                min-width: 32rem;
+                min-width: 0;
+                max-width: 100%;
+                table-layout: fixed;
                 border-collapse: separate;
                 border-spacing: 0;
                 color: var(--ui-text);
@@ -694,7 +1117,8 @@ def inject_theme_css():
                 color: var(--ui-text) !important;
                 text-align: left;
                 vertical-align: middle;
-                white-space: nowrap;
+                white-space: normal;
+                overflow-wrap: anywhere;
             }
             .table-container th, .report-table-wrap th {
                 position: sticky;
@@ -716,12 +1140,13 @@ def inject_theme_css():
             .report-table-wrap td:nth-last-child(-n+3) {
                 font-variant-numeric: tabular-nums;
             }
-            .course-list { display: grid; gap: 0; overflow-x: auto; }
+            .course-list { display: grid; gap: 0; overflow-x: clip; }
             .course-header, .course-row {
                 display: grid;
-                grid-template-columns: minmax(15rem, 3fr) minmax(6.5rem, 1fr) minmax(4.5rem, .7fr) minmax(5rem, .8fr) minmax(6rem, 1fr);
+                grid-template-columns: minmax(0, 3fr) minmax(0, 1fr) minmax(0, .7fr) minmax(0, .8fr) minmax(0, 1fr);
                 gap: .8rem;
-                min-width: 42rem;
+                min-width: 0;
+                max-width: 100%;
                 align-items: center;
                 padding: .72rem .9rem;
             }
@@ -785,6 +1210,7 @@ def inject_theme_css():
             /* ----- controls, alerts, sidebar, popovers ---------------------------- */
             button, input, textarea, select, [role="button"], [data-baseweb="select"] > div {
                 min-height: var(--ui-control-height) !important;
+                min-width: var(--ui-control-height) !important;
                 touch-action: manipulation;
             }
             button[data-testid="stBaseButton-headerNoPadding"],
@@ -834,21 +1260,52 @@ def inject_theme_css():
                accessible focus ring around either outer select control. */
             [data-testid="stSelectbox"] [role="group"] {
                 min-height: var(--ui-control-height) !important;
+                min-width: var(--ui-control-height) !important;
+                border: 1px solid var(--ui-border) !important;
+                border-radius: var(--ui-radius-sm) !important;
                 border-color: var(--ui-border) !important;
+                background: var(--ui-surface) !important;
+                transition: border-color .18s ease, box-shadow .18s ease;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] {
+                min-height: var(--ui-control-height) !important;
+                min-width: var(--ui-control-height) !important;
+                border: 1px solid var(--ui-border) !important;
+                border-radius: var(--ui-radius-sm) !important;
                 background: var(--ui-surface) !important;
                 transition: border-color .18s ease, box-shadow .18s ease;
             }
             [data-testid="stSelectbox"] input[role="combobox"] {
                 background: transparent !important;
+                min-width: 0 !important;
+                border: 0 !important;
+                outline: none !important;
+                box-shadow: none !important;
+                caret-color: transparent;
+                appearance: none !important;
+                -webkit-appearance: none !important;
             }
             [data-testid="stSelectbox"] input[role="combobox"]:focus-visible {
                 outline: none !important;
                 box-shadow: none !important;
             }
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+                min-width: 0 !important;
+                border: 0 !important;
+                outline: none !important;
+                box-shadow: none !important;
+            }
             [data-testid="stSelectbox"] [role="group"]:focus-within,
-            [data-testid="stSelectbox"] [data-baseweb="select"]:focus-within > div {
+            [data-testid="stSelectbox"] [data-baseweb="select"]:focus-within {
                 border-color: var(--ui-focus) !important;
                 box-shadow: 0 0 0 3px var(--ui-focus) !important;
+            }
+            /* When BaseWeb is nested in Streamlit's accessible group, the
+               group is the sole visible focus owner; the nested shell remains
+               a borderless input surface. */
+            [data-testid="stSelectbox"] [role="group"] [data-baseweb="select"]:focus-within {
+                border-color: transparent !important;
+                box-shadow: none !important;
             }
             [data-testid="stAlert"] {
                 border: 1px solid var(--ui-border) !important;
@@ -884,6 +1341,7 @@ def inject_theme_css():
                 border-color: var(--ui-border) !important;
                 background: var(--ui-surface) !important;
             }
+            [data-testid="stExpander"] summary { min-height: var(--ui-control-height) !important; }
             [data-testid="stExpander"] summary:hover { background: var(--ui-accent-soft); }
             .export-group { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid var(--ui-border); }
             .export-label { margin: 0 0 .55rem; color: var(--ui-text-muted); font-size: .82rem; font-weight: 750; }
@@ -939,15 +1397,14 @@ def inject_theme_css():
                 .info-flex { grid-template-columns: minmax(0, 1fr); }
             }
             @media (max-width: 768px) {
-                /* The standalone viewport already starts below iOS's status
-                   bar.  Keep Streamlit's main section as the only scrolling
-                   owner and apply side/bottom insets only where content can
-                   actually meet a device edge. */
+                /* Keep the safe-area inset and Streamlit's fixed header offset
+                   separate so neither the notch nor the toolbar is counted
+                   twice. Streamlit's main section remains the only scroller. */
                 [data-testid="stAppViewContainer"] {
-                    padding: 0 !important;
+                    padding: var(--ui-safe-top) 0 0 0 !important;
                 }
                 [data-testid="stMainBlockContainer"] {
-                    padding: .85rem
+                    padding: calc(var(--ui-header-height) + .85rem)
                         max(.85rem, var(--ui-safe-right))
                         max(1.25rem, var(--ui-safe-bottom))
                         max(.85rem, var(--ui-safe-left)) !important;
@@ -967,7 +1424,11 @@ def inject_theme_css():
                 .card-panel { margin-block: .7rem; border-radius: var(--ui-radius-md); }
                 .hero-callout { margin-bottom: .9rem; padding: .8rem .9rem; line-height: 1.55; }
                 [data-testid="stExpander"] summary { min-height: var(--ui-control-height); }
-                .table-container table, .report-table-wrap table { min-width: 34rem; }
+                .table-container table, .report-table-wrap table {
+                    min-width: 0;
+                    width: 100%;
+                    table-layout: fixed;
+                }
                 .course-header { display: none; }
                 .course-row {
                     grid-template-columns: 1fr;
