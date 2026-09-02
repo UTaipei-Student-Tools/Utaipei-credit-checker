@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="臺北市立大學地生系 114 學年度畢業學分預估工具">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' {{API_BASE_URL}}">
   <title>臺北市立大學學分審核</title>
-  <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="./static/styles.css">
+  <script src="./static/app.js" defer></script>
 </head>
-<body data-remote-login-enabled="{{REMOTE_LOGIN_ENABLED}}">
+<body data-remote-login-enabled="{{REMOTE_LOGIN_ENABLED}}" data-api-base-url="{{API_BASE_URL}}">
 <header>
   <div class="hero">
     <span class="eyebrow">UTaipei Credit Audit</span>
@@ -35,10 +36,11 @@
 
   <section id="loginDisabled" class="panel hidden">
     <div class="section-heading">
-      <div><span class="eyebrow">Hugging Face 安全預設</span><h2>遠端帳密登入未啟用</h2></div>
-      <span class="status-chip good">較安全</span>
+      <div><span class="eyebrow">公開部署安全模式</span><h2>遠端帳密登入未啟用</h2></div>
+      <span id="backendStatus" class="status-chip caution">後端檢查中</span>
     </div>
     <p class="muted">公開部署不接收校務系統帳密。請使用下方手動上傳；需要自動登入時，只在可信任的本機部署設定 <code>ENABLE_REMOTE_LOGIN=true</code>。</p>
+    <p id="processingLocation" class="muted"></p>
   </section>
 
   <section class="panel">

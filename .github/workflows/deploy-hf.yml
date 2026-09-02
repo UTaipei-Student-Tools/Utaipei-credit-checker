@@ -46,7 +46,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
-          if [ -n "$HF_TOKEN" ] && [ -n "$HF_SPACE_REPO" ]; then
+          HF_TOKEN_CLEAN="$(printf '%s' "$HF_TOKEN" | tr -d '\r\n')"
+          HF_SPACE_REPO_CLEAN="$(printf '%s' "$HF_SPACE_REPO" | tr -d '\r\n')"
+          if [ -n "$HF_TOKEN_CLEAN" ] && [ -n "$HF_SPACE_REPO_CLEAN" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
@@ -57,8 +59,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          HF_TOKEN_CLEAN="$(printf '%s' "$HF_TOKEN" | tr -d '\r\n')"
+          echo "::add-mask::${HF_TOKEN_CLEAN}"
           curl --fail --silent --show-error --output /dev/null \
-            --header "Authorization: Bearer ${HF_TOKEN}" \
+            --header "Authorization: Bearer ${HF_TOKEN_CLEAN}" \
             https://huggingface.co/api/whoami-v2
       - name: Push to Hugging Face Space
         if: steps.hf.outputs.configured == 'true'
@@ -66,7 +70,20 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
+          export HF_TOKEN_CLEAN="$(printf '%s' "$HF_TOKEN" | tr -d '\r\n')"
+          HF_SPACE_REPO_CLEAN="$(printf '%s' "$HF_SPACE_REPO" | tr -d '\r\n')"
+          echo "::add-mask::${HF_TOKEN_CLEAN}"
           git config user.email "actions@github.com"
           git config user.name "github-actions"
-          git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
-          git push hf HEAD:main
+          git remote add hf "https://huggingface.co/spaces/${HF_SPACE_REPO_CLEAN}"
+          ASKPASS_SCRIPT="$(mktemp)"
+          trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+          cat > "$ASKPASS_SCRIPT" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' user ;;
+            *Password*) printf '%s\n' "$HF_TOKEN_CLEAN" ;;
+          esac
+          SH
+          chmod 700 "$ASKPASS_SCRIPT"
+          GIT_ASKPASS="$ASKPASS_SCRIPT" GIT_TERMINAL_PROMPT=0 git push hf HEAD:main

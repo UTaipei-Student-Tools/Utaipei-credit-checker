@@ -6,8 +6,10 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -26,6 +28,35 @@ from app.web.security import install_log_redaction
 
 install_log_redaction()
 
+
+def _validated_github_pages_origin(value: str) -> str:
+    cleaned = value.strip().rstrip("/")
+    if not cleaned:
+        return ""
+
+    parsed = urlparse(cleaned)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("GITHUB_PAGES_ORIGIN must contain a valid port") from exc
+
+    if (
+        cleaned == "*"
+        or any(character.isspace() for character in cleaned)
+        or "\\" in cleaned
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname == "*"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("GITHUB_PAGES_ORIGIN must be an HTTPS origin without a path, query, or credentials")
+    return cleaned
+
 MAX_BROWSER_CONCURRENCY = max(1, int(os.getenv("MAX_BROWSER_CONCURRENCY", "1")))
 QUEUE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "30")))
 SCRAPER_TIMEOUT_SECONDS = max(10.0, float(os.getenv("SCRAPER_TIMEOUT_SECONDS", "60")))
@@ -33,12 +64,24 @@ MAX_UPLOAD_BYTES = max(1024, int(os.getenv("MAX_UPLOAD_BYTES", str(8 * 1024 * 10
 MAX_HTML_TEXT_CHARS = max(1000, int(os.getenv("MAX_HTML_TEXT_CHARS", "2000000")))
 BASE_URL = os.getenv("UTAIPEI_BASE_URL", "https://my.utaipei.edu.tw/")
 ENABLE_REMOTE_LOGIN = os.getenv("ENABLE_REMOTE_LOGIN", "false").casefold() in {"1", "true", "yes", "on"}
+GITHUB_PAGES_ORIGIN = _validated_github_pages_origin(
+    os.getenv("GITHUB_PAGES_ORIGIN", "https://jimmymochi.github.io")
+)
 
 STATIC_DIR = Path(__file__).with_name("static")
 INDEX_TEMPLATE = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 browser_semaphore = asyncio.Semaphore(MAX_BROWSER_CONCURRENCY)
 app = FastAPI(title="UTaipei Credit Audit", docs_url=None, redoc_url=None)
+if GITHUB_PAGES_ORIGIN:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[GITHUB_PAGES_ORIGIN],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+        max_age=600,
+    )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -64,10 +107,14 @@ async def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     logging.error("Unhandled application error type=%s", type(exc).__name__)
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={"detail": "系統發生錯誤，敏感資訊已遮蔽。請改用手動上傳模式或稍後再試。"},
     )
+    if GITHUB_PAGES_ORIGIN and request.headers.get("origin") == GITHUB_PAGES_ORIGIN:
+        response.headers["Access-Control-Allow-Origin"] = GITHUB_PAGES_ORIGIN
+        response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.get("/health")
@@ -96,6 +143,7 @@ async def index():
     return (
         INDEX_TEMPLATE.replace("{{REMOTE_LOGIN_ENABLED}}", str(ENABLE_REMOTE_LOGIN).lower())
         .replace("{{MAX_UPLOAD_MB}}", f"{MAX_UPLOAD_BYTES / 1024 / 1024:.0f}")
+        .replace("{{API_BASE_URL}}", "")
     )
 
 

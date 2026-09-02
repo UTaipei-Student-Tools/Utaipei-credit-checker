@@ -2,6 +2,15 @@ const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, character =>
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
 })[character]);
 
+const configuredApiBaseUrl = document.body.dataset.apiBaseUrl || "";
+const apiBaseUrl = configuredApiBaseUrl.startsWith("{{")
+  ? ""
+  : configuredApiBaseUrl.replace(/\/+$/, "");
+
+function apiUrl(path) {
+  return `${apiBaseUrl}${path}`;
+}
+
 const progressPercent = (earned, required) => required > 0
   ? Math.min(100, Math.round(earned / required * 100))
   : 100;
@@ -16,6 +25,25 @@ function installOptions() {
 function setLoginMode() {
   const enabled = document.body.dataset.remoteLoginEnabled === "true";
   document.querySelector(enabled ? "#loginEnabled" : "#loginDisabled").classList.remove("hidden");
+}
+
+async function setDeploymentContext() {
+  const location = document.querySelector("#processingLocation");
+  const status = document.querySelector("#backendStatus");
+  if (apiBaseUrl) {
+    location.textContent = "此頁面由 GitHub Pages 提供；你選擇的檔案會加密傳送至 Hugging Face 後端，並只在單次請求的暫存目錄解析。";
+  } else {
+    location.textContent = "此頁面與解析服務位於同一個部署環境；檔案只在單次請求的暫存目錄解析。";
+  }
+  try {
+    const response = await fetch(apiUrl("/health"), { cache: "no-store" });
+    if (!response.ok) throw new Error("health check failed");
+    status.textContent = "後端可用";
+    status.className = "status-chip good";
+  } catch {
+    status.textContent = "後端啟動中／暫時無法連線";
+    status.className = "status-chip caution";
+  }
 }
 
 function setStatus(message, isError = false) {
@@ -99,7 +127,7 @@ async function submitForm(form, url) {
     if (!data.has(name)) data.set(name, "false");
   });
   try {
-    const response = await fetch(url, { method: "POST", body: data, cache: "no-store" });
+    const response = await fetch(apiUrl(url), { method: "POST", body: data, cache: "no-store" });
     let payload;
     try { payload = await response.json(); } catch { throw new Error("伺服器回傳非 JSON 回應。"); }
     if (!response.ok) throw new Error(payload.detail || "處理失敗");
@@ -114,6 +142,7 @@ async function submitForm(form, url) {
 
 installOptions();
 setLoginMode();
+setDeploymentContext();
 document.querySelector("#uploadForm").addEventListener("submit", event => {
   event.preventDefault();
   submitForm(event.currentTarget, "/audit/upload");

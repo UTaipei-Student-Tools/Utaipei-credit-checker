@@ -18,6 +18,13 @@ pinned: false
 
 雙主修、輔系、兼充、替代科目及人工核准仍以教務處與系所正式審核為準。
 
+## 線上版本
+
+- GitHub Pages 前端：`https://jimmymochi.github.io/utaipei-credit-audit/`
+- Hugging Face 完整部署：`https://sapphirejimmy-utaipei-credit-audit.hf.space/`
+
+GitHub Pages 只提供靜態介面；學分解析與計算會送到 Hugging Face FastAPI 後端。後端只接受來自指定 Pages 網域的跨來源請求，且不啟用校務系統帳密登入。
+
 ## 正確性設計
 
 - 解析失敗時採 fail-closed：不產生看似正常但可能漏算的結果。
@@ -76,6 +83,10 @@ Repository secrets：
 - `HF_SPACE_REPO`：例如 `Sapphirejimmy/utaipei-credit-audit`。
 
 Pull request 會執行 lint、測試、Python 編譯與 Docker build；合併到 `main` 後才部署 Hugging Face。
+
+## GitHub Pages
+
+`scripts/build_pages.py` 會從與 Hugging Face 共用的 `app/web/static` 建立 Pages artifact，避免維護兩套介面。`.github/workflows/deploy-pages.yml` 在 `main` 更新後發布該 artifact。
 
 ## 規則來源
 
