@@ -56,7 +56,10 @@ jobs:
         if: steps.hf.outputs.configured == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${HF_TOKEN}" https://huggingface.co/api/whoami-v2
+        run: |
+          curl --fail --silent --show-error --output /dev/null \
+            --header "Authorization: Bearer ${HF_TOKEN}" \
+            https://huggingface.co/api/whoami-v2
       - name: Push to Hugging Face Space
         if: steps.hf.outputs.configured == 'true'
         env:
