@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="臺北市立大學地生系 114 學年度畢業學分預估工具">
+  <title>臺北市立大學學分審核</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body data-remote-login-enabled="{{REMOTE_LOGIN_ENABLED}}">
+<header>
+  <div class="hero">
+    <span class="eyebrow">UTaipei Credit Audit</span>
+    <h1>畢業學分，不要靠猜</h1>
+    <p>支援地生系 114 學年度非師培主修，並提供雙主修／輔系預估。解析失敗時會停止計算，不產生看似完整但可能漏算的結果。</p>
+  </div>
+</header>
+<main>
+  <section id="loginEnabled" class="panel warning-panel hidden">
+    <div class="section-heading">
+      <div><span class="eyebrow">本機／私人部署</span><h2>校務系統唯讀查詢</h2></div>
+      <span class="status-chip caution">已啟用</span>
+    </div>
+    <p class="muted">帳密會送到目前部署環境，再由瀏覽器自動化登入校務系統。只應在你信任的私人部署使用。</p>
+    <form id="loginForm">
+      <div class="row">
+        <div><label for="username">帳號</label><input id="username" name="username" autocomplete="username" required maxlength="128"></div>
+        <div><label for="password">密碼</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"></div>
+      </div>
+      <div class="options"></div>
+      <button type="submit">查詢並審核</button>
+    </form>
+  </section>
+
+  <section id="loginDisabled" class="panel hidden">
+    <div class="section-heading">
+      <div><span class="eyebrow">Hugging Face 安全預設</span><h2>遠端帳密登入未啟用</h2></div>
+      <span class="status-chip good">較安全</span>
+    </div>
+    <p class="muted">公開部署不接收校務系統帳密。請使用下方手動上傳；需要自動登入時，只在可信任的本機部署設定 <code>ENABLE_REMOTE_LOGIN=true</code>。</p>
+  </section>
+
+  <section class="panel">
+    <div class="section-heading">
+      <div><span class="eyebrow">建議方式</span><h2>手動上傳</h2></div>
+      <span class="status-chip good">不需帳密</span>
+    </div>
+    <p class="muted">檔案只在單次請求的暫存目錄解析。單檔上限 {{MAX_UPLOAD_MB}} MB；至少提供一項資料。</p>
+    <form id="uploadForm">
+      <div class="row">
+        <div><label>歷年成績單 PDF</label><input type="file" name="transcript_pdf" accept="application/pdf,.pdf"></div>
+        <div><label>選課結果 HTML</label><input type="file" name="selection_html" accept="text/html,.html,.htm"></div>
+      </div>
+      <label>或貼上選課結果 HTML</label>
+      <textarea name="selection_html_text" placeholder="貼上完整 HTML 原始碼；不要貼帳號或密碼。"></textarea>
+      <div class="options"></div>
+      <button type="submit">上傳並審核</button>
+    </form>
+  </section>
+
+  <template id="optionsTemplate">
+    <div class="row options-row">
+      <div><label>入學年度</label><select name="admission_year"><option value="114">114 學年度</option></select></div>
+      <div><label>地生系專業領域</label><select name="earth_bio_domain"><option value="earth_environment">地球環境</option><option value="life_science">生命科學</option></select></div>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" name="include_chem_double_major"> 物化系應用化學組雙主修（預估）</label>
+      <label><input type="checkbox" name="include_cs_double_major"> 資訊科學系雙主修（預估）</label>
+      <label><input type="checkbox" name="include_cs_minor"> 資訊科學系輔系（預估）</label>
+    </div>
+  </template>
+
+  <section id="statusPanel" class="panel hidden"><div id="statusMessage" class="notice"></div></section>
+  <section id="resultsPanel" class="panel hidden">
+    <div class="section-heading">
+      <div><span class="eyebrow">Audit result</span><h2>審核結果</h2></div>
+      <span id="qualityChip" class="status-chip"></span>
+    </div>
+    <div id="diagnostics"></div>
+    <div id="results"></div>
+    <p id="disclaimer" class="muted"></p>
+  </section>
+</main>
+</body>
+</html>

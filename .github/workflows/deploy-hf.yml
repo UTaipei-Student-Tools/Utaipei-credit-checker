@@ -1,6 +1,8 @@
 name: Test and deploy to Hugging Face
 
 on:
+  pull_request:
+    branches: ["main"]
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -16,19 +18,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
       - name: Run tests
-        run: pytest
+        run: pytest -q
+      - name: Compile Python files
+        run: python -m compileall -q app
       - name: Docker build
         run: docker build -t utaipei-credit-audit .
 
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,4 +61,4 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "github-actions"
           git remote add hf "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
-          git push --force hf HEAD:main
+          git push hf HEAD:main
