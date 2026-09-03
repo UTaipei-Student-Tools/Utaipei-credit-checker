@@ -1120,6 +1120,7 @@ def _resolve_minor_record_gate(
     term: str | None,
     program: str | None,
     track: str | None,
+    subject_ref: str | None,
     state_keys: tuple[str, ...],
     accepted_states: set[str],
     rejected_states: set[str],
@@ -1136,12 +1137,17 @@ def _resolve_minor_record_gate(
     Minor approvals and registrations are not double-major records.  They do
     share the same server-owned ID, event, programme, authority and source
     checks, but deliberately do not accept request-owned record dictionaries.
-    A subject binding is optional here because the minimum official evidence
-    for a minor in the research matrix is the department/registrar record
-    scoped to the application event; callers may still provide one and the
-    server resolver can enforce it upstream.
+    Every minor application gate is bound to the opaque subject reference from
+    the current request.  A department or registrar record that has no subject
+    binding (or belongs to another subject) cannot authorize this request.
     """
 
+    resolved_subject_ref = _safe_text(subject_ref) or None
+    if not resolved_subject_ref or not term or not program:
+        return _gate(UNKNOWN, code=unknown_code, reason=missing_reason) | {
+            "qualification_state": UNKNOWN,
+            "is_official": False,
+        }
     record = _resolve_server_record(
         evidence_id,
         evidence_resolver,
@@ -1149,6 +1155,8 @@ def _resolve_minor_record_gate(
         term=term,
         program=program,
         track=track,
+        subject_ref=resolved_subject_ref,
+        require_subject=True,
         require_application_term=True,
         require_program=True,
     )
@@ -1159,15 +1167,6 @@ def _resolve_minor_record_gate(
         }
     value = str(_record_value(record, *state_keys) or "").strip().upper()
     record_type = _record_type(record)
-    # A server-owned record with a dedicated positive type is itself the
-    # signed decision artifact in the minor evidence contract.  If an adapter
-    # omits a redundant ``status`` field, use only that type-specific default;
-    # never infer approval from the user's self-report.
-    if not value:
-        if "APPROVAL" in record_type:
-            value = "APPROVED"
-        elif "REGISTRATION" in record_type:
-            value = "REGISTERED"
     if value in accepted_states:
         result = _gate(PASS, code=pass_code, value=value, record=record, scope=scope, reason=pass_reason)
         result.update({"qualification_state": value, "is_official": True, "record_type": record_type})
@@ -1202,6 +1201,7 @@ def resolve_minor_application_case(
     explicit_track = _normalize_track(context.get("target_track"), target_program)
     if explicit_track:
         target_track = explicit_track
+    subject_ref = _safe_text(context.get("subject_ref")) or None
     approval = _resolve_minor_record_gate(
         department_approval,
         evidence_resolver=evidence_resolver,
@@ -1209,8 +1209,9 @@ def resolve_minor_application_case(
         term=term,
         program=target_program,
         track=target_track,
-        state_keys=("decision", "department_decision", "approval_status", "status"),
-        accepted_states={"APPROVED", "QUALIFIED", "GRANTED"},
+        subject_ref=subject_ref,
+        state_keys=("decision", "approval_status"),
+        accepted_states={"APPROVED"},
         rejected_states={"REJECTED", "DENIED", "NOT_APPROVED"},
         pass_code="MINOR_DEPARTMENT_APPROVED",
         unknown_code="MINOR_DEPARTMENT_APPROVAL_UNKNOWN",
@@ -1227,8 +1228,9 @@ def resolve_minor_application_case(
         term=term,
         program=target_program,
         track=target_track,
-        state_keys=("registration_status", "status", "decision"),
-        accepted_states={"REGISTERED", "ACTIVE", "APPROVED"},
+        subject_ref=subject_ref,
+        state_keys=("registration_status",),
+        accepted_states={"REGISTERED"},
         rejected_states={"REJECTED", "DENIED", "NOT_REGISTERED"},
         pass_code="MINOR_REGISTRAR_REGISTERED",
         unknown_code="MINOR_REGISTRATION_UNKNOWN",
@@ -1245,8 +1247,9 @@ def resolve_minor_application_case(
         term=term,
         program=target_program,
         track=target_track,
-        state_keys=("qualification_status", "qualification_state", "status", "decision"),
-        accepted_states={"QUALIFIED", "APPROVED", "GRANTED", "REGISTERED"},
+        subject_ref=subject_ref,
+        state_keys=("qualification_status", "qualification_state"),
+        accepted_states={"QUALIFIED"},
         rejected_states={"REJECTED", "DENIED", "NOT_QUALIFIED", "NOT_ELIGIBLE"},
         pass_code="MINOR_QUALIFICATION_VERIFIED",
         unknown_code="MINOR_QUALIFICATION_UNKNOWN",
@@ -1299,17 +1302,35 @@ def resolve_minor_award(
     evidence_resolver: Any = None,
     target_program: Any = None,
     target_track: Any = None,
+    subject_ref: Any = None,
+    application_term: Any = None,
 ) -> dict[str, Any]:
-    """Resolve an independent official ``MINOR_AWARD`` record."""
+    """Resolve an independent official ``MINOR_AWARD`` record.
+
+    Formal minor awarding is a student- and application-event-specific fact.
+    A record type, course completion, or an unbound official-looking row is not
+    sufficient evidence of that fact.
+    """
 
     program = _normalize_program(target_program) if target_program is not None else None
     track = _normalize_track(target_track, program) if target_track is not None else None
+    term = _normalize_term(application_term)
+    ref = _safe_text(subject_ref) or None
+    if not program or not term or not ref:
+        return _gate(UNKNOWN, code="MINOR_AWARD_UNKNOWN", reason="輔系授予證據缺少目前學生、目標系所或申請學期綁定。") | {
+            "award_state": UNKNOWN,
+            "is_official": False,
+        }
     record = _resolve_server_record(
         opaque_evidence_id,
         evidence_resolver,
         record_types={"MINOR_AWARD", "MINOR_FORMAL_AWARD", "MINOR_AWARD_RECORD"},
+        term=term,
         program=program,
         track=track,
+        subject_ref=ref,
+        require_subject=True,
+        require_application_term=True,
         require_program=True,
     )
     if record is None:
@@ -1318,13 +1339,11 @@ def resolve_minor_award(
             "is_official": False,
         }
     award_state = str(_record_value(record, "award_state", "award_status", "decision", "status") or "").strip().upper()
-    if not award_state and "AWARD" in _record_type(record):
-        award_state = GRANTED
-    if award_state == GRANTED:
-        result = _gate(PASS, code="MINOR_AWARD_GRANTED", value=GRANTED, record=record, scope="minor_formal_award", reason="官方正式授予輔系紀錄已核實。")
-        result.update({"award_state": GRANTED, "is_official": True, "record_type": _record_type(record)})
+    if award_state in {GRANTED, "AWARDED"}:
+        result = _gate(PASS, code="MINOR_AWARD_GRANTED", value=award_state, record=record, scope="minor_formal_award", reason="官方正式授予輔系紀錄已核實。")
+        result.update({"award_state": award_state, "is_official": True, "record_type": _record_type(record)})
         return result
-    if award_state in {"REVOKED", "DENIED", "NOT_GRANTED"}:
+    if award_state in {"REVOKED", "DENIED", "NOT_GRANTED", "NOT_AWARDED", "REJECTED"}:
         result = _gate(FAIL, code="MINOR_AWARD_NOT_GRANTED", value=award_state, record=record, scope="minor_formal_award", reason="官方正式紀錄顯示未授予或已撤銷輔系。")
         result.update({"award_state": award_state, "is_official": True, "record_type": _record_type(record)})
         return result

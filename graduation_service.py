@@ -43,6 +43,7 @@ from allocation_engine import (
     RequirementResult,
     RequirementSpec,
     allocate_credits,
+    normalize_course_kind,
 )
 from application_resolution import (
     resolve_application_case,
@@ -66,7 +67,9 @@ ENGINE_VERSION = "graduation-service.v1"
 
 _DOUBLE_MAJOR = "雙主修"
 _TEXT_FIELDS = frozenset({"admission_cohort", "primary_curriculum_id", "program_type", "secondary_kind", "target_curriculum_year"})
-INPUT_WARNING_CODES = frozenset({"SCHEDULE_SCOPE_MISMATCH", "SCHEDULE_SCOPE_UNVERIFIED"})
+# Portal input is transcript-only.  Keep the allowlist empty so stale warning
+# values from a pre-removal session cannot affect a DecisionSnapshot.
+INPUT_WARNING_CODES = frozenset()
 _EVIDENCE_FIELDS = (
     "target_curriculum_evidence_id",
     "rule_applicability_evidence_id",
@@ -1138,15 +1141,63 @@ def _compile_attempts(
     rows: Sequence[NormalizedCourseRow],
     metadata: Mapping[str, Mapping[str, Any]],
 ) -> tuple[tuple[CourseAttempt, ...], dict[str, dict[str, Any]]]:
+    curriculum_category_tokens = frozenset(
+        {
+            "必",
+            "必修",
+            "系必修",
+            "專業必修",
+            "核心必修",
+            "選",
+            "選修",
+            "系選修",
+            "專業選修",
+            "共同必修",
+            "共同選修",
+            "通識",
+            "通識課程",
+            "自由學分",
+            "自由選修",
+            "一般選修",
+            "required",
+            "required_course",
+            "elective",
+            "elective_course",
+            "general_education",
+            "free_elective",
+        }
+    )
+
     def kind_token(value: Any) -> str:
-        text = _text(value).upper().replace("-", "_").replace(" ", "_")
-        if any(token in text for token in ("COMBINED", "LECTURE_LAB", "合併", "綜合")):
-            return "COMBINED"
-        if any(token in text for token in ("LAB", "實驗", "實習")):
-            return "LAB"
-        if any(token in text for token in ("LECTURE", "講授", "理論", "COURSE")):
-            return "LECTURE"
-        return UNKNOWN
+        return normalize_course_kind(value)
+
+    def is_curriculum_category(value: Any) -> bool:
+        """Recognize category labels without treating them as components.
+
+        Transcript ``type`` fields often carry curriculum placement (for
+        example ``系必修`` or ``共同選修``), while the registry's
+        ``component_type`` carries lecture/lab semantics.  This allowlist is
+        deliberately narrow: an empty or arbitrary value remains UNKNOWN.
+        """
+
+        raw = _text(value).strip()
+        if not raw:
+            return False
+        compact = re.sub(r"[\s_\-()/（）]", "", raw).casefold()
+        if compact in {
+            re.sub(r"[\s_\-()/（）]", "", item).casefold()
+            for item in curriculum_category_tokens
+        }:
+            return True
+        return compact.endswith(("必修", "選修", "通識", "自由學分"))
+
+    def row_component(value: Any) -> tuple[str, bool]:
+        """Return (component kind, category-only marker) for a transcript row."""
+
+        kind = kind_token(value)
+        if kind != UNKNOWN:
+            return kind, False
+        return "", is_curriculum_category(value)
 
     catalog_by_code: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for meta in metadata.values():
@@ -1165,24 +1216,41 @@ def _compile_attempts(
         attempt_id = f"attempt:{_digest([course_code, course_name, row.term, str(row.credits), str(row.earned_credits), row.status, row.attempt_group])}"
         label = _course_label(course_name)
         identity = UNKNOWN
-        row_kind = kind_token(row.course_type)
+        row_kind, row_component_unspecified = row_component(row.course_type)
         code_candidates = catalog_by_code.get(course_code, ()) if course_code else ()
+        matching_candidates: list[tuple[Mapping[str, Any], str]] = []
+        seen_candidate_objects: set[int] = set()
         for meta in code_candidates:
-            expected_kind = kind_token(meta.get("course_kind"))
-            if expected_kind == UNKNOWN or row_kind == UNKNOWN or expected_kind != row_kind:
+            candidate_object_id = id(meta)
+            if candidate_object_id in seen_candidate_objects:
+                continue
+            seen_candidate_objects.add(candidate_object_id)
+            expected_kind = kind_token(meta.get("course_kind") or meta.get("component_type"))
+            if expected_kind == UNKNOWN:
+                continue
+            if not row_component_unspecified and (row_kind == UNKNOWN or expected_kind != row_kind):
                 continue
             required_dimensions = set(meta.get("required_identity_dimensions", ()))
             if "department" in required_dimensions and _text(meta.get("department")) != _text(row.department):
                 continue
-            # NormalizedCourseRow has no section field.  A registry section
-            # therefore remains unresolved until an adapter supplies a
-            # section-aware identity resolver; never infer it from the title.
-            if "section" in required_dimensions:
+            # A raw course code does not establish a registry track/section.
+            # The checked-in official identity, however, is already scoped by
+            # that section; accepting it here does not infer anything from a
+            # title or category label.  Other section-aware codes remain
+            # unresolved until an adapter supplies section evidence.
+            official_identity = _text(meta.get("official_course_identity"))
+            if "section" in required_dimensions and course_code != official_identity:
                 continue
             if label and _course_label(meta.get("course_name")) != label:
                 continue
+            matching_candidates.append((meta, expected_kind))
+        if len(matching_candidates) == 1:
             identity = VERIFIED
-            break
+            resolved_kind = matching_candidates[0][1]
+        else:
+            # Multiple exact candidates (especially candidates with different
+            # components) are not safe to resolve by input order.
+            resolved_kind = UNKNOWN
         status_map = {
             "COMPLETED": PASS,
             "IN_PROGRESS": "IN_PROGRESS",
@@ -1193,7 +1261,12 @@ def _compile_attempts(
             "TRANSFERRED": UNKNOWN,
         }
         status = status_map.get(_text(row.status).upper(), UNKNOWN)
-        course_kind = row.course_type or ""
+        if row_kind in {"LECTURE", "LAB", "COMBINED"}:
+            course_kind = row_kind
+        elif identity == VERIFIED and row_component_unspecified:
+            course_kind = resolved_kind
+        else:
+            course_kind = UNKNOWN
         attempt = CourseAttempt(
             attempt_id=attempt_id,
             course_id=course_code or course_name,
@@ -1303,7 +1376,13 @@ def _compile_bindings(
             }
         )
         if valid:
-            valid = _text(record.get("evidence_state")).upper() == VERIFIED
+            # An equivalency record is not approval merely because it has an
+            # official-looking type and evidence reference.  The source
+            # authority must explicitly issue the APPROVED decision.
+            valid = (
+                _text(record.get("evidence_state")).upper() == VERIFIED
+                and _text(record.get("decision")).upper() == "APPROVED"
+            )
         authority = _text(record.get("authority")) if isinstance(record, Mapping) else ""
         reference = _text(record.get("evidence_reference") or record.get("source_reference")) if isinstance(record, Mapping) else ""
         valid = valid and bool(authority) and bool(reference)
@@ -1316,16 +1395,38 @@ def _compile_bindings(
             requirements,
             metadata,
         ) if isinstance(record, Mapping) else None
-        amount = _positive_number(record.get("approved_credits") or record.get("credits")) if isinstance(record, Mapping) else Decimal("0")
+        if isinstance(record, Mapping):
+            # An explicit zero is a real authority decision: never fall back
+            # to a legacy ``credits`` alias when ``approved_credits`` is
+            # present, or an unresolved record could mint an approved amount.
+            amount_value = record["approved_credits"] if "approved_credits" in record else record.get("credits")
+            amount = _positive_number(amount_value)
+        else:
+            amount = Decimal("0")
         if not source or not target or amount <= 0:
             valid = False
-        shared = bool(record.get("shared")) or _text(record.get("allocation_kind")).upper() in {SHARED_SHADOW, "SHARED_REUSE"} if isinstance(record, Mapping) else False
         source_requirement_id = _text(record.get("source_requirement_id")) if isinstance(record, Mapping) else ""
         direction = _text(record.get("direction") or record.get("ledger")) if isinstance(record, Mapping) else ""
         source_owner = _text(record.get("source_owner") or record.get("source_role")) if isinstance(record, Mapping) else ""
         target_owner = _text(record.get("target_owner") or record.get("target_role")) if isinstance(record, Mapping) else ""
         source_domain = _text(record.get("source_domain")) if isinstance(record, Mapping) else ""
         target_domain = _text(record.get("target_domain")) if isinstance(record, Mapping) else ""
+        allocation_kind = _text(record.get("allocation_kind")) if isinstance(record, Mapping) else ""
+        raw_shared = record.get("shared", False) if isinstance(record, Mapping) else False
+        shared_input_is_boolean = not isinstance(record, Mapping) or "shared" not in record or raw_shared is True or raw_shared is False
+        normalized_direction = direction.upper().replace("-", "_").replace(" ", "_")
+        normalized_allocation_kind = allocation_kind.upper().replace("-", "_").replace(" ", "_")
+        explicit_shared_marker = normalized_direction in {"PRIMARY_TO_TARGET", "TARGET_TO_PRIMARY"} or normalized_allocation_kind in {SHARED_SHADOW, "SHARED_REUSE"}
+        shared = shared_input_is_boolean and (
+            raw_shared is True
+            or (raw_shared is False and explicit_shared_marker)
+        )
+        if not shared_input_is_boolean:
+            # A malformed shared flag must not be rescued by a truthy
+            # direction/kind.  Strip those hints before constructing the
+            # binding, so the dataclass cannot accidentally re-enable sharing.
+            direction = ""
+            allocation_kind = ""
         if shared and forbid_shared:
             # A minor may not project a primary allocation through a shadow
             # ledger.  Preserve the opaque evidence ID as a pending audit row
@@ -1402,8 +1503,8 @@ def _compile_bindings(
             source_course_id=attempt.course_id,
             target_course_id=_text(record.get("target_course_id") or record.get("target_course_code")),
             source_course_kind=attempt.course_kind,
-            allocation_kind=_text(record.get("allocation_kind")),
-            decision=_text(record.get("decision") or "APPROVED"),
+            allocation_kind=allocation_kind,
+            decision=_text(record.get("decision") or "PENDING"),
             scope=_text(record.get("scope")),
             source_requirement_id=source_requirement_id,
             source_owner=source_owner,
@@ -1739,6 +1840,7 @@ def evaluate(
             "target_program": request.target_program or (target or {}).get("program_slug"),
             "target_track": request.target_track or (target or {}).get("track_slug"),
             "application_status": request.application_status,
+            "subject_ref": request.subject_ref,
         }
         try:
             application = resolve_minor_application_case(
@@ -1761,6 +1863,8 @@ def evaluate(
                 evidence_resolver=evidence_resolver,
                 target_program=request.target_program or (target or {}).get("program_slug"),
                 target_track=request.target_track or (target or {}).get("track_slug"),
+                subject_ref=request.subject_ref,
+                application_term=request.resolved_application_term,
             )
         except Exception:
             formal_award = {"status": UNKNOWN, "state": UNKNOWN, "award_state": UNKNOWN, "is_official": False}

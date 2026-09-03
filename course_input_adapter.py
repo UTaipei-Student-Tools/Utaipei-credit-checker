@@ -22,6 +22,7 @@ from decimal import Decimal, InvalidOperation
 from numbers import Real
 from typing import Any
 
+from allocation_engine import normalize_course_kind
 from input_confirmation import (
     COURSE_FIELD_ALLOWLIST,
     ConfirmationState,
@@ -40,7 +41,8 @@ _YEAR_KEYS = ("academic_year", "year", "修課學年")
 _SEMESTER_KEYS = ("semester", "學期")
 _NAME_KEYS = ("course_name", "name", "title", "raw_name", "科目名稱")
 _CODE_KEYS = ("course_code", "code", "課程代碼", "課號")
-_TYPE_KEYS = ("course_type", "component_type", "type", "課程類別")
+_COMPONENT_TYPE_KEYS = ("component_type", "lecture_or_lab", "component")
+_TYPE_KEYS = ("course_type", "type", "課程類別")
 _DEPARTMENT_KEYS = ("department", "offering_department", "開課系所")
 
 
@@ -96,6 +98,7 @@ def _diagnostic(code: str, row_index: int | None = None, field: str | None = Non
         "UNKNOWN_STATUS": "課程成績／狀態無法辨識，不能自動採信。",
         "TRANSFER_EARNED_CREDIT_UNVERIFIED": "抵免／抵認缺少校方登載的實得學分，不能產生學分。",
         "INVALID_DEFAULT_TERM": "預設修課學期格式無法辨識，不能自動補入。",
+        "CONFLICTING_COMPONENT_METADATA": "課程講授／實驗標籤互相矛盾，請人工確認。",
     }
     return InputDiagnostic(
         code=code,
@@ -149,6 +152,64 @@ def _has_value(row: Mapping[Any, Any], key: str) -> bool:
 
 def _canonical_token(value: Any) -> str:
     return re.sub(r"\s+", "", _text(value)).casefold()
+
+
+def _is_explicit_component(value: Any) -> bool:
+    """Return whether a legacy type value explicitly names a component.
+
+    Transcript ``type`` values commonly describe curriculum categories such as
+    ``系必修`` or ``共同選修``.  Those labels are useful metadata, but they do
+    not prove lecture/lab identity.  Only explicit component vocabulary is
+    allowed to participate in the attempt-group identity.
+    """
+
+    return normalize_course_kind(value) != "UNKNOWN"
+
+
+def _component_fields(row: Mapping[Any, Any]) -> tuple[str, str, bool]:
+    """Return (safe display value, canonical kind, conflict marker).
+
+    Legacy ``type`` is allowed to be a curriculum category.  It becomes a
+    component signal only when its *whole normalized token* is a recognized
+    lecture/lab/combined alias.  Explicit component fields and such a legacy
+    signal must agree; otherwise the row is deliberately made unresolvable.
+    """
+
+    explicit_values = [
+        _text(row[key])
+        for key in _COMPONENT_TYPE_KEYS
+        if _has_value(row, key)
+    ]
+    legacy_values = [
+        _text(row[key])
+        for key in _TYPE_KEYS
+        if _has_value(row, key)
+    ]
+    explicit_kinds = [normalize_course_kind(value) for value in explicit_values]
+    explicit_known = [kind for kind in explicit_kinds if kind != "UNKNOWN"]
+    legacy_kinds = [normalize_course_kind(value) for value in legacy_values]
+    legacy_known = [kind for kind in legacy_kinds if kind != "UNKNOWN"]
+    if explicit_values:
+        # Every explicitly component-shaped field must itself be a known
+        # component and all supplied component signals must agree.  A value
+        # such as ``component_type="系必修"`` is malformed metadata, not
+        # permission to fall back to a category or a second field.
+        explicit_set = set(explicit_known)
+        if len(explicit_known) != len(explicit_values) or len(explicit_set) != 1:
+            return "UNKNOWN", "UNKNOWN", True
+        explicit_kind = explicit_known[0]
+        if any(kind != explicit_kind for kind in legacy_known):
+            return "UNKNOWN", "UNKNOWN", True
+        return explicit_values[0], explicit_kind, False
+    legacy_set = set(legacy_known)
+    if len(legacy_set) > 1:
+        return "UNKNOWN", "UNKNOWN", True
+    if legacy_known:
+        index = next(index for index, kind in enumerate(legacy_kinds) if kind != "UNKNOWN")
+        return legacy_values[index], legacy_kinds[index], False
+    if legacy_values:
+        return legacy_values[0], "UNKNOWN", False
+    return "", "UNKNOWN", False
 
 
 def _status_and_earned(score: Any, credits: float, explicit_earned: Any = _MISSING) -> tuple[str, float, bool]:
@@ -220,9 +281,13 @@ def _term_for(row: Mapping[Any, Any], semester: str | None, default_term: Any) -
 
 def _attempt_group(code: str, name: str, course_type: str) -> str:
     identity = code or name
-    # Keep component/type in the identity.  This avoids merging a lecture
-    # and its laboratory merely because their displayed names are similar.
-    return f"{identity}|component:{course_type}" if identity else ""
+    if not identity:
+        return ""
+    # Keep an explicitly stated component in the identity.  Curriculum
+    # category labels (必修／選修／通識／共同選修, etc.) are not components and
+    # must not create a fake lecture/lab distinction.
+    component = normalize_course_kind(course_type)
+    return f"{identity}|component:{component}" if component != "UNKNOWN" else identity
 
 
 def _legacy_row_to_attempts(
@@ -238,7 +303,9 @@ def _legacy_row_to_attempts(
         diagnostics.append(_diagnostic("MISSING_COURSE_NAME", row_index, "course_name"))
         return [], diagnostics
 
-    course_type = _text(_first(row, _TYPE_KEYS, ""))
+    course_type, _component_kind, component_conflict = _component_fields(row)
+    if component_conflict:
+        diagnostics.append(_diagnostic("CONFLICTING_COMPONENT_METADATA", row_index, "course_type"))
     department = _text(_first(row, _DEPARTMENT_KEYS, ""))
     group = _attempt_group(code, name, course_type)
     attempts: list[dict[str, Any]] = []

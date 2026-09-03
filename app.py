@@ -30,14 +30,8 @@ from input_confirmation import (
     release_formal_attempts,
 )
 from pdf_parser import parse_transcript_pdf
-from portal_scope import (
-    PENDING_SCHEDULE_ROWS_KEY,
-    PENDING_SCHEDULE_SCOPE_KEY,
-    SCHEDULE_SCOPE_KEY,
-    TRANSCRIPT_SCOPE_KEY,
-)
-from schedule_parser import merge_schedule_courses
-from sidebar import get_verified_schedule_rows, render_setup_panel
+from portal_scope import TRANSCRIPT_SCOPE_KEY
+from sidebar import render_setup_panel
 from ui_components import collapse_sidebar_if_needed, render_header_card, render_html, setup_page
 
 
@@ -175,8 +169,8 @@ def _has_ephemeral_student_state(state: Mapping[str, Any] | None = None) -> bool
 
     This is deliberately a positive allowlist of known transient state rather
     than a check for released/confirmed rows.  In particular, raw uploads,
-    parsed-but-unconfirmed rows, pending schedules, manual edits, and a cached
-    unexported snapshot all require the same update confirmation.
+    parsed-but-unconfirmed rows, manual edits, and a cached unexported snapshot
+    all require the same update confirmation.
     """
 
     state = st.session_state if state is None else state
@@ -219,16 +213,6 @@ def _has_ephemeral_student_state(state: Mapping[str, Any] | None = None) -> bool
     if _has_ephemeral_value(state.get("_source_fingerprint")):
         return True
 
-    if _has_ephemeral_value(state.get("schedule_courses")):
-        return True
-    if _has_ephemeral_value(state.get(SCHEDULE_SCOPE_KEY)):
-        return True
-    if _has_ephemeral_value(state.get(PENDING_SCHEDULE_ROWS_KEY)):
-        return True
-    if _has_ephemeral_value(state.get(PENDING_SCHEDULE_SCOPE_KEY)):
-        return True
-    if _has_ephemeral_value(state.get("schedule_html")):
-        return True
     if _has_ephemeral_value(state.get(TRANSCRIPT_SCOPE_KEY)):
         return True
 
@@ -269,12 +253,7 @@ def _empty_confirmation() -> CourseConfirmation:
     )
 
 
-def _safe_source_digest(
-    source: object,
-    schedule_rows: Iterable[Mapping[str, Any]] = (),
-    *,
-    source_label: str = "",
-) -> str:
+def _safe_source_digest(source: object, *, source_label: str = "") -> str:
     """Hash source identity without retaining its bytes or account details."""
 
     if isinstance(source, bytes):
@@ -283,17 +262,8 @@ def _safe_source_digest(
         source_part = source
     else:
         source_part = ""
-    safe_rows = []
-    for row in schedule_rows:
-        if isinstance(row, Mapping):
-            safe_rows.append(
-                {
-                    key: row.get(key)
-                    for key in ("name", "course_code", "academic_year", "semester", "total_credit", "source")
-                }
-            )
     payload = json.dumps(
-        {"source": source_part, "source_label": str(source_label or ""), "schedule": safe_rows},
+        {"source": source_part, "source_label": str(source_label or "")},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -329,26 +299,15 @@ def _mark_confirmation_unconfirmed(
     )
 
 
-def _verified_schedule_rows_for_analysis(sidebar_state: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    """Release only a schedule bound to the current portal transcript scope."""
-
-    return get_verified_schedule_rows(
-        st.session_state,
-        year=sidebar_state.get("crawl_year") or st.session_state.get("crawl_year_input"),
-        semester=sidebar_state.get("crawl_semester") or st.session_state.get("crawl_semester_input"),
-    )
-
-
 def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation:
     """Parse current PDF/portal input and create or reuse parsed confirmation."""
 
     source = st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path")
-    schedule_rows = _verified_schedule_rows_for_analysis(sidebar_state)
     if not source:
         st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
         return _empty_confirmation()
 
-    source_digest = _safe_source_digest(source, schedule_rows, source_label=sidebar_state.get("source_label", ""))
+    source_digest = _safe_source_digest(source, source_label=sidebar_state.get("source_label", ""))
     cached_digest = st.session_state.get("_source_fingerprint")
     cached_confirmation = st.session_state.get("_parsed_confirmation")
     cached_has_cohort_blocker = bool(
@@ -360,7 +319,6 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
 
     try:
         student_info, courses = parse_transcript_pdf(source)
-        courses, _ = merge_schedule_courses(courses, schedule_rows)
         adapted = adapt_legacy_result(courses, source_kind="transcript")
         confirmation = adapted.confirmation
         st.session_state["_student_display"] = _safe_student_display(student_info)
@@ -684,7 +642,7 @@ def main():
     if not has_source:
         _clear_snapshot_caches()
         _render_analysis_state_marker(active=False)
-        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；確認資料後這裡會顯示學分進度。")
+        st.info("完成上方設定後，請上傳歷年成績單 PDF，或使用校務系統帳密即時抓取；確認資料後這裡會顯示學分進度。")
         return
 
     released_rows = _confirmed_rows(confirmation)

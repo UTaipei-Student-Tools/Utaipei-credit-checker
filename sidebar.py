@@ -22,33 +22,19 @@ from policy_audit import (
     normalize_primary_program,
 )
 from portal_scope import (
-    SCHEDULE_SCOPE_KEY,
-    SCHEDULE_SCOPE_MISMATCH,
-    SCHEDULE_SCOPE_UNVERIFIED,
-    SOURCE_PORTAL,
     TRANSCRIPT_SCOPE_KEY,
-    add_warning,
-    build_scope,
+    build_transcript_scope,
     build_upload_scope,
     clear_scope_state,
     get_warning_codes,
     initialize_scope_state,
-    isolate_for_uploaded_transcript,
     public_scope_metadata,
-    retain_or_isolate_schedule,
-    scopes_match,
-    set_active_schedule,
-    set_pending_schedule,
     set_transcript_scope,
-    verified_schedule_rows,
 )
-from schedule_parser import INVALID_PAGE, VALID_EMPTY, VALID_WITH_ROWS, parse_schedule_result
 from scraper import (
     PortalError,
     PortalErrorCode,
-    crawl_course_schedule,
-    discover_portal_features,
-    fetch_transcript_and_schedule,
+    fetch_transcript,
 )
 from ui_components import render_landing_message
 
@@ -147,21 +133,6 @@ def _account_fingerprint(account):
     from portal_scope import account_fingerprint
 
     return account_fingerprint(st.session_state, account)
-
-
-def _make_portal_scope(account, year, semester, *, verified=True, source=SOURCE_PORTAL):
-    return build_scope(st.session_state, account, year, semester, source=source, verified=verified)
-
-
-def _verified_schedule_rows(*, transcript_scope=None, year=None, semester=None):
-    return verified_schedule_rows(st.session_state, transcript_scope, year=year, semester=semester)
-
-
-def get_verified_schedule_rows(state=None, *, transcript_scope=None, year=None, semester=None):
-    """Public analysis seam for scope-verified schedule rows."""
-
-    state = st.session_state if state is None else state
-    return verified_schedule_rows(state, transcript_scope, year=year, semester=semester)
 
 
 def _secondary_kind(program_type):
@@ -346,12 +317,8 @@ def _init_session_state():
         st.session_state.pop(legacy_secret_key, None)
     if "transcript_pdf_path" not in st.session_state:
         st.session_state["transcript_pdf_path"] = None
-    if "schedule_html" not in st.session_state:
-        st.session_state["schedule_html"] = None
     if "transcript_pdf_bytes" not in st.session_state:
         st.session_state["transcript_pdf_bytes"] = None
-    if "schedule_courses" not in st.session_state:
-        st.session_state["schedule_courses"] = []
     if "source_label" not in st.session_state:
         st.session_state["source_label"] = "尚未載入"
     if "upload_key_version" not in st.session_state:
@@ -382,13 +349,6 @@ def _init_session_state():
         st.session_state["_analysis_exported"] = False
     if "_parsed_confirmation" not in st.session_state:
         st.session_state["_parsed_confirmation"] = None
-    if "schedule_error_code" not in st.session_state:
-        st.session_state["schedule_error_code"] = None
-    if "schedule_error_message" not in st.session_state:
-        st.session_state["schedule_error_message"] = ""
-    # Scope migration is intentionally fail-closed: legacy schedule rows that
-    # have no verified account/term binding are quarantined before app.py can
-    # read them.
     initialize_scope_state(st.session_state)
     _ensure_settings_draft()
 
@@ -450,14 +410,8 @@ def _build_state(rules_meta):
         "has_transcript": bool(st.session_state.get("transcript_pdf_bytes") or st.session_state["transcript_pdf_path"]),
         "source_label": st.session_state.get("source_label", "尚未載入"),
         "masked_student_id": st.session_state.get("masked_student_id", "••••"),
-        "schedule_error_code": st.session_state.get("schedule_error_code"),
-        "schedule_error_message": st.session_state.get("schedule_error_message", ""),
-        "crawl_year": str(st.session_state.get("crawl_year_input", "115")),
-        "crawl_semester": str(st.session_state.get("crawl_semester_input", "1")),
         "input_warning_codes": get_warning_codes(st.session_state),
-        "schedule_scope_status": public_scope_metadata(st.session_state.get(SCHEDULE_SCOPE_KEY))["status"],
         "transcript_scope_status": public_scope_metadata(st.session_state.get(TRANSCRIPT_SCOPE_KEY))["status"],
-        "portal_features": st.session_state.get("portal_features", None),
     }
 
 
@@ -517,13 +471,11 @@ def render_setup_panel():
     if st.session_state.pop("_settings_apply_notice", False):
         st.success("設定已套用；已依新的手冊與修讀身分更新分析條件。")
     with st.expander("成績資料與校務系統（點開載入）", expanded=not has_transcript):
-        st.caption("可上傳歷年成績單，或使用校務系統抓取；手機不需要打開側欄。")
+        st.caption("可上傳歷年成績單，或使用校務系統帳密即時抓取；手機不需要打開側欄。")
         st.markdown("---")
         _render_upload_section(st)
         st.markdown("---")
         _render_login_section(st)
-        st.markdown("---")
-        _render_portal_discovery_section(st)
 
     _render_handbook_preview(
         st,
@@ -614,11 +566,6 @@ def _render_upload_section(ui=None):
         elif not data.startswith(b"%PDF-"):
             ui.error("檔案內容不是有效的 PDF。")
         elif data != st.session_state.get("transcript_pdf_bytes"):
-            # A user-uploaded transcript has no portal account binding.  Any
-            # portal schedule must therefore be isolated before the PDF is
-            # accepted; otherwise rows from a previous login could be merged
-            # into this unrelated source.
-            isolate_for_uploaded_transcript(st.session_state)
             st.session_state["transcript_pdf_bytes"] = data
             st.session_state["transcript_pdf_path"] = None
             st.session_state["source_label"] = "自行上傳 PDF"
@@ -644,8 +591,6 @@ def _clear_loaded_data():
         "transcript_pdf_path": None,
         "transcript_pdf_bytes": None,
         "source_label": "尚未載入",
-        "schedule_html": None,
-        "schedule_courses": [],
         "cohort_mismatch_confirmed": False,
         "_parsed_confirmation": None,
         "_source_fingerprint": None,
@@ -655,8 +600,6 @@ def _clear_loaded_data():
         "_snapshot_artifact_cache": None,
         "_exports_ready": False,
         "_analysis_exported": False,
-        "schedule_error_code": None,
-        "schedule_error_message": "",
     }.items():
         st.session_state[key] = default
     st.session_state.pop("cohort_mismatch_confirmation", None)
@@ -1136,42 +1079,14 @@ def _render_login_section(ui=None):
             type="password",
             placeholder="僅本次送出使用，不會保存",
         )
-        ui.markdown("#### 課表抓取學期設定")
-        col_y, col_s = ui.columns(2)
-        with col_y:
-            year = ui.selectbox(
-                "課表學年度",
-                options=["113", "114", "115", "116"],
-                index=2,
-                key="crawl_year_input",
-                help="只決定要抓哪一學期的課表；不會改變上方的學生手冊版本。",
-            )
-        with col_s:
-            semester = ui.selectbox(
-                "學期",
-                options=["1", "2"],
-                index=0,
-                key="crawl_semester_input",
-                help="選擇要抓取的課表學期",
-            )
         scrape_clicked = ui.form_submit_button(
-            "實時抓取成績＋課表",
+            "使用校務系統即時抓取成績單",
             type="primary",
             use_container_width=True,
-            help="登入並抓取歷年成績與設定學期課表",
-        )
-        schedule_clicked = ui.form_submit_button(
-            "只更新這學期課表",
-            use_container_width=True,
-            help="僅登入抓取所選學期的選課課表並合併",
-        )
-        discover_clicked = ui.form_submit_button(
-            "檢查校務功能入口",
-            use_container_width=True,
-            help="只確認功能入口是否可達；實際資料仍須各自查詢與驗證",
+            help="登入校務系統並下載歷年成績單 PDF；下載後仍須逐列確認才能分析。",
         )
 
-    if scrape_clicked or schedule_clicked or discover_clicked:
+    if scrape_clicked:
         account = account.strip()
         # Clear keys from older widget versions even if a browser session
         # survives an upgrade.  Current form values remain local variables
@@ -1183,65 +1098,7 @@ def _render_login_section(ui=None):
             "portal_password_input",
         ):
             st.session_state.pop(legacy_secret_key, None)
-        if scrape_clicked:
-            _attempt_live_scrape(account, password, year=year, semester=semester, ui=ui)
-        elif schedule_clicked:
-            _attempt_schedule_crawl(account, password, year=year, semester=semester, ui=ui)
-        else:
-            _discover_portal_capabilities(account, password, ui=ui)
-
-    if st.session_state.get("schedule_courses"):
-        schedule_courses = st.session_state["schedule_courses"]
-        schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
-        ui.caption(f"已載入 {len(schedule_courses)} 門課表課程、共 {schedule_credits:g} 學分，將以修讀中納入進度條。")
-
-
-def _render_portal_discovery_section(ui=None):
-    """Show previously discovered portal capabilities without credentials."""
-
-    ui = ui or st
-    features = _sanitize_portal_features(st.session_state.get("portal_features"))
-    st.session_state["portal_features"] = features
-    if features:
-        with ui.expander("已發現的校務系統功能", expanded=False):
-            for item in features:
-                ui.markdown(f"- **{item.get('fncid', '功能')}**：{item.get('name', '')}，狀態：`{item.get('status', '')}`")
-
-
-_PORTAL_FEATURE_LABELS = {
-    "AG102": "歷年成績單下載",
-    "AG104": "開課選課資料查詢 / 班級課表",
-    "AG107": "教學評量查詢",
-    "AG108": "教學評量填答率查詢",
-}
-
-
-def _sanitize_portal_features(features):
-    """Return only known, non-sensitive portal capability summaries."""
-
-    if isinstance(features, (str, bytes, bytearray)):
-        return ()
-    try:
-        items = iter(features)
-    except TypeError:
-        return ()
-
-    sanitized = []
-    seen = set()
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        fncid = item.get("fncid")
-        if not isinstance(fncid, str):
-            continue
-        fncid = fncid.strip().upper()
-        label = _PORTAL_FEATURE_LABELS.get(fncid)
-        if not label or fncid in seen:
-            continue
-        seen.add(fncid)
-        status = "入口可達" if item.get("status") == "入口可達" else "入口不可達／需重試"
-        sanitized.append({"fncid": fncid, "name": label, "status": status})
-    return tuple(sanitized)
+        _attempt_live_scrape(account, password, ui=ui)
 
 
 def _portal_error(ui, message):
@@ -1256,204 +1113,40 @@ def _portal_error(ui, message):
     (ui or st).error(safe_message)
 
 
-def _discover_portal_capabilities(account, password, ui=None):
-    ui = ui or st
-    account = str(account or "").strip()
-    if not account or not password:
-        _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
-        return
-    try:
-        features = discover_portal_features(account, password)
-        st.session_state["portal_features"] = _sanitize_portal_features(features)
-        ui.success("已完成校務功能入口檢查；入口可達不代表查詢資料已成功。")
-    except PortalError as exc:
-        _portal_error(ui, exc)
-    except Exception:
-        _portal_error(ui, "功能探勘失敗；請確認帳號密碼，或改用 PDF 上傳。")
-
-
-def _commit_transcript_result(pdf_content, account, *, year=None, semester=None):
-    """Commit a validated portal transcript with an explicit scope."""
+def _commit_transcript_result(pdf_content, account):
+    """Commit a validated portal transcript with an account-only scope."""
 
     st.session_state["transcript_pdf_path"] = None
     st.session_state["transcript_pdf_bytes"] = pdf_content
     st.session_state["source_label"] = "校務系統即時抓取"
     st.session_state["masked_student_id"] = mask_student_id(account)
-    if year is not None and semester is not None:
-        set_transcript_scope(
-            st.session_state,
-            build_scope(st.session_state, account, year, semester, source=SOURCE_PORTAL, verified=True),
-        )
+    set_transcript_scope(
+        st.session_state,
+        build_transcript_scope(st.session_state, account),
+    )
 
 
-def _commit_schedule_result(account, year, semester, parsed_courses):
-    """Commit or hold a verified schedule according to transcript provenance."""
+def _attempt_live_scrape(account, password, ui=None):
+    """Fetch and stage one transcript; users must still confirm parsed rows."""
 
-    schedule_scope = build_scope(st.session_state, account, year, semester, source=SOURCE_PORTAL, verified=True)
-    transcript_scope = st.session_state.get(TRANSCRIPT_SCOPE_KEY)
-    if isinstance(transcript_scope, Mapping) and transcript_scope.get("source") == SOURCE_PORTAL:
-        if not scopes_match(transcript_scope, schedule_scope):
-            # A schedule-only request for another term/account is useful as a
-            # private candidate, but it cannot become the active rows for the
-            # currently loaded transcript.
-            set_pending_schedule(st.session_state, parsed_courses, schedule_scope)
-            add_warning(st.session_state, SCHEDULE_SCOPE_MISMATCH)
-            return False
-        # A full fetch has just verified this transcript and schedule under
-        # one account/term.  Isolate any older active rows first, then commit
-        # the new pair atomically.
-        has_old_data = bool(
-            st.session_state.get("schedule_courses")
-            or st.session_state.get(SCHEDULE_SCOPE_KEY)
-            or st.session_state.get("_portal_pending_schedule_courses")
-            or st.session_state.get("_portal_pending_schedule_scope")
-        )
-        if has_old_data:
-            retain_or_isolate_schedule(st.session_state, schedule_scope)
-        return set_active_schedule(st.session_state, parsed_courses, schedule_scope)
-    # No transcript yet: keep a private pending schedule for a later matching
-    # portal transcript.  It is deliberately not active analysis input, and
-    # an uploaded transcript can never auto-bind it.
-    if transcript_scope is None:
-        set_pending_schedule(st.session_state, parsed_courses, schedule_scope)
-        return False
-    set_pending_schedule(st.session_state, parsed_courses, schedule_scope)
-    if isinstance(transcript_scope, Mapping):
-        add_warning(st.session_state, SCHEDULE_SCOPE_UNVERIFIED)
-    return False
-
-
-def _schedule_error_from_result(result):
-    """Turn an untrusted partial-result code into a safe PortalError."""
-
-    raw_code = getattr(result, "schedule_error_code", None)
-    if raw_code is None:
-        return PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-    try:
-        code = raw_code if isinstance(raw_code, PortalErrorCode) else PortalErrorCode(str(raw_code))
-    except ValueError:
-        code = PortalErrorCode.SCHEDULE_INVALID_PAGE
-    return PortalError(code)
-
-
-def _attempt_live_scrape(account, password, year=None, semester=None, ui=None):
     ui = ui or st
     account = str(account or "").strip()
     if not account or not password:
         _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
         return
-    year = year or st.session_state.get("crawl_year_input", "115")
-    semester = semester or st.session_state.get("crawl_semester_input", "1")
     try:
-        # Keep all network results in local variables.  Login and transcript
-        # failures remain all-or-nothing; a schedule failure is handled below
-        # after the transcript has passed validation.
-        result = fetch_transcript_and_schedule(account, password, year=year, semester=semester)
-        schedule_status = getattr(result, "schedule_status", INVALID_PAGE)
-        parsed_courses = list(getattr(result, "schedule_courses", ()) or ())
-        pdf_content = bytes(getattr(result, "pdf_bytes", b"") or b"")
+        pdf_content = bytes(fetch_transcript(account, password) or b"")
         if not pdf_content.startswith(b"%PDF-"):
             raise PortalError(PortalErrorCode.PDF_NOT_FOUND)
     except PortalError as exc:
         _portal_error(ui, exc)
-        ui.warning("本次成績與課表均未套用；先前已確認資料未變更。")
+        ui.warning("本次成績單未套用；先前已確認資料未變更。")
         return
     except Exception:
-        _portal_error(ui, "抓取失敗；請確認帳號密碼，若目前是雲端環境請改用 PDF 上傳。")
-        ui.warning("本次成績與課表均未套用；先前已確認資料未變更。")
+        _portal_error(ui, "抓取成績單失敗；請確認帳號密碼，或改用 PDF 上傳。")
+        ui.warning("本次成績單未套用；先前已確認資料未變更。")
         return
 
-    if schedule_status not in {VALID_EMPTY, VALID_WITH_ROWS}:
-        # The transcript is independently verified and may be adopted.  An
-        # existing schedule survives only when its account/term scope matches
-        # the just-authenticated request exactly; legacy or mismatched rows are
-        # quarantined by the scope boundary.
-        _commit_transcript_result(pdf_content, account, year=year, semester=semester)
-        retained = retain_or_isolate_schedule(
-            st.session_state,
-            build_scope(st.session_state, account, year, semester, source=SOURCE_PORTAL, verified=True),
-        )
-        schedule_error = _schedule_error_from_result(result)
-        st.session_state["schedule_error_code"] = schedule_error.code.value
-        st.session_state["schedule_error_message"] = schedule_error.message
-        st.session_state["collapse_sidebar_flag"] = False
-        _portal_error(ui, schedule_error)
-        ui.success(
-            "本次成績單已採用；課表仍待確認，"
-            + ("同一帳號／學期的既有課表已保留。" if retained else "不相符或未驗證的既有課表已隔離。")
-        )
-        ui.warning(
-            "課表未套用。請稍後重試「只更新這學期課表」，或改用已確認的課表資料；"
-            "也可在上方成績確認表新增課程並將狀態設為「修習中」。"
-            "在課表辨識成功或您完成確認前，不會把它當成合法空課表。"
-        )
-        return
-
-    # Atomic commit after both independently validated results are available.
-    _commit_transcript_result(pdf_content, account, year=year, semester=semester)
-    st.session_state["schedule_html"] = None
-    _commit_schedule_result(account, year, semester, parsed_courses)
-    st.session_state["schedule_error_code"] = None
-    st.session_state["schedule_error_message"] = ""
+    _commit_transcript_result(pdf_content, account)
     st.session_state["collapse_sidebar_flag"] = True
-    if parsed_courses:
-        credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
-        ui.success(f"歷年成績與 {year}-{semester} 課表抓取成功：{len(parsed_courses)} 門、{credits:g} 學分。")
-    else:
-        ui.info(f"歷年成績抓取成功；{year}-{semester} 課表為合法空結果，未找到可納入的課程。")
-
-
-def _attempt_schedule_crawl(account, password, year=None, semester=None, ui=None):
-    ui = ui or st
-    account = str(account or "").strip()
-    if not account or not password:
-        _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
-        return
-    year = year or st.session_state.get("crawl_year_input", "115")
-    semester = semester or st.session_state.get("crawl_semester_input", "1")
-    try:
-        schedule_html = crawl_course_schedule(account, password, year=year, semester=semester)
-        parsed = parse_schedule_result(schedule_html, academic_year=year, semester=semester)
-        if parsed.status == INVALID_PAGE:
-            raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-        parsed_courses = list(parsed.courses)
-    except PortalError as exc:
-        # A failed refresh cannot make an older term/account schedule current.
-        # Keep it only when the existing verified scope is exactly the
-        # requested one; otherwise the scope helper quarantines it.
-        requested_scope = build_scope(st.session_state, account, year, semester, source=SOURCE_PORTAL, verified=True)
-        has_existing_schedule = bool(
-            st.session_state.get("schedule_courses")
-            or st.session_state.get(SCHEDULE_SCOPE_KEY)
-            or st.session_state.get("_portal_pending_schedule_courses")
-            or st.session_state.get("_portal_pending_schedule_scope")
-        )
-        if has_existing_schedule:
-            retain_or_isolate_schedule(st.session_state, requested_scope)
-        _portal_error(ui, exc)
-        ui.warning("本次新課表未套用；先前已確認的課表資料未變更。")
-        return
-    except Exception:
-        _portal_error(ui, "課表抓取失敗；請確認帳號密碼，若目前是雲端環境請改用 PDF 上傳。")
-        ui.warning("本次新課表未套用；先前已確認的課表資料未變更。")
-        return
-
-    # Commit only after transport and parser both identify a valid page.
-    st.session_state["schedule_html"] = None
-    adopted = _commit_schedule_result(account, year, semester, parsed_courses)
-    st.session_state["schedule_error_code"] = None
-    st.session_state["schedule_error_message"] = ""
-    # A schedule-only fetch must not relabel an existing transcript.  When no
-    # transcript exists yet, the newly confirmed schedule is the only source
-    # for the masked identity hint and may establish it safely.
-    if not (st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path")):
-        st.session_state["masked_student_id"] = mask_student_id(account)
-    if parsed_courses and adopted:
-        credits = sum(float(course.get("total_credit") or 0.0) for course in parsed_courses)
-        ui.success(f"成功解析 {year}-{semester} 課表 {len(parsed_courses)} 門、{credits:g} 學分，已納入修讀中進度。")
-    elif not parsed_courses and adopted:
-        ui.info(f"已確認 {year}-{semester} 為合法空課表，未找到可納入的選課。")
-    elif parsed_courses:
-        ui.info("課表已安全保存為待用資料；目前成績來源未具備相同校務帳號綁定，尚未納入分析。")
-    else:
-        ui.info("課表頁面已確認為合法空結果，但目前成績來源尚未完成相同帳號綁定。")
+    ui.success("歷年成績單已即時抓取；請檢視並確認辨識結果後再進行學分分析。")

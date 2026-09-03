@@ -68,7 +68,7 @@ DecisionSnapshot
 ## 成績資料與隱私
 
 - 可上傳歷年成績單 PDF；解析結果須逐列檢視並按「確認目前成績列」後，才可成為正式分析輸入。也可以手動修正辨識結果。
-- 可選擇校務系統登入抓取成績單或課表。密碼不持久保存；登入憑證、Session Cookie、完整成績單與原始例外內容不寫入日誌。「入口可達」只表示校務功能選單可開啟，不代表結果資料已通過驗證。
+- 可選擇校務系統登入即時抓取成績單。密碼不持久保存；登入憑證、Session Cookie、完整成績單與原始例外內容不寫入日誌。「入口可達」只表示校務功能選單可開啟，不代表結果資料已通過驗證。
 - 抓取失敗會顯示可理解的原因與復原方式，使用者仍可改用 PDF，或在確認表手動新增修習中課程。任何未確認或來源變更的資料都會阻擋正式評估。
 - 公開畫面、錯誤訊息與匯出預設遮罩學號與姓名；測試只使用去識別化合成成績單。
 
@@ -94,7 +94,7 @@ Lieflat Charts 以可閱讀、可展開的 F1、F5、F7、F11 圖表呈現正式
 
 `static/manifest-v2.webmanifest` 設定正式名稱「北市大畢業通」、短名稱「畢業通」、`display: standalone`、`start_url`、主題色與背景色。指定 UT 深藍學士帽／勾選圖示提供 favicon、Apple touch icon 180×180、PWA 192×192／512×512 與 maskable icon。
 
-Service Worker 只處理必要的靜態外殼（manifest 與圖示等），不快取成績單、分析結果或其他個人資料。右上角三個點選單中的「更新至最新版」會檢查網站版本或新版 Service Worker、清理必要的前端快取並重新載入；只要本次工作階段仍有上傳檔、解析／手動列、活動或待用課表、已確認輸入，或尚未匯出的分析快照，就會先提示，不直接丟失目前結果。使用者取消時不會更新 Service Worker、清除快取或重新載入。
+Service Worker 只處理必要的靜態外殼（manifest 與圖示等），不快取成績單、分析結果或其他個人資料。右上角三個點選單中的「更新至最新版」會檢查網站版本或新版 Service Worker、清理必要的前端快取並重新載入；只要本次工作階段仍有上傳檔、解析／手動列、活動或已確認輸入，或尚未匯出的分析快照，就會先提示，不直接丟失目前結果。使用者取消時不會更新 Service Worker、清除快取或重新載入。
 
 ## 本機執行
 
@@ -137,7 +137,7 @@ python tests/browser_acceptance.py --url http://127.0.0.1:8505/ --browser webkit
 
 - `app.py`：入口、來源確認閘門與單一快照流程。
 - `sidebar.py`：入學年度、主修、雙主修與資料來源設定。
-- `pdf_parser.py`、`scraper.py`、`schedule_parser.py`：PDF、校務系統與課表資料擷取。
+- `pdf_parser.py`、`scraper.py`：PDF 與校務系統成績單資料擷取。
 - `input_confirmation.py`、`course_input_adapter.py`：逐列確認、遮罩與來源狀態。
 - `graduation_service.py`、`allocation_engine.py`：規則評估與全域學分配置。
 - `decision_snapshot.py`、`snapshot_renderer.py`：不可變決策快照與報告明細。

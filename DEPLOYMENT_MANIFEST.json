@@ -1,33 +1,33 @@
 {
-  "bundle_digest": "sha256:ee611d0170fbe8c7d823a6ca1b9078ad3989a4e3a835bab52c974f68d295e33b",
+  "bundle_digest": "sha256:f2a2a7db288cb4d227b91cc541d95130690f747aefec54588c582bd4d453c7b7",
   "files": {
     ".streamlit/config.toml": {
       "bytes": 72,
       "sha256": "a9ef98a1995bfcdff147dfbee2220bd048fd220eff0ef76b6d86225d9fd750a5"
     },
     "README.md": {
-      "bytes": 11892,
-      "sha256": "5660eb0a721b37b281598893c82562502dcdb8c641e2c13b9bb9b3eff6f87e3c"
+      "bytes": 11852,
+      "sha256": "82b6e55ab2f29455f4064103fb44b8e5b9d7d8730c24ccae55d9c9f090fd18ea"
     },
     "allocation_engine.py": {
-      "bytes": 89270,
-      "sha256": "0de1ebb8b3f91df542ac5a4fcac92fd8fc2df80eb188bf58e503d5ce03e3703b"
+      "bytes": 96487,
+      "sha256": "fdfc8aefc2d24cc2f00e3a31db1d2d9f32cb79db95cf96d1969140b1812b2799"
     },
     "app.py": {
-      "bytes": 30269,
-      "sha256": "0b4ce678b7d6ae0df78a8a0c67740b070f42ad5eb647d42b935bd3868a8b3476"
+      "bytes": 28657,
+      "sha256": "d8cb3e33bebcf530bd47e30c90c6367dbd64919727f067bf99189f5fd9edfd46"
     },
     "application_resolution.py": {
-      "bytes": 61369,
-      "sha256": "b8b822e205b45813f2d33007fb80f4bceeab26a556803364542df255bdbb2c6a"
+      "bytes": 61963,
+      "sha256": "5f7c8a941ccc6d53c8f0f225be08b9067ad4343c173c3e26df7e87659f360c7c"
     },
     "audit_export.py": {
       "bytes": 19213,
       "sha256": "91c6e18644946b5ebbc910906346f171697a11e1f4d7c11f8474de0da8643d61"
     },
     "course_input_adapter.py": {
-      "bytes": 17684,
-      "sha256": "446378805464acf2f0f1f39b61220ee0a79f8036c887042cb0e8e2543272da5d"
+      "bytes": 20792,
+      "sha256": "23fd9123d97187db6d8d0e519783082c1a6060dde8a9d4e79b7262a092389c82"
     },
     "credit_engine.py": {
       "bytes": 108887,
@@ -38,8 +38,8 @@
       "sha256": "1eb958a7915fef5bf0b607c6580a29d05a668fab146c165add5b9b49a875b25c"
     },
     "decision_snapshot.py": {
-      "bytes": 52153,
-      "sha256": "0bf6af37617d2635cf1f2c128125cb5a9630aeee95d50ce0cdf5294fd81042bd"
+      "bytes": 57699,
+      "sha256": "6d5ed2b03b98aae83bc4504436c5c290dfe72c92acc452fd40440698066694e3"
     },
     "equivalency_audit.py": {
       "bytes": 71324,
@@ -50,8 +50,8 @@
       "sha256": "00c8e60ee55852dedd24e2d95afc1d4c1d79428e64264eab9dda5260a900846a"
     },
     "graduation_service.py": {
-      "bytes": 97427,
-      "sha256": "ca41337aaa9c2770d775a28f666cc3e1ddf999b4e0690f4a937ee35a157e36e9"
+      "bytes": 101951,
+      "sha256": "672eb8f5a056d7f0723f75d77c99c90b2676521094a518ba92ad21fb33869689"
     },
     "handbook_rules.py": {
       "bytes": 35734,
@@ -74,16 +74,16 @@
       "sha256": "bfc6a77475c74198825ed16fc37928b9d976805d40c45ccc2d8d9c9d81180fcd"
     },
     "portal_scope.py": {
-      "bytes": 21023,
-      "sha256": "237dbd6f79ec32a072bc22194ef1923e0ecc6f80db1fefc60023f4e1a852eb42"
+      "bytes": 8384,
+      "sha256": "98a0de05fc08a3ed6d992a65d88d59c313d540e66f00362c9a0945f741212fd7"
     },
     "pyproject.toml": {
       "bytes": 226,
       "sha256": "f6c26547d7780b1f0ed2e01475b277fb1404c70bad160507779619e57aaa2f31"
     },
     "report_renderer.py": {
-      "bytes": 63591,
-      "sha256": "deb791455e156fa5a0b7d111bf48ea879d5aa7333abddedbd4bf5c120bc1610c"
+      "bytes": 62562,
+      "sha256": "18a44b27a940955a3e1cc9b43a8740582cca0db7e6c5c47c7b627e10f3dd0be4"
     },
     "requirements.txt": {
       "bytes": 368,
@@ -113,21 +113,13 @@
       "bytes": 51960,
       "sha256": "3dc4d96a5b0cf1282e236a578f58f0c59aa90b23538bd0b3aa37f1a1d247ea99"
     },
-    "schedule_parser.py": {
-      "bytes": 18459,
-      "sha256": "3a73a64711bfa7d7861e9cf9da44ac691e60aed1c0f69ba68a3c79b3b65b780b"
-    },
-    "schedule_planner.py": {
-      "bytes": 4199,
-      "sha256": "27d41b00a94524c29c71d9a2f46554e5819bf3a82f4574def2c19bf9cb25de26"
-    },
     "scraper.py": {
-      "bytes": 41422,
-      "sha256": "486990ab1c79b807a9ecf7b2201ec0dd996ef769218019e55f85b073d321f94a"
+      "bytes": 29620,
+      "sha256": "8ab03572461e306a96af2b3b15d1fe4ebaebf217c9906ed381accb5895c03697"
     },
     "sidebar.py": {
-      "bytes": 66137,
-      "sha256": "304017bf3d17715e0cb005f03bddee11d1172d32082926ba33f7198890d1fe6a"
+      "bytes": 50576,
+      "sha256": "16b3a4596be630bcc1396f31291b81d7246154f628b514cc80d024c5b6ca2dce"
     },
     "snapshot_exports.py": {
       "bytes": 22827,

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -79,6 +80,18 @@ def _nonnegative_decimal(value: Any, default: Decimal = _ZERO) -> Decimal:
     return max(_ZERO, _decimal(value, default))
 
 
+def _is_valid_nonnegative_decimal(value: Any) -> bool:
+    """Return whether a required-credit input is a finite non-negative number."""
+
+    if value is None or value == "":
+        return False
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return result.is_finite() and result >= _ZERO
+
+
 def _text(value: Any) -> str:
     return str(value).strip() if isinstance(value, (str, int, float, bool)) else ""
 
@@ -116,17 +129,68 @@ def _norm_coverage(value: Any) -> str:
     return text if text in {COMPLETE, PARTIAL, NONE} else NONE
 
 
+_COMPONENT_TOKEN_RE = re.compile(r"[\s_\-/\\()（）]+")
+_COMPONENT_ALIASES = {
+    LECTURE: frozenset(
+        {
+            "lecture",
+            "theory",
+            "theoretical",
+            "講授",
+            "講授課",
+            "理論",
+            "理論課",
+            "授課",
+            "學科",
+        }
+    ),
+    LAB: frozenset(
+        {
+            "lab",
+            "laboratory",
+            "practical",
+            "實驗",
+            "實驗課",
+            "實習",
+            "實習課",
+            "實作",
+        }
+    ),
+    COMBINED: frozenset(
+        {
+            "combined",
+            "lecturelab",
+            "lectureandlab",
+            "lecturelaboratory",
+            "講授實驗",
+            "講授與實驗",
+            "合併",
+            "綜合",
+        }
+    ),
+}
+
+
+def _component_token(value: Any) -> str:
+    """Normalize a component label without substring interpretation."""
+
+    return _COMPONENT_TOKEN_RE.sub("", _text(value).casefold())
+
+
 def _norm_course_kind(value: Any) -> str:
-    text = _text(value).upper().replace("-", "_").replace(" ", "_")
-    if any(token in text for token in ("COMBINED", "LECTURE_LAB", "合併", "綜合")):
-        return COMBINED
-    if any(token in text for token in ("LAB", "實驗", "實習")):
-        return LAB
-    if any(token in text for token in ("LECTURE", "講授", "理論", "COURSE")):
-        return LECTURE
+    token = _component_token(value)
+    for kind, aliases in _COMPONENT_ALIASES.items():
+        if token in aliases:
+            return kind
     # Missing or unrecognised component metadata cannot be safely treated as
     # a lecture: doing so could make a lecture satisfy a lab requirement.
     return UNKNOWN
+
+
+def normalize_course_kind(value: Any) -> str:
+    """Public shared component-token normalizer for input adapters."""
+
+    return _norm_course_kind(value)
 
 
 def _norm_repeat_policy(value: Any, repeatable: bool = False) -> str:
@@ -282,11 +346,17 @@ class RequirementSpec:
     role: str = ""
     curriculum_role: str = ""
     requirement_domain: str = ""
+    # Keep validation evidence after the numeric fields are normalized.  This
+    # prevents invalid input such as ``-3`` or ``"unknown"`` from becoming a
+    # zero-credit requirement that can accidentally pass.
+    credits_required_valid: bool = field(default=True, init=False)
 
     def __post_init__(self):
         requirement_id = _text(self.requirement_id)
         name = _text(self.name) or _text(self.bucket) or requirement_id
-        required = _nonnegative_decimal(self.required_credits if self.required_credits is not None else self.credits_required)
+        raw_required = self.required_credits if self.required_credits is not None else self.credits_required
+        required_valid = _is_valid_nonnegative_decimal(raw_required)
+        required = _nonnegative_decimal(raw_required)
         cap_value = self.credit_cap if self.credit_cap is not None else self.max_credits
         cap = _nonnegative_decimal(cap_value, required) if cap_value is not None else required
         cap = max(required, cap)
@@ -300,6 +370,7 @@ class RequirementSpec:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "credits_required", required)
         object.__setattr__(self, "required_credits", required)
+        object.__setattr__(self, "credits_required_valid", required_valid)
         object.__setattr__(self, "max_credits", cap)
         object.__setattr__(self, "credit_cap", cap)
         object.__setattr__(self, "eligible_course_ids", _tuple_text(course_ids))
@@ -335,7 +406,9 @@ class EquivalencyBinding:
     source_attempt_id: str
     target_requirement_id: str
     approved_credits: Decimal = _ZERO
-    evidence_state: str = VERIFIED
+    # A binding is an externally asserted decision.  It must carry explicit
+    # evidence; a typed constructor with omitted fields is not approval.
+    evidence_state: str = UNKNOWN
     authority: str = ""
     evidence_reference: str = ""
     direction: str = ""
@@ -345,7 +418,7 @@ class EquivalencyBinding:
     source_course_kind: str = ""
     allocation_kind: str = ""
     credits: Decimal | None = None
-    decision: str = "APPROVED"
+    decision: str = "PENDING"
     scope: str = ""
     # Shared credit must name the exact source requirement that owns the
     # exclusive allocation.  Domain/owner hints are optional aliases, but if
@@ -362,7 +435,13 @@ class EquivalencyBinding:
         target_id = _text(self.target_requirement_id)
         direction = _norm_direction(self.direction)
         allocation_kind = _text(self.allocation_kind).upper().replace("-", "_")
-        shared = bool(self.shared) or direction in {PRIMARY_TO_TARGET, TARGET_TO_PRIMARY} or allocation_kind in {SHARED_SHADOW, "SHARED_REUSE"}
+        # ``shared`` is an input trust boundary.  Python truthiness would
+        # treat values such as ``"false"`` and ``1`` as approval.  Only a
+        # literal boolean can control the flag; a literal ``False`` may still
+        # be accompanied by an explicit shared direction/kind, preserving the
+        # established shorthand for an intentionally shared mapping.
+        explicit_shared_marker = direction in {PRIMARY_TO_TARGET, TARGET_TO_PRIMARY} or allocation_kind in {SHARED_SHADOW, "SHARED_REUSE"}
+        shared = self.shared is True or (self.shared is False and explicit_shared_marker)
         if not binding_id:
             binding_id = f"binding:{_stable_digest([source_id, target_id, str(self.approved_credits), direction])}"
         amount = _nonnegative_decimal(self.credits if self.credits is not None else self.approved_credits)
@@ -380,7 +459,7 @@ class EquivalencyBinding:
         object.__setattr__(self, "target_course_id", _text(self.target_course_id))
         object.__setattr__(self, "source_course_kind", _norm_course_kind(self.source_course_kind) if self.source_course_kind else "")
         object.__setattr__(self, "allocation_kind", allocation_kind or (SHARED_SHADOW if shared else EXCLUSIVE))
-        object.__setattr__(self, "decision", _text(self.decision).upper() or "APPROVED")
+        object.__setattr__(self, "decision", _text(self.decision).upper() or "PENDING")
         object.__setattr__(self, "scope", _text(self.scope))
         object.__setattr__(self, "source_requirement_id", _text(self.source_requirement_id))
         object.__setattr__(self, "source_domain", _text(self.source_domain))
@@ -404,7 +483,7 @@ class WaiverDecision:
     evidence_state: str = UNKNOWN
     authority: str = ""
     evidence_reference: str = ""
-    decision: str = "APPROVED"
+    decision: str = "PENDING"
 
     def __post_init__(self):
         decision_id = _text(self.decision_id)
@@ -416,7 +495,7 @@ class WaiverDecision:
         object.__setattr__(self, "evidence_state", _norm_evidence_state(self.evidence_state))
         object.__setattr__(self, "authority", _text(self.authority))
         object.__setattr__(self, "evidence_reference", _text(self.evidence_reference))
-        object.__setattr__(self, "decision", _text(self.decision).upper() or "APPROVED")
+        object.__setattr__(self, "decision", _text(self.decision).upper() or "PENDING")
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,22 +612,107 @@ class AllocationResult:
     allocation_ambiguous: bool = False
 
     def __post_init__(self):
-        object.__setattr__(self, "status", _text(self.status) or UNKNOWN)
-        object.__setattr__(self, "allocations", tuple(self.allocations))
+        status = _text(self.status) or UNKNOWN
+        # These fields are trust-boundary metadata, not ordinary truthy
+        # configuration.  A string such as ``"false"`` or an integer zero
+        # must never certify a safe allocation.  Invalid values are retained
+        # only as conservative unsafe states below.
+        conservation_is_bool = self.credit_conservation is True or self.credit_conservation is False
+        search_exhausted_is_bool = self.search_exhausted is True or self.search_exhausted is False
+        pass_eligible_is_bool = self.pass_eligible is True or self.pass_eligible is False
+        allocation_ambiguous_is_bool = self.allocation_ambiguous is True or self.allocation_ambiguous is False
+        allocations = tuple(self.allocations)
+        source_earned_credits = _nonnegative_decimal(self.source_earned_credits)
+        recognized_credits = _nonnegative_decimal(self.recognized_credits)
+        unallocated_credits = _nonnegative_decimal(self.unallocated_credits)
+
+        # Recompute conservation from the immutable allocation rows instead
+        # of trusting headline totals.  A malformed row can otherwise claim
+        # three source credits while spending six in a single EXCLUSIVE
+        # portion.  Rows are one-to-one with source attempts; duplicate IDs or
+        # portions belonging to another attempt are structural mismatches.
+        attempt_ids = [item.attempt_id for item in allocations]
+        rows_have_unique_ids = len(attempt_ids) == len(set(attempt_ids)) and all(attempt_ids)
+        rows_balanced = True
+        row_source_total = _ZERO
+        row_exclusive_total = _ZERO
+        row_unallocated_total = _ZERO
+        for allocation in allocations:
+            source = _nonnegative_decimal(allocation.source_credits)
+            unallocated = _nonnegative_decimal(allocation.unallocated_credits)
+            exclusive = _ZERO
+            for portion in allocation.portions:
+                if portion.attempt_id != allocation.attempt_id:
+                    rows_balanced = False
+                if portion.allocation_kind == EXCLUSIVE:
+                    exclusive += _nonnegative_decimal(portion.credits)
+                elif _nonnegative_decimal(portion.credits) > _ZERO:
+                    # Waivers are valid only as zero-credit markers.  Shared
+                    # shadows and every other non-exclusive kind belong in
+                    # ``shadow_allocations`` or an audit record, never inside
+                    # a source allocation row.
+                    rows_balanced = False
+            if exclusive + unallocated != source:
+                rows_balanced = False
+            row_source_total += source
+            row_exclusive_total += exclusive
+            row_unallocated_total += unallocated
+        allocation_conservation = (
+            rows_have_unique_ids
+            and rows_balanced
+            and row_source_total == source_earned_credits
+            and row_exclusive_total == recognized_credits
+            and row_unallocated_total == unallocated_credits
+        )
+        credit_conservation = self.credit_conservation is True and allocation_conservation
+        search_exhausted = self.search_exhausted is not False
+        allocation_ambiguous = self.allocation_ambiguous is not False
+        metadata_invalid = not all(
+            (
+                conservation_is_bool,
+                search_exhausted_is_bool,
+                pass_eligible_is_bool,
+                allocation_ambiguous_is_bool,
+            )
+        )
+        if status == PASS and (
+            not credit_conservation
+            or search_exhausted
+            or allocation_ambiguous
+            or metadata_invalid
+        ):
+            status = UNKNOWN
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "allocations", allocations)
         object.__setattr__(self, "requirement_results", tuple(sorted(self.requirement_results, key=lambda item: item.requirement_id)))
-        object.__setattr__(self, "source_earned_credits", _nonnegative_decimal(self.source_earned_credits))
-        object.__setattr__(self, "recognized_credits", _nonnegative_decimal(self.recognized_credits))
-        object.__setattr__(self, "unallocated_credits", _nonnegative_decimal(self.unallocated_credits))
+        object.__setattr__(self, "source_earned_credits", source_earned_credits)
+        object.__setattr__(self, "recognized_credits", recognized_credits)
+        object.__setattr__(self, "unallocated_credits", unallocated_credits)
         object.__setattr__(self, "shadow_allocations", tuple(self.shadow_allocations))
         object.__setattr__(self, "shared_ledgers", tuple(sorted(self.shared_ledgers, key=lambda item: item.direction)))
         object.__setattr__(self, "binding_assessments", tuple(sorted(self.binding_assessments, key=lambda item: item.binding_id)))
         object.__setattr__(self, "waiver_assessments", tuple(sorted(self.waiver_assessments, key=lambda item: item.decision_id)))
-        object.__setattr__(self, "blockers", tuple(dict.fromkeys(_safe_diagnostic(item) for item in self.blockers if _text(item))))
+        blockers = [_safe_diagnostic(item) for item in self.blockers if _text(item)]
+        if not credit_conservation and "CREDIT_CONSERVATION_FAILED" not in blockers:
+            blockers.append("CREDIT_CONSERVATION_FAILED")
+        if metadata_invalid and "ALLOCATION_METADATA_INVALID" not in blockers:
+            blockers.append("ALLOCATION_METADATA_INVALID")
+        object.__setattr__(self, "blockers", tuple(dict.fromkeys(blockers)))
         object.__setattr__(self, "warnings", tuple(dict.fromkeys(_safe_diagnostic(item) for item in self.warnings if _text(item))))
         alternatives = tuple(sorted({tuple(item) for item in self.alternative_allocations}, key=repr))
         object.__setattr__(self, "alternative_allocations", alternatives)
-        object.__setattr__(self, "allocation_ambiguous", bool(self.allocation_ambiguous))
-        object.__setattr__(self, "pass_eligible", bool(self.pass_eligible) and self.status == PASS and not self.search_exhausted)
+        object.__setattr__(self, "credit_conservation", credit_conservation)
+        object.__setattr__(self, "search_exhausted", search_exhausted)
+        object.__setattr__(self, "allocation_ambiguous", allocation_ambiguous)
+        object.__setattr__(
+            self,
+            "pass_eligible",
+            self.pass_eligible is True
+            and self.status == PASS
+            and self.credit_conservation is True
+            and self.search_exhausted is False
+            and self.allocation_ambiguous is False,
+        )
 
     @property
     def can_pass(self) -> bool:
@@ -661,7 +825,7 @@ def _as_binding(value: Any) -> EquivalencyBinding | None:
         target_course_id=value.get("target_course_id", value.get("target_course_code", "")),
         source_course_kind=value.get("source_course_kind", value.get("course_kind", "")),
         allocation_kind=value.get("allocation_kind", value.get("kind", "")),
-        decision=value.get("decision", "APPROVED"),
+        decision=value.get("decision", "PENDING"),
         scope=value.get("scope", ""),
         source_requirement_id=value.get("source_requirement_id", value.get("source_requirement", "")),
         source_domain=value.get("source_domain", ""),
@@ -754,11 +918,13 @@ def _normalize_requirements(
     elif isinstance(values, Mapping):
         values = (values,)
     entries: dict[str, list[tuple[RequirementSpec, str]]] = {}
+    issues: list[str] = []
     for value in values or ():
         item = _as_requirement(value)
         if item is not None and item.requirement_id:
             entries.setdefault(item.requirement_id, []).append((item, _input_fingerprint(value)))
-    issues: list[str] = []
+            if not item.credits_required_valid:
+                issues.append(f"INVALID_REQUIREMENT_CREDITS:{item.requirement_id}")
     unique: dict[str, RequirementSpec] = {}
     for requirement_id, candidates in entries.items():
         fingerprints = {fingerprint for _item, fingerprint in candidates}
@@ -806,7 +972,7 @@ def _as_waiver_decision(value: Any) -> WaiverDecision | None:
         evidence_state=value.get("evidence_state", value.get("status", UNKNOWN)),
         authority=value.get("authority", ""),
         evidence_reference=value.get("evidence_reference", value.get("source_reference", value.get("evidence_id", ""))),
-        decision=value.get("decision", "APPROVED"),
+        decision=value.get("decision", "PENDING"),
     )
 
 
@@ -1473,6 +1639,11 @@ def _evaluate_requirements(
         waiver_unresolved = requirement.waiver and requirement.requirement_id in unknown_requirements and not waived
         if not requirement.required:
             status = NOT_APPLICABLE
+        elif requirement.credits_required == _ZERO and not waived:
+            status = UNKNOWN
+            requirement_blockers.append(
+                f"ZERO_CREDIT_GATE_EVIDENCE_REQUIRED:{requirement.requirement_id}"
+            )
         elif deficit <= _ZERO:
             # A curriculum waiver flag is not evidence by itself.  If the
             # student has ordinary earned credit covering the requirement,
@@ -1585,6 +1756,9 @@ def allocate_credits(
 
     candidate_requirements: dict[str, set[str]] = {}
     unknown_candidates: set[str] = set(pending_binding_requirements)
+    unknown_candidates.update(
+        item.requirement_id for item in normalized_requirements if not item.credits_required_valid
+    )
     if attempt_issues:
         # A conflicting attempt ID means the course identity/credits are not
         # stable enough for any requirement to be reported as a formal pass.
@@ -1888,4 +2062,5 @@ __all__ = [
     "WaiverAssessment",
     "WaiverDecision",
     "allocate_credits",
+    "normalize_course_kind",
 ]

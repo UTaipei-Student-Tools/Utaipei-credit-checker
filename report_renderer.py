@@ -13,7 +13,6 @@ from handbook_rules import normalize_course_name
 from input_confirmation import mask_person_name, mask_student_id
 from lieflat_progress_chart import render_progress_chart
 from policy_audit import UNKNOWN
-from schedule_planner import render_schedule_planner
 from ui_components import draw_premium_progress, format_credit
 
 _STATUS_LABELS = {
@@ -320,24 +319,6 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
 def _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements):
     st.markdown("### 🎯 畢業進度總覽")
 
-    schedule_courses = [
-        course for course in courses if course.get("source") == "schedule" and course.get("is_in_progress")
-    ]
-    if schedule_courses:
-        schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
-        terms = sorted(
-            {
-                f"{course.get('academic_year', '')}-{course.get('semester', '')}"
-                for course in schedule_courses
-                if course.get("academic_year") and course.get("semester")
-            }
-        )
-        term_label = "、".join(terms) if terms else "已公布"
-        st.info(
-            f"📅 已納入 {term_label} 課表：{len(schedule_courses)} 門、{format_credit(schedule_credits)} 學分；"
-            "以下進度條的藍色區段代表這些修讀中學分。"
-        )
-
     major_target = requirements["total"]
     target_req = requirements["target_total"]
     target_completed = summary["target_completed"]
@@ -364,14 +345,13 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
         "free_elective": "六、自由選修",
         "target": f"🧪 {program_type}",
         "export": "📦 全部匯出",
-        "planner": "🗓️ 模擬排課",
     }
     selected_section = st.selectbox(
         "📂 查看詳細分類與工具",
         options=list(section_labels),
         format_func=section_labels.get,
         key="report_section_selector",
-        help="共 10 個區塊。改用下拉導覽可避免較窄的畫面把後段分頁裁掉。",
+        help="共 9 個區塊。改用下拉導覽可避免較窄的畫面把後段分頁裁掉。",
     )
     st.caption(f"共 {len(section_labels)} 個區塊｜目前顯示：{section_labels[selected_section]}")
 
@@ -393,8 +373,6 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
         _render_target_tab(report, program_type, target_dept, summary)
     elif selected_section == "export":
         _render_export_tab(courses, report, summary, requirements)
-    elif selected_section == "planner":
-        render_schedule_planner()
 
 
 def _render_overview_tab(courses, summary, report, major_domain, program_type, target_dept, requirements):

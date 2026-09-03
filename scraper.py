@@ -2,32 +2,22 @@
 
 The portal frequently returns an HTML login page with status code 200. This
 module therefore treats transport status and page identity as separate
-contracts. The public one-shot helpers remain compatible with the original
-API, while fetch_transcript_and_schedule lets the UI use one verified session
-for both resources.
+contracts. The application intentionally imports only the transcript path:
+login and the validated AG102 PDF are the only live portal data used for
+graduation analysis.
 """
 
-from dataclasses import dataclass
+import re
 from enum import Enum
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-from schedule_parser import (
-    INVALID_PAGE,
-    VALID_EMPTY,
-    VALID_WITH_ROWS,
-    is_login_page,
-    is_maintenance_page,
-    is_unverifiable_ag104_response,
-)
-
 LOGIN_URL = "https://my.utaipei.edu.tw/utaipei/login_check.jsp"
 PERCHK_URL = "https://my.utaipei.edu.tw/utaipei/perchk.jsp"
 FNC_URL = "https://my.utaipei.edu.tw/utaipei/fnc.jsp"
 BASE_URL = "https://my.utaipei.edu.tw/utaipei/"
-AG104_URL = BASE_URL + "ag_pro/ag104.jsp?"
 PORTAL_HOST = "my.utaipei.edu.tw"
 ALLOWED_PORTAL_HOSTS = frozenset({PORTAL_HOST})
 MAX_PDF_BYTES = 20 * 1024 * 1024
@@ -39,13 +29,61 @@ HEADERS = {
     "Referer": "https://my.utaipei.edu.tw/utaipei/index_main.html",
 }
 
-FEATURE_LABELS = {
-    "AG102": "歷年成績單下載",
-    "AG104": "開課選課資料查詢 / 班級課表",
-    "AG107": "教學評量查詢",
-    "AG108": "教學評量填答率查詢",
-}
+_MAINTENANCE_MARKERS = (
+    "維護中",
+    "暫停服務",
+    "系統忙碌",
+    "系統維護",
+    "maintenance",
+    "service unavailable",
+    "temporarily unavailable",
+    "system busy",
+    "under maintenance",
+)
+_LOGIN_FORM_IDS = {"login", "loginform", "login_form", "login-form"}
+_LOGIN_CONTEXT_MARKERS = ("登入", "sign in", "log in", "login page", "login form", "login portal")
 
+
+def _clean_page_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def is_maintenance_page(html_content):
+    """Return true for known maintenance/interstitial page language."""
+
+    if not html_content:
+        return False
+    soup = BeautifulSoup(str(html_content), "html.parser")
+    text = _clean_page_text(soup.get_text(" ", strip=True)).lower()
+    return any(marker.lower() in text for marker in _MAINTENANCE_MARKERS)
+
+
+def _has_login_context(text):
+    normalized = _clean_page_text(text).lower()
+    if "登入" in normalized:
+        return True
+    return any(marker in normalized for marker in _LOGIN_CONTEXT_MARKERS[1:])
+
+
+def is_login_page(html_content):
+    """Identify a login page without mistaking authenticated hidden controls."""
+
+    if not html_content:
+        return False
+    soup = BeautifulSoup(str(html_content), "html.parser")
+    visible_text = _clean_page_text(soup.get_text(" ", strip=True))
+    for form in soup.find_all("form"):
+        action = str(form.get("action") or "").lower()
+        form_id = str(form.get("id") or "").lower()
+        if "login_check" in action or form_id in _LOGIN_FORM_IDS or form_id.startswith("login"):
+            return True
+        has_password_input = any(
+            str(control.get("type") or "").lower() == "password" for control in form.find_all("input")
+        )
+        form_text = _clean_page_text(form.get_text(" ", strip=True))
+        if has_password_input and (_has_login_context(form_text) or _has_login_context(visible_text)):
+            return True
+    return False
 
 class PortalErrorCode(str, Enum):
     """Stable, non-sensitive failure categories exposed to the UI."""
@@ -56,8 +94,6 @@ class PortalErrorCode(str, Enum):
     PORTAL_CHANGED = "PORTAL_CHANGED"
     UPSTREAM_TIMEOUT = "UPSTREAM_TIMEOUT"
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
-    SCHEDULE_INVALID_PAGE = "SCHEDULE_INVALID_PAGE"
-    SCHEDULE_UPSTREAM_UNVERIFIABLE_RESPONSE = "SCHEDULE_UPSTREAM_UNVERIFIABLE_RESPONSE"
     AUTH_REJECTED = "AUTH_REJECTED"
     RATE_LIMITED = "RATE_LIMITED"
 
@@ -69,11 +105,6 @@ _PORTAL_MESSAGES = {
     PortalErrorCode.PORTAL_CHANGED: "校務系統頁面結構或網址已變更，請改用 PDF 並通知維護者。",
     PortalErrorCode.UPSTREAM_TIMEOUT: "校務系統回應逾時，請稍後重試或改用 PDF。",
     PortalErrorCode.PDF_NOT_FOUND: "校務系統未提供可驗證的成績單 PDF，請改用 PDF 上傳。",
-    PortalErrorCode.SCHEDULE_INVALID_PAGE: "校務系統回傳的課表頁面無法確認，既有課表未變更。",
-    PortalErrorCode.SCHEDULE_UPSTREAM_UNVERIFIABLE_RESPONSE: (
-        "校務系統已接受課表查詢，但回傳內容沒有可驗證的課程資料；"
-        "本次已載入的成績單仍保留。請稍後重試，或手動新增目前修習中的課程。"
-    ),
     PortalErrorCode.AUTH_REJECTED: "校務系統拒絕登入，請確認帳號密碼或改用 PDF。",
     PortalErrorCode.RATE_LIMITED: "校務系統暫時限制請求，請稍後再試。",
 }
@@ -94,58 +125,6 @@ class PortalError(RuntimeError):
 
     def __str__(self):
         return self.message
-
-
-@dataclass(frozen=True)
-class CombinedFetchResult:
-    """Immutable result whose transcript and schedule outcomes stay separate."""
-
-    pdf_bytes: bytes
-    schedule_status: str
-    schedule_courses: tuple = ()
-    schedule_error_code: PortalErrorCode | None = None
-    schedule_error_message: str = ""
-
-    def __post_init__(self):
-        status = self.schedule_status
-        if isinstance(status, Enum):
-            status = getattr(status, "value", status)
-        status = str(status or "")
-        if status not in {VALID_EMPTY, VALID_WITH_ROWS, INVALID_PAGE}:
-            raise ValueError("unknown schedule status")
-        object.__setattr__(self, "schedule_status", status)
-        object.__setattr__(self, "schedule_courses", tuple(self.schedule_courses or ()))
-        supplied_message = str(self.schedule_error_message or "")
-        if status == VALID_EMPTY and self.schedule_courses:
-            raise ValueError("VALID_EMPTY cannot contain schedule courses")
-        if status == VALID_WITH_ROWS and not self.schedule_courses:
-            raise ValueError("VALID_WITH_ROWS requires schedule courses")
-        if status == INVALID_PAGE and self.schedule_courses:
-            raise ValueError("INVALID_PAGE cannot contain schedule courses")
-        if status == INVALID_PAGE and self.schedule_error_code is None:
-            raise ValueError("INVALID_PAGE requires a schedule error")
-        if status != INVALID_PAGE and self.schedule_error_code is not None:
-            raise ValueError("successful schedule result cannot contain an error")
-        if status != INVALID_PAGE and supplied_message:
-            raise ValueError("successful schedule result cannot contain an error message")
-        if self.schedule_error_code is None:
-            object.__setattr__(self, "schedule_error_message", "")
-            return
-        try:
-            code = (
-                self.schedule_error_code
-                if isinstance(self.schedule_error_code, PortalErrorCode)
-                else PortalErrorCode(str(self.schedule_error_code))
-            )
-        except ValueError:
-            code = PortalErrorCode.PORTAL_CHANGED
-        object.__setattr__(self, "schedule_error_code", code)
-        object.__setattr__(self, "schedule_error_message", _PORTAL_MESSAGES[code])
-
-
-# Preserve the name used by existing callers while exposing the more explicit
-# partial-result contract to new callers.
-PortalFetchResult = CombinedFetchResult
 
 
 def _safe_portal_url(target, base_url=BASE_URL):
@@ -231,7 +210,7 @@ def _is_captcha_page(html_content):
 def _has_session_identity(html_content):
     soup = BeautifulSoup(str(html_content or ""), "html.parser")
     text = " ".join(soup.get_text(" ", strip=True).split()).lower()
-    return any(marker in text for marker in ("校務系統", "主選單", "學生", "utaipei", "選課", "課表", "成績"))
+    return any(marker in text for marker in ("校務系統", "主選單", "學生", "utaipei", "成績"))
 
 
 def _has_fnc_identity(html_content, expected_fncid):
@@ -411,8 +390,7 @@ def _validate_html_identity(response, request_url, *, role, expected_fncid=None)
     if role != "entry" and _is_login_page(html):
         raise PortalError(PortalErrorCode.SESSION_REJECTED)
     if is_maintenance_page(html):
-        code = PortalErrorCode.SCHEDULE_INVALID_PAGE if role == "schedule" else PortalErrorCode.PORTAL_CHANGED
-        raise PortalError(code)
+        raise PortalError(PortalErrorCode.PORTAL_CHANGED)
     if role == "login":
         soup = BeautifulSoup(html, "html.parser")
         form = soup.find("form", id="thisform")
@@ -458,77 +436,6 @@ def _form_controls(form):
 def _find_form(response, *, form_id="thisform"):
     soup = BeautifulSoup(getattr(response, "text", "") or "", "html.parser")
     return soup.find("form", id=form_id) or soup.find("form")
-
-
-def _schedule_error_code_for_html(html, *, trusted_ag104=False):
-    """Map a schedule response to a safe, specific error category."""
-
-    if is_unverifiable_ag104_response(html, trusted_ag104=trusted_ag104):
-        return PortalErrorCode.SCHEDULE_UPSTREAM_UNVERIFIABLE_RESPONSE
-    return PortalErrorCode.SCHEDULE_INVALID_PAGE
-
-
-def _ag104_first_form_payload(form, *, year, semester, account):
-    """Validate and complete the server-provided AG104 first-stage payload.
-
-    The FNC response is authoritative.  Existing identity/term values are
-    never replaced: an explicit mismatch makes the request unverifiable, while
-    only absent fields receive the values required by the current query.
-    """
-
-    if form is None:
-        raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-
-    expected = {
-        "arg01": str(year),
-        "arg02": str(semester),
-        "arg03": str(account),
-        "arg04": "",
-        "arg05": "",
-        "arg06": "",
-        "fncid": "AG104",
-    }
-    payload = _form_controls(form)
-    identity_fields = {"arg01", "arg02", "arg03", "fncid"}
-    reserved_empty_fields = {"arg04", "arg05", "arg06"}
-    for name, target in expected.items():
-        if name not in payload:
-            payload[name] = target
-            continue
-        original = payload[name]
-        if name in identity_fields and original != target:
-            raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-        if name in reserved_empty_fields and original:
-            raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-        # Keep the original value, including its exact string representation.
-    return payload
-
-
-def _schedule_term_options(form):
-    """Return explicitly advertised AG104 terms, or ``None`` if absent."""
-
-    options = set()
-    found_select = False
-    for select in form.find_all("select"):
-        if str(select.get("name") or "").strip().lower() != "yms":
-            continue
-        found_select = True
-        for option in select.find_all("option"):
-            value = str(option.get("value") or "").strip()
-            if value:
-                options.add(value)
-    return options if found_select else None
-
-
-def _official_ag104_action(form, base_url):
-    """Validate a dynamic action, then pin the request to official AG104."""
-
-    action = str(form.get("action") or "").strip()
-    if action:
-        resolved = _safe_portal_url(action, base_url)
-        if urlparse(resolved).path.rstrip("/") != urlparse(AG104_URL).path.rstrip("/"):
-            raise PortalError(PortalErrorCode.PORTAL_CHANGED)
-    return _safe_portal_url(AG104_URL, base_url)
 
 
 def _find_login_form(response):
@@ -679,98 +586,6 @@ class PortalClient:
         self._last_response_url = response_url
         return _validate_html_identity(response, response_url, role="fnc", expected_fncid=fncid)
 
-    def fetch_course_schedule(self, year="114", semester="2"):
-        if not self._logged_in:
-            raise PortalError(PortalErrorCode.SESSION_REJECTED)
-        try:
-            response = self._create_fnc("AG104")
-            fnc_response_url = _response_url(response, FNC_URL)
-            first_form = _find_form(response)
-            first_payload = _ag104_first_form_payload(
-                first_form,
-                year=year,
-                semester=semester,
-                account=self.uid,
-            )
-            first = self._post_form(
-                response,
-                fallback_url=BASE_URL + "system/sys001_00.jsp?spath=ag_pro/ag104.jsp?",
-                data=first_payload,
-                referer=fnc_response_url,
-                role="schedule",
-            )
-            if self._is_schedule_shell(first):
-                direct_form = _find_form(first)
-                direct_terms = _schedule_term_options(direct_form) if direct_form else None
-                if direct_terms is not None and f"{year},{semester}" not in direct_terms:
-                    _close_response(first)
-                    raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-                schedule_html = getattr(first, "text", "") or ""
-                _close_response(first)
-                return schedule_html
-            first_error_code = _schedule_error_code_for_html(getattr(first, "text", "") or "")
-            if first_error_code == PortalErrorCode.SCHEDULE_UPSTREAM_UNVERIFIABLE_RESPONSE:
-                _close_response(first)
-                raise PortalError(first_error_code)
-            # Older portal versions return one more dynamic form before the
-            # actual result table. Follow only that same-host form action.
-            second_form = _find_form(first)
-            if not second_form:
-                _close_response(first)
-                raise PortalError(first_error_code)
-            first_url = _response_url(first, BASE_URL)
-            try:
-                second_action = _official_ag104_action(second_form, first_url)
-                available_terms = _schedule_term_options(second_form)
-                requested_term = f"{year},{semester}"
-                if not available_terms or requested_term not in available_terms:
-                    raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE)
-                second_data = _form_controls(second_form)
-                second_data.update(
-                    {
-                        "yms": requested_term,
-                        "arg01": str(year),
-                        "arg02": str(semester),
-                        "spath": "ag_pro/ag104.jsp?",
-                    }
-                )
-            except Exception:
-                _close_response(first)
-                raise
-            _close_response(first)
-            final = self._request(
-                "POST",
-                second_action,
-                referer=first_url,
-                data=second_data,
-            )
-            _validate_html_identity(final, _response_url(final, second_action), role="schedule")
-            if not self._is_schedule_shell(final):
-                # ``second_action`` is pinned to the official AG104 route by
-                # _official_ag104_action.  The portal's final response can
-                # omit its own AG104 marker, so only this trusted request
-                # context may classify the exact one-row/three-cell shell.
-                final_error_code = _schedule_error_code_for_html(
-                    getattr(final, "text", "") or "",
-                    trusted_ag104=True,
-                )
-                _close_response(final)
-                raise PortalError(final_error_code)
-            schedule_html = getattr(final, "text", "") or ""
-            _close_response(final)
-            return schedule_html
-        except PortalError:
-            raise
-        except Exception:
-            raise PortalError(PortalErrorCode.SCHEDULE_INVALID_PAGE) from None
-
-    @staticmethod
-    def _is_schedule_shell(response):
-        from schedule_parser import INVALID_PAGE, parse_schedule_result
-
-        result = parse_schedule_result(getattr(response, "text", "") or "")
-        return result.status != INVALID_PAGE
-
     def fetch_transcript_pdf(self):
         if not self._logged_in:
             raise PortalError(PortalErrorCode.SESSION_REJECTED)
@@ -846,42 +661,6 @@ class PortalClient:
             # A non-binary AG102 wrapper belongs to this extraction call.  It
             # must not remain open while linked candidates are inspected.
             _close_response(response)
-
-    def fetch_transcript_and_schedule(self, year="114", semester="2"):
-        """Fetch both resources while preserving a verified transcript on AG104 failure."""
-
-        if not self._logged_in:
-            self.login()
-        pdf_bytes = self.fetch_transcript_pdf()
-        from schedule_parser import INVALID_PAGE, parse_schedule_result
-
-        try:
-            schedule_html = self.fetch_course_schedule(year=year, semester=semester)
-            parsed = parse_schedule_result(schedule_html, academic_year=year, semester=semester)
-            if parsed.status == INVALID_PAGE:
-                return CombinedFetchResult(
-                    pdf_bytes=pdf_bytes,
-                    schedule_status=INVALID_PAGE,
-                    schedule_error_code=_schedule_error_code_for_html(schedule_html),
-                )
-            return CombinedFetchResult(
-                pdf_bytes=pdf_bytes,
-                schedule_status=parsed.status,
-                schedule_courses=parsed.courses,
-            )
-        except PortalError as exc:
-            return CombinedFetchResult(
-                pdf_bytes=pdf_bytes,
-                schedule_status=INVALID_PAGE,
-                schedule_error_code=exc.code,
-            )
-        except Exception:
-            return CombinedFetchResult(
-                pdf_bytes=pdf_bytes,
-                schedule_status=INVALID_PAGE,
-                schedule_error_code=PortalErrorCode.SCHEDULE_INVALID_PAGE,
-            )
-
 
 def _validated_pdf(content):
     if not content.startswith(b"%PDF-"):
@@ -982,67 +761,19 @@ def _submit_portal_form(session, action_path, form_data, referer):
     return response
 
 
-def fetch_transcript_and_schedule(uid, pwd, year="114", semester="2"):
-    """Fetch and parse transcript + schedule through one authenticated Session."""
-
-    client = PortalClient(uid, pwd)
-    try:
-        return client.fetch_transcript_and_schedule(year=year, semester=semester)
-    finally:
-        client.close()
-
-
-def discover_portal_features(uid, pwd):
-    """Explore known portal functions without exposing exception details."""
+def fetch_transcript(uid, pwd):
+    """Authenticate once and return only the validated transcript PDF bytes."""
 
     client = PortalClient(uid, pwd)
     try:
         client.login()
-        available = []
-        for fncid, label in FEATURE_LABELS.items():
-            try:
-                client._create_fnc(fncid)
-            except PortalError as exc:
-                available.append(
-                    {
-                        "fncid": fncid,
-                        "name": label,
-                        "status": "入口不可達／需重試",
-                        "error_code": exc.code.value,
-                    }
-                )
-            except Exception:
-                available.append(
-                    {
-                        "fncid": fncid,
-                        "name": label,
-                        "status": "入口不可達／需重試",
-                        "error_code": PortalErrorCode.PORTAL_CHANGED.value,
-                    }
-                )
-            else:
-                # _create_fnc only proves that the menu entry/form is reachable;
-                # it does not prove that the downstream query returned usable
-                # data (AG104 can still yield an invalid shell page).
-                available.append({"fncid": fncid, "name": label, "status": "入口可達"})
-        return available
-    finally:
-        client.close()
-
-
-def crawl_course_schedule(uid, pwd, year="114", semester="2"):
-    """Backward-compatible one-shot schedule fetch; it always closes Session."""
-
-    client = PortalClient(uid, pwd)
-    try:
-        client.login()
-        return client.fetch_course_schedule(year=year, semester=semester)
+        return client.fetch_transcript_pdf()
     finally:
         client.close()
 
 
 def crawl_transcript_pdf(uid, pwd, download_dir=None):
-    """Backward-compatible one-shot PDF fetch returning bytes.
+    """Backward-compatible one-shot transcript PDF fetch returning bytes.
 
     download_dir is retained for callers from the earlier API. The current
     implementation never writes credentials or transcript bytes to a shared
@@ -1050,9 +781,4 @@ def crawl_transcript_pdf(uid, pwd, download_dir=None):
     """
 
     del download_dir
-    client = PortalClient(uid, pwd)
-    try:
-        client.login()
-        return client.fetch_transcript_pdf()
-    finally:
-        client.close()
+    return fetch_transcript(uid, pwd)

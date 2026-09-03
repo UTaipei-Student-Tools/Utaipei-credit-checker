@@ -56,7 +56,7 @@ _SAFE_REQUEST_KEYS = {
     "evaluated_at",
     "request_version",
 }
-_SAFE_INPUT_WARNING_CODES = frozenset({"SCHEDULE_SCOPE_MISMATCH", "SCHEDULE_SCOPE_UNVERIFIED"})
+_SAFE_INPUT_WARNING_CODES = frozenset()
 _EVIDENCE_ID_KEYS = {
     "evidence_id",
     "evidence_record_id",
@@ -194,6 +194,93 @@ _PUBLIC_BINDING_ID_KEYS = frozenset(
         "equivalency_binding_ids",
     }
 )
+_PUBLIC_IDENTITY_KEYS = frozenset(
+    {
+        # ASCII snake_case and compact/camel-case spellings commonly emitted
+        # by transcript imports and portal adapters.
+        "student_id",
+        "studentid",
+        "student_number",
+        "studentnumber",
+        "student_no",
+        "studentno",
+        "student_name",
+        "studentname",
+        "student_identifier",
+        "studentidentifier",
+        "student_uid",
+        "studentuid",
+        "subject_id",
+        "subjectid",
+        "subject_ref",
+        "subjectref",
+        # Generic account/login identifiers can be emitted by portal adapters
+        # without the ``student_`` prefix.  They are never needed to explain
+        # a course or requirement, so omit them at every public boundary.
+        "uid",
+        "user_id",
+        "userid",
+        "user_number",
+        "usernumber",
+        "user_no",
+        "userno",
+        "user_name",
+        "username",
+        "user_identifier",
+        "useridentifier",
+        "user_uid",
+        "useruid",
+        "account",
+        "account_id",
+        "accountid",
+        "account_number",
+        "accountnumber",
+        "account_no",
+        "accountno",
+        "account_name",
+        "accountname",
+        "account_identifier",
+        "accountidentifier",
+        "account_uid",
+        "accountuid",
+        "login_id",
+        "loginid",
+        "login_name",
+        "loginname",
+        # These labels can occur in localized resolver records.
+        "學號",
+        "學生學號",
+        "學生編號",
+        "學生姓名",
+        "姓名",
+        "帳號",
+        "帳號名稱",
+        "使用者帳號",
+        "使用者名稱",
+    }
+)
+_PUBLIC_IDENTITY_CONTAINER_KEYS = frozenset(
+    {
+        # These are known identity-bearing containers.  Drop the container as
+        # a unit instead of recursively retaining generic ``id``/``name``
+        # members; course and requirement labels elsewhere remain auditable.
+        "student",
+        "student_info",
+        "studentinfo",
+        "student_record",
+        "studentrecord",
+        "subject",
+        "subject_info",
+        "subjectinfo",
+        "account_info",
+        "accountinfo",
+        "user",
+        "user_info",
+        "userinfo",
+        "profile",
+        "identity",
+    }
+)
 
 # Only reviewed, checked-in public citations may survive the snapshot privacy
 # boundary verbatim.  A caller-provided URL is still an opaque evidence value:
@@ -271,6 +358,21 @@ def _publicize_mapping(
         for raw_key, item in value.items():
             key = str(raw_key)
             normalized = key.casefold()
+            identity_key = "".join(char for char in normalized if char.isalnum())
+            # A ``subject`` scalar can be an academic label, but a mapping
+            # under any known identity container is account/person data.
+            # Known student/account containers are otherwise always identity
+            # payloads and must not cross the public Snapshot boundary.
+            if identity_key in _PUBLIC_IDENTITY_CONTAINER_KEYS and (
+                identity_key != "subject" or isinstance(item, Mapping)
+            ):
+                continue
+            if normalized in _PUBLIC_IDENTITY_KEYS or identity_key in _PUBLIC_IDENTITY_KEYS:
+                # Identity fields are omitted rather than hashed.  A stable
+                # hash would still be a reusable student identifier in public
+                # repr/export output and would violate the snapshot privacy
+                # boundary.
+                continue
             if normalized in _PUBLIC_BINDING_ID_KEYS or normalized.endswith("_binding_id") or normalized.endswith("_binding_ids"):
                 result[key] = _public_opaque_values(item, namespace="binding")
             elif normalized == "source_reference":
@@ -319,6 +421,14 @@ def _publicize_mapping(
             )
         )
     return value
+
+
+def _optimality_is_uncertain(value: Any) -> bool:
+    """Return whether an optimality label cannot support a formal PASS."""
+
+    # ``OPTIMAL`` is the only label emitted by a complete, unique search.
+    # Unknown/future labels must not silently become formal PASS values.
+    return _text(value).casefold() != "optimal"
 
 
 def _safe_diagnostic(value: Any) -> str:
@@ -521,7 +631,7 @@ def _binding(value: Any) -> EquivalencyBinding | None:
         target_course_id=value.get("target_course_id", ""),
         source_course_kind=value.get("source_course_kind", ""),
         allocation_kind=value.get("allocation_kind", ""),
-        decision=value.get("decision", "APPROVED"),
+        decision=value.get("decision", "PENDING"),
         scope=value.get("scope", ""),
         source_requirement_id=value.get("source_requirement_id", value.get("source_requirement", "")),
         source_domain=value.get("source_domain", ""),
@@ -542,7 +652,7 @@ def _waiver_decision(value: Any) -> WaiverDecision | None:
         evidence_state=value.get("evidence_state", value.get("status", "UNKNOWN")),
         authority=value.get("authority", ""),
         evidence_reference=value.get("evidence_reference", value.get("source_reference", value.get("evidence_id", ""))),
-        decision=value.get("decision", "APPROVED"),
+        decision=value.get("decision", "PENDING"),
     )
 
 
@@ -1008,6 +1118,29 @@ class DecisionSnapshot:
             blockers=tuple(_safe_diagnostic(item) for item in allocation.blockers),
             warnings=tuple(_safe_diagnostic(item) for item in allocation.warnings),
         )
+        search_complete = (
+            not allocation.search_exhausted
+            if self.search_complete is None
+            else self.search_complete is True
+        )
+        optimality = _text(self.optimality)
+        if not optimality:
+            optimality = "BOUNDED_NOT_COMPLETE" if not search_complete else "OPTIMAL"
+        allocation_ambiguous = (
+            allocation.allocation_ambiguous
+            if self.allocation_ambiguous is None
+            # An explicit override is trusted only when it is the literal
+            # boolean False.  Truthy strings/numbers are malformed metadata,
+            # not proof that the allocation is unique.
+            else self.allocation_ambiguous is not False
+        )
+        metadata_blockers = []
+        if not search_complete:
+            metadata_blockers.append("SEARCH_INCOMPLETE")
+        if allocation_ambiguous:
+            metadata_blockers.append("ALLOCATION_AMBIGUOUS")
+        if _optimality_is_uncertain(optimality):
+            metadata_blockers.append("OPTIMALITY_UNCERTAIN")
         attempts = tuple(self.attempts) if confirmation_valid else ()
         object.__setattr__(self, "attempts", attempts)
         object.__setattr__(self, "requirements", tuple(self.requirements))
@@ -1025,19 +1158,49 @@ class DecisionSnapshot:
         )
         object.__setattr__(self, "allocation", allocation)
         verdict = _text(self.verdict) or "UNKNOWN"
-        blockers = tuple(dict.fromkeys(_text(item) for item in self.blockers if _text(item)))
+        blockers = tuple(
+            dict.fromkeys(
+                (
+                    *(_text(item) for item in self.blockers if _text(item)),
+                    *(_text(item) for item in allocation.blockers if _text(item)),
+                    *metadata_blockers,
+                )
+            )
+        )
         if not confirmation_valid:
             verdict = "UNKNOWN"
             blockers = tuple(dict.fromkeys((*blockers, "INPUT_UNCONFIRMED")))
         if allocation.allocation_ambiguous:
             verdict = UNKNOWN
             blockers = tuple(dict.fromkeys((*blockers, "ALLOCATION_AMBIGUOUS")))
+        if verdict == "PASS" and (
+            blockers
+            or allocation.blockers
+            or allocation.status != "PASS"
+            or not allocation.pass_eligible
+        ):
+            verdict = UNKNOWN
         object.__setattr__(self, "verdict", verdict)
         object.__setattr__(self, "blockers", tuple(_safe_diagnostic(item) for item in blockers))
         object.__setattr__(self, "warnings", tuple(_safe_diagnostic(item) for item in dict.fromkeys(_text(item) for item in self.warnings if _text(item))))
         object.__setattr__(self, "schema_version", _text(self.schema_version) or "decision-snapshot.v2")
         object.__setattr__(self, "engine_version", _text(self.engine_version) or "allocation-engine.v1")
-        object.__setattr__(self, "decisions", _freeze(_publicize_mapping(self.decisions)))
+        decisions = _publicize_mapping(self.decisions)
+        if isinstance(decisions, Mapping) and "overall" in decisions:
+            overall = decisions.get("overall")
+            if isinstance(overall, Mapping):
+                decisions = {
+                    **decisions,
+                    "overall": {
+                        **overall,
+                        "status": verdict,
+                        "state": verdict,
+                        "can_pass": verdict == "PASS",
+                    },
+                }
+            else:
+                decisions = {**decisions, "overall": verdict}
+        object.__setattr__(self, "decisions", _freeze(decisions))
         object.__setattr__(
             self,
             "rule_provenance",
@@ -1050,16 +1213,15 @@ class DecisionSnapshot:
             if decision is not None:
                 waiver_projections.append(_waiver_plain(decision))
         object.__setattr__(self, "waiver_decisions", tuple(_freeze(_publicize_mapping(item)) for item in waiver_projections))
-        search_complete = not allocation.search_exhausted if self.search_complete is None else bool(self.search_complete)
         object.__setattr__(self, "search_complete", search_complete)
-        optimality = _text(self.optimality)
-        if not optimality:
-            optimality = "BOUNDED_NOT_COMPLETE" if not search_complete else "OPTIMAL"
         object.__setattr__(self, "optimality", optimality)
-        allocation_ambiguous = allocation.allocation_ambiguous if self.allocation_ambiguous is None else bool(self.allocation_ambiguous)
         object.__setattr__(self, "allocation_ambiguous", bool(allocation_ambiguous))
         alternatives = () if not confirmation_valid else (self.alternatives or allocation.alternative_allocations)
-        object.__setattr__(self, "alternatives", tuple(_freeze(item) for item in alternatives))
+        object.__setattr__(
+            self,
+            "alternatives",
+            tuple(_freeze(_publicize_mapping(item)) for item in alternatives),
+        )
         object.__setattr__(self, "statistics", _freeze(_publicize_mapping(self.statistics)))
         object.__setattr__(self, "remediation_suggestions", tuple(_text(item) for item in self.remediation_suggestions if _text(item)))
 
@@ -1174,6 +1336,9 @@ def build_decision_snapshot(
         blockers=blockers,
         warnings=allocation.warnings,
         input_confirmation=safe_confirmation,
+        search_complete=source.get("search_complete") if isinstance(source.get("search_complete"), bool) else None,
+        optimality=_text(source.get("optimality")),
+        allocation_ambiguous=source.get("allocation_ambiguous") if isinstance(source.get("allocation_ambiguous"), bool) else None,
         waiver_decisions=tuple(_waiver_plain(item) for item in waiver_decisions),
     )
     # Construct the content address from the exact frozen projection so the
