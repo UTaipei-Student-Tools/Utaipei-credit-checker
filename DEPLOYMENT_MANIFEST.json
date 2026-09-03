@@ -1,5 +1,5 @@
 {
-  "bundle_digest": "sha256:f2a2a7db288cb4d227b91cc541d95130690f747aefec54588c582bd4d453c7b7",
+  "bundle_digest": "sha256:4569dac3da7053b7ee54115c1790d52c9718a706cabd67364a53194c9e0b66cb",
   "files": {
     ".streamlit/config.toml": {
       "bytes": 72,
@@ -114,12 +114,12 @@
       "sha256": "3dc4d96a5b0cf1282e236a578f58f0c59aa90b23538bd0b3aa37f1a1d247ea99"
     },
     "scraper.py": {
-      "bytes": 29620,
-      "sha256": "8ab03572461e306a96af2b3b15d1fe4ebaebf217c9906ed381accb5895c03697"
+      "bytes": 50352,
+      "sha256": "d1c8c65e626b2df696952a4ed96c7b7776ff29a4ca93ba39b13d8ff018cf0574"
     },
     "sidebar.py": {
-      "bytes": 50576,
-      "sha256": "16b3a4596be630bcc1396f31291b81d7246154f628b514cc80d024c5b6ca2dce"
+      "bytes": 53460,
+      "sha256": "40c374df2b6af23385f4bcd51fb5479ac6d52bdc7598a4166ab225152cb4f5e0"
     },
     "snapshot_exports.py": {
       "bytes": 22827,

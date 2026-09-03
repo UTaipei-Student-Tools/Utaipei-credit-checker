@@ -38,6 +38,10 @@ from scraper import (
 )
 from ui_components import render_landing_message
 
+_PORTAL_STATE_KEY = "_utaipei_portal_state"
+_PORTAL_CODE_KEY = "_utaipei_portal_code"
+_PORTAL_STATES = frozenset({"IDLE", "RUNNING", "SUCCESS", "ERROR"})
+
 _SECONDARY_KINDS = {
     "單主修": "none",
     "輔系": "minor",
@@ -139,6 +143,44 @@ def _secondary_kind(program_type):
     """Return the explicit additive role used by ``EvaluationRequest``."""
 
     return _SECONDARY_KINDS.get(str(program_type or "").strip(), "none")
+
+
+def _set_portal_state(state, code=None):
+    """Persist only a stable realtime portal state/code pair."""
+
+    state = str(state or "IDLE").upper()
+    if state not in _PORTAL_STATES:
+        state = "ERROR"
+    if isinstance(code, PortalErrorCode):
+        code = code.value
+    code = str(code or state).upper()
+    if code not in {item.value for item in PortalErrorCode} and code not in _PORTAL_STATES:
+        code = PortalErrorCode.PORTAL_CHANGED.value
+    st.session_state[_PORTAL_STATE_KEY] = state
+    st.session_state[_PORTAL_CODE_KEY] = code
+
+
+def _render_portal_state_marker(ui=None, *, placeholder=None):
+    """Render one hidden marker, updating the same placeholder per run."""
+
+    ui = ui or st
+    state = str(st.session_state.get(_PORTAL_STATE_KEY, "IDLE")).upper()
+    code = str(st.session_state.get(_PORTAL_CODE_KEY, state)).upper()
+    if state not in _PORTAL_STATES:
+        state = "ERROR"
+    markup = (
+        f'<div data-utaipei-portal-state="{escape(state)}" '
+        f'data-utaipei-portal-code="{escape(code)}"></div>'
+    )
+    if placeholder is None:
+        empty = getattr(ui, "empty", None)
+        placeholder = empty() if callable(empty) else ui
+    renderer = getattr(placeholder, "markdown", None)
+    if not callable(renderer) and placeholder is not ui:
+        renderer = getattr(ui, "markdown", None)
+    if callable(renderer):
+        renderer(markup, unsafe_allow_html=True)
+    return placeholder
 
 
 def _settings_signature():
@@ -349,6 +391,8 @@ def _init_session_state():
         st.session_state["_analysis_exported"] = False
     if "_parsed_confirmation" not in st.session_state:
         st.session_state["_parsed_confirmation"] = None
+    if st.session_state.get(_PORTAL_STATE_KEY) not in _PORTAL_STATES:
+        _set_portal_state("IDLE", "IDLE")
     initialize_scope_state(st.session_state)
     _ensure_settings_draft()
 
@@ -452,6 +496,7 @@ def render_setup_panel():
     """
 
     _init_session_state()
+    portal_marker = _render_portal_state_marker(st)
     has_transcript = bool(st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path"))
     if not has_transcript:
         render_landing_message()
@@ -475,7 +520,7 @@ def render_setup_panel():
         st.markdown("---")
         _render_upload_section(st)
         st.markdown("---")
-        _render_login_section(st)
+        _render_login_section(st, portal_marker=portal_marker)
 
     _render_handbook_preview(
         st,
@@ -1057,7 +1102,7 @@ def _render_major_settings(handbook_year, ui=None, draft=None):
         )
 
 
-def _render_login_section(ui=None):
+def _render_login_section(ui=None, *, portal_marker=None):
     """Render a single, clearing credential form on the main page.
 
     The password intentionally has no explicit widget key.  It is passed from
@@ -1098,7 +1143,7 @@ def _render_login_section(ui=None):
             "portal_password_input",
         ):
             st.session_state.pop(legacy_secret_key, None)
-        _attempt_live_scrape(account, password, ui=ui)
+        _attempt_live_scrape(account, password, ui=ui, portal_marker=portal_marker)
 
 
 def _portal_error(ui, message):
@@ -1126,27 +1171,53 @@ def _commit_transcript_result(pdf_content, account):
     )
 
 
-def _attempt_live_scrape(account, password, ui=None):
+def _attempt_live_scrape(
+    account,
+    password,
+    ui=None,
+    *,
+    operation_timeout=None,
+    hard_timeout=None,
+    worker_target=None,
+    portal_marker=None,
+):
     """Fetch and stage one transcript; users must still confirm parsed rows."""
 
     ui = ui or st
     account = str(account or "").strip()
     if not account or not password:
+        _set_portal_state("ERROR", PortalErrorCode.AUTH_REJECTED)
+        _render_portal_state_marker(ui, placeholder=portal_marker)
         _portal_error(ui, "⚠️ 請先填寫學號與密碼；也可以直接上傳歷年成績單 PDF。")
         return
+    _set_portal_state("RUNNING", "RUNNING")
+    portal_marker = _render_portal_state_marker(ui, placeholder=portal_marker)
+    fetch_kwargs = {}
+    if operation_timeout is not None:
+        fetch_kwargs["operation_timeout"] = operation_timeout
+    if hard_timeout is not None:
+        fetch_kwargs["hard_timeout"] = hard_timeout
+    if worker_target is not None:
+        fetch_kwargs["worker_target"] = worker_target
     try:
-        pdf_content = bytes(fetch_transcript(account, password) or b"")
+        pdf_content = bytes(fetch_transcript(account, password, **fetch_kwargs) or b"")
         if not pdf_content.startswith(b"%PDF-"):
             raise PortalError(PortalErrorCode.PDF_NOT_FOUND)
     except PortalError as exc:
+        _set_portal_state("ERROR", exc.code)
+        _render_portal_state_marker(ui, placeholder=portal_marker)
         _portal_error(ui, exc)
         ui.warning("本次成績單未套用；先前已確認資料未變更。")
         return
     except Exception:
+        _set_portal_state("ERROR", PortalErrorCode.PORTAL_CHANGED)
+        _render_portal_state_marker(ui, placeholder=portal_marker)
         _portal_error(ui, "抓取成績單失敗；請確認帳號密碼，或改用 PDF 上傳。")
         ui.warning("本次成績單未套用；先前已確認資料未變更。")
         return
 
     _commit_transcript_result(pdf_content, account)
+    _set_portal_state("SUCCESS", "SUCCESS")
+    _render_portal_state_marker(ui, placeholder=portal_marker)
     st.session_state["collapse_sidebar_flag"] = True
     ui.success("歷年成績單已即時抓取；請檢視並確認辨識結果後再進行學分分析。")
