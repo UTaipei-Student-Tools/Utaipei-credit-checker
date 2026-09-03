@@ -16,7 +16,18 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from decision_snapshot import DecisionSnapshot
-from lieflat_progress_chart import render_f5_tick_rows, render_f7_stacked_rungs, render_f11_tick_gauge
+from lieflat_progress_chart import (
+    render_chart_unavailable,
+    render_f1_rung_bars,
+    render_f5_tick_rows,
+    render_f7_stacked_rungs,
+    render_f11_tick_gauge,
+)
+from snapshot_projection import (
+    PROJECTION_SCHEMA_VERSION,
+    build_chart_datasets,
+    statistics_projection_from_payload,
+)
 
 UNKNOWN = "UNKNOWN"
 PASS = "PASS"
@@ -631,37 +642,6 @@ def _not_attempted_view(option: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
-def _status_distribution(statistics: Mapping[str, Any], buckets: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    candidate = None
-    for key in ("category_status_distribution", "bucket_status_distribution", "status_by_bucket", "by_bucket_status"):
-        if isinstance(statistics.get(key), Mapping):
-            candidate = statistics[key]
-            break
-    rows: list[Mapping[str, Any]] = []
-    if isinstance(candidate, Mapping):
-        for label, values in sorted(candidate.items(), key=lambda item: str(item[0])):
-            if isinstance(values, Mapping):
-                row = {"label": _text(label), **{str(key): value for key, value in values.items()}}
-                rows.append(row)
-            else:
-                rows.append({"label": _text(label), "unknown": values, "total": values})
-    if rows:
-        return tuple(rows)
-    # Effective bucket totals without a status split are deliberately shown as
-    # "待確認" rather than being relabelled as completed credits.
-    return tuple({"label": _text(label), "unknown": value, "total": value} for label, value in sorted(buckets.items(), key=lambda item: str(item[0])))
-
-
-def _total_required(requirements: Sequence[Mapping[str, Any]]) -> str:
-    for requirement in requirements:
-        bucket = _text(requirement.get("bucket")).lower()
-        kind = _text(requirement.get("kind")).lower()
-        name = _text(requirement.get("name")).lower()
-        if bucket in {"total", "graduation_total", "total_graduation"} or "total" in kind or "總" in name:
-            return _text(requirement.get("credits_required"), "")
-    return ""
-
-
 def _summary(payload: Mapping[str, Any], requirements: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
     allocation = payload.get("allocation") if isinstance(payload.get("allocation"), Mapping) else {}
     statistics = payload.get("statistics") if isinstance(payload.get("statistics"), Mapping) else {}
@@ -669,46 +649,101 @@ def _summary(payload: Mapping[str, Any], requirements: Sequence[Mapping[str, Any
     primary = decisions.get("primary_graduation") if isinstance(decisions.get("primary_graduation"), Mapping) else {}
     double = decisions.get("double_major_qualification") if isinstance(decisions.get("double_major_qualification"), Mapping) else {}
     formal_award = decisions.get("formal_double_major_award") if isinstance(decisions.get("formal_double_major_award"), Mapping) else {}
+    minor_application = decisions.get("minor_application_or_qualification") if isinstance(decisions.get("minor_application_or_qualification"), Mapping) else {}
+    minor_coursework = decisions.get("minor_coursework_completion") if isinstance(decisions.get("minor_coursework_completion"), Mapping) else {}
+    formal_minor_award = decisions.get("formal_minor_award") if isinstance(decisions.get("formal_minor_award"), Mapping) else {}
     input_confirmation = payload.get("input_confirmation") if isinstance(payload.get("input_confirmation"), Mapping) else {}
-    by_bucket = statistics.get("by_bucket") if isinstance(statistics.get("by_bucket"), Mapping) else {}
-    total_required = _text(
-        statistics.get("required_graduation_credits")
-        or statistics.get("graduation_requirement_total")
-        or statistics.get("total_required_credits")
-        or _total_required(requirements)
-    )
+    ledger = statistics.get("credit_ledger") if isinstance(statistics.get("credit_ledger"), Mapping) else {}
+    by_bucket = ledger.get("exclusive_by_bucket") if isinstance(ledger.get("exclusive_by_bucket"), Mapping) else statistics.get("by_bucket") if isinstance(statistics.get("by_bucket"), Mapping) else {}
+    progress = statistics.get("program_progress") if isinstance(statistics.get("program_progress"), Mapping) else {}
+    primary_progress = progress.get("primary") if isinstance(progress.get("primary"), Mapping) else {}
+    double_progress = progress.get("double_major") if isinstance(progress.get("double_major"), Mapping) else {}
+    minor_progress = progress.get("minor") if isinstance(progress.get("minor"), Mapping) else {}
+    aggregate = primary_progress.get("aggregate_credit_progress") if isinstance(primary_progress.get("aggregate_credit_progress"), Mapping) else {}
+    observations = statistics.get("course_observations") if isinstance(statistics.get("course_observations"), Mapping) else {}
+    observation_counts = observations.get("counts") if isinstance(observations.get("counts"), Mapping) else statistics.get("course_status_counts", {})
+    remediation = statistics.get("remediation") if isinstance(statistics.get("remediation"), Mapping) else {}
+    directions = remediation.get("directions") if isinstance(remediation.get("directions"), (list, tuple)) else statistics.get("safe_remediation_directions") if isinstance(statistics.get("safe_remediation_directions"), (list, tuple)) else statistics.get("shortest_safe_remediation", ())
+    # The total credit numerator is intentionally unavailable unless the
+    # service identified one explicit, verified aggregate gate.  The legacy
+    # ``_total_required`` name-based fallback was unsafe and is not used.
+    total_required = _text(aggregate.get("required_credits")) if aggregate.get("available") else MANUAL_LABEL
+    primary_status = _text(primary_progress.get("status"), _text(primary.get("status"), UNKNOWN))
+    double_status = _text(double_progress.get("status"), _text(double.get("status"), NOT_APPLICABLE))
+    minor_status = _text(minor_progress.get("status"), _text(minor_application.get("status"), NOT_APPLICABLE))
+    source_earned = _text(ledger.get("source_earned_credits"), _text(statistics.get("source_earned_credits"), _text(allocation.get("source_earned_credits"), MANUAL_LABEL)))
+    counted = _text(ledger.get("exclusive_allocated_credits"), _text(statistics.get("recognized_credits"), _text(allocation.get("recognized_credits"), MANUAL_LABEL)))
+    unallocated = _text(ledger.get("unallocated_credits"), _text(statistics.get("unallocated_credits"), _text(allocation.get("unallocated_credits"), MANUAL_LABEL)))
+    shadow = _text(ledger.get("shared_shadow_credits"), _text(statistics.get("shared_shadow_credits"), MANUAL_LABEL))
+    conservation = ledger.get("conservation", {}).get("ok") if isinstance(ledger.get("conservation"), Mapping) else statistics.get("credit_conservation", allocation.get("credit_conservation"))
+    completed = observations.get("completed_count", statistics.get("completed", MANUAL_LABEL))
+    in_progress = observations.get("in_progress_count", statistics.get("in_progress", MANUAL_LABEL))
+    raw_course_counts = statistics.get("course_counts")
+    if not isinstance(raw_course_counts, Mapping):
+        raw_course_counts = observation_counts
+    course_counts = _plain(raw_course_counts)
+    if not isinstance(course_counts, Mapping):
+        course_counts = {}
+    # Requirement counts are status observations over requirement rows, not
+    # transcript rows.  Preserve any additional explicit status (for example
+    # NOT_APPLICABLE), while always exposing the three v2 gate statuses and a
+    # separately named deficit count.
+    requirement_status_counts = statistics.get("requirement_metrics", {}).get("status_counts", {}) if isinstance(statistics.get("requirement_metrics"), Mapping) else statistics.get("requirement_status_counts", {})
+    raw_requirement_counts = statistics.get("requirement_counts")
+    if not isinstance(raw_requirement_counts, Mapping):
+        raw_requirement_counts = requirement_status_counts
+    requirement_counts = {
+        str(key): value
+        for key, value in raw_requirement_counts.items()
+        if str(key) != "deficit_count"
+    }
+    deficits = statistics.get("requirement_metrics", {}).get("deficits", ()) if isinstance(statistics.get("requirement_metrics"), Mapping) else statistics.get("deficits", ())
+    if "deficit_count" in raw_requirement_counts:
+        requirement_counts["deficit_count"] = raw_requirement_counts["deficit_count"]
+    else:
+        requirement_counts["deficit_count"] = len(_as_sequence(deficits))
+    course_unresolved = course_counts.get(UNKNOWN, MANUAL_LABEL)
+    requirement_pending = requirement_counts.get(UNKNOWN, MANUAL_LABEL)
+    requirement_deficit_count = requirement_counts.get("deficit_count", MANUAL_LABEL)
     return {
         "verdict": _text(payload.get("verdict"), UNKNOWN),
-        "total_graduation_credits": _text(statistics.get("total_graduation_credits"), MANUAL_LABEL),
+        "source_earned_credits": source_earned,
+        "counted_exclusive_credits": counted,
+        "legacy_aliases": {"total_graduation_credits": {"value": source_earned, "deprecated": True, "meaning": "來源成績中的實得學分，不是畢業要求總量"}},
         "required_graduation_credits": total_required or MANUAL_LABEL,
-        "recognized_credits": _text(statistics.get("recognized_credits"), _text(allocation.get("recognized_credits"), MANUAL_LABEL)),
-        "effective_recognized_credits": _text(statistics.get("effective_recognized_credits"), _text(allocation.get("effective_recognized_credits"), MANUAL_LABEL)),
-        "unallocated_credits": _text(statistics.get("unallocated_credits"), _text(allocation.get("unallocated_credits"), MANUAL_LABEL)),
-        "shared_shadow_credits": _text(statistics.get("shared_shadow_credits"), MANUAL_LABEL),
-        "credit_conservation": statistics.get("credit_conservation", allocation.get("credit_conservation")),
-        "primary_status": _text(primary.get("status"), UNKNOWN),
-        "double_major_status": _text(double.get("status"), NOT_APPLICABLE),
+        "recognized_credits": counted,
+        "effective_recognized_credits": counted,
+        "unallocated_credits": unallocated,
+        "shared_shadow_credits": shadow,
+        "credit_conservation": conservation,
+        "primary_status": primary_status,
+        "double_major_status": double_status,
         "formal_double_major_award_status": _text(formal_award.get("status"), NOT_APPLICABLE),
+        "minor_application_status": minor_status,
+        "minor_coursework_status": _text(minor_coursework.get("status"), NOT_APPLICABLE),
+        "formal_minor_award_status": _text(formal_minor_award.get("status"), NOT_APPLICABLE),
+        "minor_credits": _text(statistics.get("minor_credits"), "0"),
         "input_confirmation_state": _text(input_confirmation.get("state"), MANUAL_LABEL),
         "by_bucket": _plain(by_bucket),
-        "requirement_status_counts": _plain(statistics.get("requirement_status_counts", {})),
-        "course_status_counts": _plain(statistics.get("course_status_counts", {})),
-        "completed": statistics.get("completed", MANUAL_LABEL),
-        "in_progress": statistics.get("in_progress", MANUAL_LABEL),
-        "missing": statistics.get(
-            "missing",
-            statistics.get(
-                "deficit_count",
-                len(_as_sequence(statistics.get("deficits"))) if "deficits" in statistics else MANUAL_LABEL,
-            ),
-        ),
-        "unknown": statistics.get("unresolved", statistics.get("unknown", MANUAL_LABEL)),
+        "requirement_status_counts": _plain(requirement_status_counts),
+        "course_status_counts": _plain(observation_counts),
+        "course_counts": course_counts,
+        "requirement_counts": _plain(requirement_counts),
+        "completed": completed,
+        "in_progress": in_progress,
+        "course_unresolved_count": course_unresolved,
+        "requirement_pending_count": requirement_pending,
+        "requirement_deficit_count": requirement_deficit_count,
+        "missing": requirement_deficit_count,
+        "statistics_schema": _text(statistics.get("schema_version"), "decision-statistics.v2"),
+        "statistics_digest": _text(statistics.get("statistics_digest"), MANUAL_LABEL),
+        "aggregate_credit_progress": _plain(aggregate),
         "reallocation": {
             "allocation_status": _text(allocation.get("status"), UNKNOWN),
-            "recognized_credits": _text(allocation.get("recognized_credits"), MANUAL_LABEL),
-            "unallocated_credits": _text(allocation.get("unallocated_credits"), MANUAL_LABEL),
-            "shared_shadow_credits": _text(statistics.get("shared_shadow_credits"), MANUAL_LABEL),
-            "credit_conservation": allocation.get("credit_conservation"),
+            "recognized_credits": counted,
+            "unallocated_credits": unallocated,
+            "shared_shadow_credits": shadow,
+            "credit_conservation": conservation,
             "allocation_ambiguous": allocation.get("allocation_ambiguous"),
             "alternative_count": len(_as_sequence(payload.get("alternatives") or allocation.get("alternative_allocations"))),
         },
@@ -716,9 +751,10 @@ def _summary(payload: Mapping[str, Any], requirements: Sequence[Mapping[str, Any
         "warnings": tuple(_text(item) for item in _as_sequence(payload.get("warnings")) if _text(item)),
         "remediation_suggestions": tuple(
             _text(item)
-            for item in _as_sequence(payload.get("remediation_suggestions") or statistics.get("shortest_safe_remediation"))
+            for item in _as_sequence(payload.get("remediation_suggestions") or directions)
             if _text(item)
         ),
+        "remediation_status": _text(remediation.get("status"), "DIRECTION_ONLY"),
     }
 
 
@@ -727,6 +763,13 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
 
     payload = _snapshot_payload(snapshot)
     plain_payload = _plain(payload)
+    # Normalize legacy snapshots once at the projection boundary.  New
+    # service snapshots already contain decision-statistics.v2; old fixtures
+    # are upgraded from their immutable allocation records without invoking
+    # the allocator.  Every downstream renderer/export receives these exact
+    # statistics and chart datasets.
+    statistics = _plain(statistics_projection_from_payload(plain_payload))
+    plain_payload = {**plain_payload, "statistics": statistics}
     requirements = tuple(item for item in plain_payload.get("requirements", ()) if isinstance(item, Mapping))
     attempts = tuple(item for item in plain_payload.get("attempts", ()) if isinstance(item, Mapping))
     allocation = plain_payload.get("allocation") if isinstance(plain_payload.get("allocation"), Mapping) else {}
@@ -740,15 +783,44 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         for item in _as_sequence(allocation.get("requirement_results"))
         if isinstance(item, Mapping) and _text(item.get("requirement_id"))
     }
+    metric_container = statistics.get("requirement_metrics") if isinstance(statistics.get("requirement_metrics"), Mapping) else {}
+    metric_by_requirement = {
+        _text(item.get("requirement_id")): item
+        for item in _as_sequence(metric_container.get("items"))
+        if isinstance(item, Mapping) and _text(item.get("requirement_id"))
+    }
     alternatives = tuple(plain_payload.get("alternatives") or allocation.get("alternative_allocations") or ())
     provenance = tuple(item for item in plain_payload.get("rule_provenance", ()) if isinstance(item, Mapping))
     requirement_views: list[Mapping[str, Any]] = []
     for requirement in requirements:
         requirement_id = _text(requirement.get("requirement_id"))
-        result = result_by_requirement.get(requirement_id, {})
+        source_result = result_by_requirement.get(requirement_id, {})
+        metric = metric_by_requirement.get(requirement_id, {})
+        result = dict(source_result) if isinstance(source_result, Mapping) else {}
+        # Requirement cards must consume the validated metric status.  The
+        # original allocator status remains available as ``observed_status``
+        # for audit, but cannot leak a PASS after conservation failed.
+        for key in (
+            "required_credits",
+            "exclusive_credits",
+            "shared_shadow_credits",
+            "effective_credits",
+            "deficit",
+            "status",
+            "coverage_state",
+            "evidence_state",
+            "waived",
+        ):
+            if key in metric:
+                result[key] = metric[key]
+        observed_status = _text(metric.get("observed_status"), _text(source_result.get("status"), UNKNOWN))
+        status_authoritative = bool(metric.get("status_authoritative", True))
+        status_reason_code = _text(metric.get("status_reason_code"))
         status = _text(result.get("status"), UNKNOWN)
         requirement_provenance = _provenance_view(_provenance_for(requirement_id, provenance))
         blockers = tuple(_text(item) for item in _as_sequence(result.get("blockers")) if _text(item))
+        if not status_authoritative and status_reason_code and status_reason_code not in blockers:
+            blockers = (*blockers, status_reason_code)
         eligible_courses = _eligible_course_options(requirement)
         choice_condition = _requirement_condition(requirement)
         coverage_state = _text(result.get("coverage_state"), _text(requirement.get("coverage_state"), UNKNOWN))
@@ -823,6 +895,9 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
                 "deficit": _text(result.get("deficit"), MANUAL_LABEL),
                 "status": status,
                 "status_label": _status_label(status),
+                "observed_status": observed_status,
+                "status_authoritative": status_authoritative,
+                "status_reason_code": status_reason_code,
                 "coverage_state": coverage_state,
                 "evidence_state": evidence_state,
                 "waived": bool(result.get("waived", requirement.get("waiver", False))),
@@ -843,7 +918,16 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         )
 
     summary = _summary(plain_payload, requirements)
-    statistics = plain_payload.get("statistics") if isinstance(plain_payload.get("statistics"), Mapping) else {}
+    # Keep the chart projection immutable and structurally identical to the
+    # statistics-only projection; exporters can thaw it through their one
+    # privacy serializer without rebuilding any dataset.
+    chart_datasets = build_chart_datasets(statistics, snapshot_id=_text(plain_payload.get("snapshot_id")))
+    presentation_warnings = tuple(
+        _text(item)
+        for item in chart_datasets.get("presentation_warnings", ())
+        if _text(item)
+    )
+    summary = {**summary, "presentation_warnings": presentation_warnings}
     context_request = plain_payload.get("request") if isinstance(plain_payload.get("request"), Mapping) else {}
     context = {
         key: context_request[key]
@@ -853,8 +937,10 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
             "target_curriculum_id",
             "target_curriculum_version",
             "target_curriculum_version_candidate",
+            "target_curriculum_year",
             "target_program",
             "target_track",
+            "secondary_kind",
             "application_term",
             "application_year",
             "application_semester",
@@ -871,12 +957,14 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         if masked_student_id not in (None, ""):
             context["masked_student_id"] = masked_student_id
     return {
-        "_projection_schema": "snapshot-presentation.v1",
+        "_projection_schema": PROJECTION_SCHEMA_VERSION,
         "_source": "DecisionSnapshot",
         "snapshot_id": _text(plain_payload.get("snapshot_id")),
         "_snapshot_id": _text(plain_payload.get("snapshot_id")),
         "evaluated_at": _text(plain_payload.get("evaluated_at")),
         "verdict": _text(plain_payload.get("verdict"), UNKNOWN),
+        "statistics_schema": _text(summary.get("statistics_schema"), "decision-statistics.v2"),
+        "statistics_digest": _text(summary.get("statistics_digest"), MANUAL_LABEL),
         "context": context,
         "summary": summary,
         "decisions": _plain(plain_payload.get("decisions", {})),
@@ -886,6 +974,10 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         "allocation": _plain(allocation),
         "alternatives": _plain(alternatives),
         "statistics": _plain(statistics),
+        "course_counts": _plain(statistics.get("course_counts", summary.get("course_counts", {}))),
+        "requirement_counts": _plain(statistics.get("requirement_counts", summary.get("requirement_counts", {}))),
+        "chart_datasets": chart_datasets,
+        "presentation_warnings": presentation_warnings,
         "rule_provenance": _provenance_view(provenance),
         "blockers": tuple(summary["blockers"]),
         "warnings": tuple(summary["warnings"]),
@@ -965,6 +1057,12 @@ def _requirement_markup(requirement: Mapping[str, Any]) -> str:
         if isinstance(item, Mapping)
     ) or f"<li>{_escape(MANUAL_LABEL)}</li>"
     status = _text(requirement.get("status"), UNKNOWN)
+    validation_note = (
+        f'<p class="snapshot-manual-note">正式判定：待確認（原始觀察狀態：{_escape(requirement.get("observed_status"))}；'
+        f'驗證原因：{_escape(requirement.get("status_reason_code"))}）</p>'
+        if requirement.get("status_authoritative") is False
+        else ""
+    )
     return (
         f'<details class="snapshot-requirement-expander" data-requirement-id="{_escape(requirement.get("requirement_id"))}">'
         '<summary><span class="snapshot-requirement-title">'
@@ -980,6 +1078,7 @@ def _requirement_markup(requirement: Mapping[str, Any]) -> str:
         f'<div><dt>尚缺</dt><dd>{_escape(requirement.get("deficit"))}</dd></div>'
         f'<div><dt>覆蓋／證據</dt><dd>{_escape(requirement.get("coverage_state"))}／{_escape(requirement.get("evidence_state"))}</dd></div>'
         '</dl>'
+        f'{validation_note}'
         f'<p class="snapshot-manual-note">{_escape(requirement.get("manual_confirmation"))}</p>'
         f'<p class="snapshot-blocker-note">阻塞：{_escape("；".join(_text(item) for item in _as_sequence(requirement.get("blockers"))) or "無")}</p>'
         '<h4>官方可選／指定科目</h4><ul class="snapshot-course-options">'
@@ -999,25 +1098,49 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     summary = view["summary"]
     requirements = tuple(item for item in view["requirements"] if isinstance(item, Mapping))
     charts_source = f"DecisionSnapshot {_text(view.get('snapshot_id'))}"
-    threshold_rows = [
-        {
-            "label": item.get("name"),
-            "completed": item.get("effective_credits"),
-            "required": item.get("required_credits"),
-            "unit": "學分",
-        }
-        for item in requirements
-    ]
-    # F5 is a threshold overview, not the source of truth.  The complete
-    # expandable requirement list below remains the authoritative detail.
-    f5 = render_f5_tick_rows(threshold_rows, source=charts_source, title="畢業門檻進度（F5 Tick Rows）")
-    required_total = summary.get("required_graduation_credits")
-    completed_total = summary.get("effective_recognized_credits")
-    f11 = render_f11_tick_gauge(completed_total, required_total, source=charts_source, title="總畢業學分完成度")
-    f7 = render_f7_stacked_rungs(
-        _status_distribution(view.get("statistics", {}), summary.get("by_bucket", {})),
-        source=charts_source,
-        title="分類學分狀態分布（F7 Stacked Rungs）",
+    chart_datasets = view.get("chart_datasets") if isinstance(view.get("chart_datasets"), Mapping) else {}
+    f5_dataset = chart_datasets.get("f5") if isinstance(chart_datasets.get("f5"), Mapping) else {}
+    f5_groups = f5_dataset.get("groups") if isinstance(f5_dataset.get("groups"), (list, tuple)) else ()
+    f5 = (
+        "".join(
+            render_f5_tick_rows(
+                group.get("rows", ()),
+                source=charts_source,
+                title="畢業門檻進度",
+            )
+            for group in f5_groups
+            if isinstance(group, Mapping)
+        )
+        if f5_dataset.get("available")
+        else render_chart_unavailable("F5", f5_dataset.get("reason_code", "REQUIREMENT_METRICS_UNAVAILABLE"), source=charts_source, title="畢業門檻進度暫不可用")
+    )
+    f1_dataset = chart_datasets.get("f1") if isinstance(chart_datasets.get("f1"), Mapping) else {}
+    f1 = (
+        render_f1_rung_bars(f1_dataset.get("rows", ()), source=charts_source, title="正式配置學分分布")
+        if f1_dataset.get("available")
+        else render_chart_unavailable("F1", f1_dataset.get("reason_code", "EXCLUSIVE_CREDIT_LEDGER_EMPTY"), source=charts_source, title="正式配置學分分布暫不可用")
+    )
+    f7_dataset = chart_datasets.get("f7") if isinstance(chart_datasets.get("f7"), Mapping) else {}
+    f7 = (
+        render_f7_stacked_rungs(
+            f7_dataset.get("rows", ()),
+            mode="gate_counts",
+            source=charts_source,
+            title="判定閘門狀態分布",
+        )
+        if f7_dataset.get("available")
+        else render_chart_unavailable("F7", f7_dataset.get("reason_code", "GATE_COUNTS_UNAVAILABLE"), source=charts_source, title="判定閘門狀態分布暫不可用")
+    )
+    f11_dataset = chart_datasets.get("f11") if isinstance(chart_datasets.get("f11"), Mapping) else {}
+    f11 = (
+        render_f11_tick_gauge(
+            f11_dataset.get("completed"),
+            f11_dataset.get("required"),
+            source=charts_source,
+            title="總畢業學分完成度",
+        )
+        if f11_dataset.get("available")
+        else render_chart_unavailable("F11", f11_dataset.get("reason_code", "AGGREGATE_GATE_UNAVAILABLE"), source=charts_source, title="總畢業學分完成度暫不可用")
     )
     decision_rows = []
     for key, decision in (view.get("decisions") or {}).items():
@@ -1042,6 +1165,7 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     ) or f'<li>{_escape(MANUAL_LABEL)}</li>'
     blocker_markup = "".join(f"<li>{_escape(item)}</li>" for item in summary.get("blockers", ())) or "<li>無</li>"
     warning_markup = "".join(f"<li>{_escape(item)}</li>" for item in summary.get("warnings", ())) or "<li>無</li>"
+    presentation_warning_markup = "".join(f"<li>{_escape(item)}</li>" for item in summary.get("presentation_warnings", ())) or "<li>無</li>"
     remediation_markup = "".join(f"<li>{_escape(item)}</li>" for item in summary.get("remediation_suggestions", ())) or f"<li>{_escape(MANUAL_LABEL)}</li>"
     context_markup = " · ".join(f"{_escape(key)}：{_escape(value)}" for key, value in (view.get("context") or {}).items()) or _escape(MANUAL_LABEL)
     css = """
@@ -1116,23 +1240,32 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     """
     snapshot_id = _escape(view.get("snapshot_id"))
     total_detail = f"要求總量：{summary.get('required_graduation_credits')}"
-    progress_detail = f"{summary.get('completed')}／{summary.get('in_progress')}"
-    deficit_detail = f"{summary.get('missing')}／{summary.get('unknown')}"
+    course_counts = summary.get("course_counts") if isinstance(summary.get("course_counts"), Mapping) else {}
+    requirement_counts = summary.get("requirement_counts") if isinstance(summary.get("requirement_counts"), Mapping) else {}
+    progress_detail = f"{course_counts.get(PASS, summary.get('completed'))}／{course_counts.get('IN_PROGRESS', summary.get('in_progress'))}"
+    deficit_detail = f"{requirement_counts.get('deficit_count', summary.get('missing'))}／{requirement_counts.get(UNKNOWN, summary.get('requirement_pending_count', MANUAL_LABEL))}"
+    minor_detail = f"已配置 {summary.get('minor_credits')} 學分"
+    statistics_schema = _escape(summary.get("statistics_schema"))
+    statistics_digest = _escape(summary.get("statistics_digest"))
     return (
-        f'<section id="utaipei-snapshot-report" class="snapshot-report" data-snapshot-id="{snapshot_id}" data-verdict="{_escape(view.get("verdict"))}">'
+        f'<section id="utaipei-snapshot-report" class="snapshot-report" data-snapshot-id="{snapshot_id}" data-verdict="{_escape(view.get("verdict"))}" data-statistics-schema="{statistics_schema}" data-statistics-digest="{statistics_digest}">'
         f'<style>{css}</style><span id="utaipei-analysis-state" data-analysis-active="true" data-exported="false" hidden></span>'
         '<header class="snapshot-header"><div><h1>北市大畢業通</h1>'
         f'<p class="snapshot-kicker">DecisionSnapshot · {_escape(view.get("snapshot_id"))} · 評估時間 {_escape(view.get("evaluated_at"))}</p></div>'
         f'<span class="snapshot-badge {_status_class(view.get("verdict"))}">{_escape(view.get("verdict"))}</span></header>'
         f'<p class="snapshot-context">{context_markup}</p>'
         '<div class="snapshot-metrics">'
-        f'{_metric("總畢業學分", summary.get("total_graduation_credits"), total_detail)}'
+        f'{_metric("來源實得學分", summary.get("source_earned_credits"), "不是畢業要求總量")}'
+        f'{_metric("正式配置學分", summary.get("counted_exclusive_credits"), total_detail)}'
         f'{_metric("主修完成度", summary.get("primary_status"))}'
         f'{_metric("雙主修完成度", summary.get("double_major_status"))}'
         f'{_metric("正式授予雙主修", summary.get("formal_double_major_award_status"))}'
+        f'{_metric("輔系申請／資格", summary.get("minor_application_status"))}'
+        f'{_metric("輔系課程完成度", summary.get("minor_coursework_status"), minor_detail)}'
+        f'{_metric("正式授予輔系", summary.get("formal_minor_award_status"))}'
         f'{_metric("資料確認狀態", summary.get("input_confirmation_state"))}'
-        f'{_metric("已完成／修習中", progress_detail)}'
-        f'{_metric("尚缺／待確認", deficit_detail)}'
+        f'{_metric("課程列數（已完成／修習中）", progress_detail)}'
+        f'{_metric("要求項目數（尚缺／待確認）", deficit_detail)}'
         '</div>'
         '<section class="snapshot-card"><h2>判定摘要</h2><ul class="snapshot-decision-list">'
         f'{decision_markup}</ul></section>'
@@ -1142,7 +1275,8 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         '</div></section>'
         '<section class="snapshot-card"><h2>Lieflat Charts</h2>'
         f'<details class="snapshot-chart-details"><summary>總畢業學分完成度圖表</summary>{f11}</details>'
-        f'<details class="snapshot-chart-details"><summary>分類狀態分布圖表</summary>{f7}</details>'
+        f'<details class="snapshot-chart-details"><summary>正式配置學分分布圖表</summary>{f1}</details>'
+        f'<details class="snapshot-chart-details"><summary>判定閘門狀態分布圖表</summary>{f7}</details>'
         f'<details class="snapshot-chart-details"><summary>門檻進度與精確數字</summary>{f5}</details>'
         '</section>'
         '<section><h2>畢業要求與課程配置</h2>'
@@ -1150,7 +1284,8 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         '</section>'
         '<section class="snapshot-card"><h2>畢業阻塞項目</h2><ul class="snapshot-simple-list">'
         f'{blocker_markup}</ul><h3>警告</h3><ul class="snapshot-simple-list">{warning_markup}</ul>'
-        '<h3>最短安全補修建議</h3><ul class="snapshot-simple-list">'
+        f'<h3>呈現提醒</h3><ul class="snapshot-simple-list">{presentation_warning_markup}</ul>'
+        f'<h3>安全補修方向（{_escape(summary.get("remediation_status"))}）</h3><ul class="snapshot-simple-list">'
         f'{remediation_markup}</ul></section>'
         '</section>'
     )

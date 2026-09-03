@@ -10,11 +10,11 @@ import streamlit as st
 
 from audit_export import audit_csv_bytes, audit_json_bytes, dataframe_csv_bytes
 from handbook_rules import normalize_course_name
+from input_confirmation import mask_person_name, mask_student_id
 from lieflat_progress_chart import render_progress_chart
 from policy_audit import UNKNOWN
 from schedule_planner import render_schedule_planner
 from ui_components import draw_premium_progress, format_credit
-
 
 _STATUS_LABELS = {
     "SATISFIED": "已滿足",
@@ -58,6 +58,8 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
     rules_meta = report.get("rules_meta", {})
     handbook_year = str(report.get("handbook_year") or rules_meta.get("version") or "未辨識")
     safe_source = escape(str(source_label or "未知來源"))
+    safe_name = escape(mask_person_name(student_info.get("name")))
+    safe_student_id = escape(mask_student_id(student_info.get("student_id")))
     safe_handbook = escape(handbook_year)
     safe_rule_source = escape(str(rules_meta.get("evidence_file") or rules_meta.get("source_file") or "未標示"))
     mode_tag = f"<span class='source-badge'>{safe_handbook} 學年度手冊</span>"
@@ -80,8 +82,8 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
             <section class="info-card" aria-label="學生資訊">
                 <div class="eyebrow">學生資訊</div>
                 <div class="meta-value info-value">
-                    姓名：<strong>{escape(str(student_info.get("name") or "未辨識"))}</strong><br>
-                    學號：<strong>{escape(str(student_info.get("student_id") or "未辨識"))}</strong><br>
+                    姓名：<strong>{safe_name}</strong><br>
+                    學號：<strong>{safe_student_id}</strong><br>
                     系所：<strong>{escape(str(student_info.get("department") or "未辨識"))}</strong><br>
                     入學年月：<strong>{escape(str(student_info.get("admission_year") or "未辨識"))}</strong><br>
                     列印日期：<strong>{escape(str(student_info.get("print_date") or "未辨識"))}</strong>
@@ -709,7 +711,6 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
     df_full.insert(1, "category", categories)
     df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
     df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
-    csv_bytes = dataframe_csv_bytes(df_full)
 
     html_str = ["<section class='overview-grid' aria-label='分類學分統計'>"]
 

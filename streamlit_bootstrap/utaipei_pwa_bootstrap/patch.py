@@ -18,8 +18,12 @@ from pathlib import Path
 from types import ModuleType
 
 EXPECTED_STREAMLIT_VERSION = "1.57.0"
+BOOTSTRAP_BUILD_VERSION = "0.2.0"
 PWA_MARKER_BEGIN = "<!-- UTAIPEI_PWA_V2_BEGIN -->"
 PWA_MARKER_END = "<!-- UTAIPEI_PWA_V2_END -->"
+SERVICE_WORKER_MARKER_BEGIN = "/* UTAIPEI_SERVICE_WORKER_V2_BEGIN */"
+SERVICE_WORKER_MARKER_END = "/* UTAIPEI_SERVICE_WORKER_V2_END */"
+SERVICE_WORKER_FILENAME = "service-worker.js"
 
 _TAG_RE = re.compile(r"<(?P<tag>link|meta)\b[^>]*>", re.IGNORECASE)
 _TITLE_RE = re.compile(r"<title\b[^>]*>.*?</title>", re.IGNORECASE | re.DOTALL)
@@ -28,6 +32,93 @@ _ATTR_RE = re.compile(
     re.IGNORECASE,
 )
 _SERVICE_WORKER_REGISTER_RE = re.compile(r"\bserviceWorker\s*\.\s*register\b")
+_MANAGED_SERVICE_WORKER_SCRIPT_RE = re.compile(
+    r"[ \t]*<script\b[^>]*\bid\s*=\s*(?:\"ut-pwa-service-worker\"|'ut-pwa-service-worker')[^>]*>.*?</script>[ \t]*(?:\r?\n)?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+_SERVICE_WORKER_TEMPLATE = r"""/* UTAIPEI_SERVICE_WORKER_V2_BEGIN */
+'use strict';
+
+const BUILD_VERSION = '__UTAIPEI_BUILD_VERSION__';
+const CACHE_PREFIX = 'utaipei-graduation-static-';
+const CACHE_NAME = `${CACHE_PREFIX}${BUILD_VERSION}`;
+const STATIC_SHELL_ASSETS = new Set([
+  '/app/static/manifest-v2.webmanifest',
+  '/app/static/icons/ut-graduation-v2-32.png',
+  '/app/static/icons/ut-graduation-v2-180.png',
+  '/app/static/icons/ut-graduation-v2-192.png',
+  '/app/static/icons/ut-graduation-v2-512.png'
+]);
+
+const isPublicShellRequest = (request) => {
+  if (request.method !== 'GET' || request.mode === 'navigate') return false;
+  const url = new URL(request.url);
+  return url.origin === self.location.origin && !url.search && STATIC_SHELL_ASSETS.has(url.pathname);
+};
+
+const clearOwnedStaticCaches = async () => {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter((key) => key.startsWith(CACHE_PREFIX)).map((key) => caches.delete(key)));
+};
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll([...STATIC_SHELL_ASSETS])));
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys
+      .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+      .map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('message', (event) => {
+  const type = event.data && event.data.type;
+  if (type === 'SKIP_WAITING') {
+    event.waitUntil(self.skipWaiting());
+    return;
+  }
+  if (type === 'CHECK_VERSION') {
+    if (event.source && typeof event.source.postMessage === 'function') {
+      event.source.postMessage({ type: 'PWA_VERSION', version: BUILD_VERSION });
+    }
+    return;
+  }
+  if (type === 'CLEAR_STATIC_CACHES') {
+    event.waitUntil(clearOwnedStaticCaches().then(() => {
+      if (event.source && typeof event.source.postMessage === 'function') {
+        event.source.postMessage({ type: 'STATIC_CACHES_CLEARED', version: BUILD_VERSION });
+      }
+    }));
+  }
+});
+
+self.addEventListener('fetch', (event) => {
+  if (!isPublicShellRequest(event.request)) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    try {
+      const response = await fetch(event.request, { cache: 'no-store' });
+      if (response.ok) await cache.put(event.request, response.clone());
+      return response;
+    } catch (error) {
+      const cached = await cache.match(event.request);
+      if (cached) return cached;
+      throw error;
+    }
+  })());
+});
+/* UTAIPEI_SERVICE_WORKER_V2_END */
+"""
+
+SERVICE_WORKER_SOURCE = _SERVICE_WORKER_TEMPLATE.replace(
+    "__UTAIPEI_BUILD_VERSION__", BOOTSTRAP_BUILD_VERSION
+)
 
 
 class BootstrapError(RuntimeError):
@@ -80,6 +171,7 @@ def _remove_existing_pwa_metadata(html: str) -> str:
         re.IGNORECASE | re.DOTALL,
     )
     html = managed_block.sub("", html)
+    html = _MANAGED_SERVICE_WORKER_SCRIPT_RE.sub("", html)
 
     def remove_stale_tag(match: re.Match[str]) -> str:
         tag = match.group(0)
@@ -100,7 +192,7 @@ def canonical_metadata_block() -> str:
     return f"""    {PWA_MARKER_BEGIN}
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover" />
     <meta name="application-name" content="北市大畢業通" />
-    <meta name="theme-color" content="#081f5c" />
+    <meta name="theme-color" content="#1E3A5F" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
@@ -109,6 +201,17 @@ def canonical_metadata_block() -> str:
     <link rel="apple-touch-icon" sizes="180x180" type="image/png" href="/app/static/icons/ut-graduation-v2-180.png" />
     <link rel="icon" sizes="32x32" type="image/png" href="/app/static/icons/ut-graduation-v2-32.png" />
     <title>北市大畢業通</title>
+    <script id="ut-pwa-service-worker">
+    (() => {{
+      if (!('serviceWorker' in navigator)) return;
+      window.addEventListener('load', () => {{
+        navigator.serviceWorker.register('/service-worker.js', {{
+          scope: '/',
+          updateViaCache: 'none'
+        }}).catch(() => {{}});
+      }}, {{ once: true }});
+    }})();
+    </script>
     {PWA_MARKER_END}"""
 
 
@@ -149,8 +252,14 @@ def patch_html(html: str) -> str:
         raise BootstrapError("PWA patch did not produce exactly one manifest link")
     if patched.count('rel="apple-touch-icon" sizes="180x180"') != 1:
         raise BootstrapError("PWA patch did not produce exactly one Apple icon link")
-    if _SERVICE_WORKER_REGISTER_RE.search(patched):
-        raise BootstrapError("Service-worker registration is not permitted")
+    if len(_SERVICE_WORKER_REGISTER_RE.findall(patched)) != 1:
+        raise BootstrapError("PWA patch must contain exactly one service-worker registration")
+    if patched.count("id=\"ut-pwa-service-worker\"") != 1:
+        raise BootstrapError("PWA patch must contain exactly one managed service-worker script")
+    if "register('/service-worker.js'" not in patched:
+        raise BootstrapError("PWA patch must register the root service-worker path")
+    if "scope: '/'" not in patched or "updateViaCache: 'none'" not in patched:
+        raise BootstrapError("PWA patch must request an uncached root scope")
     return patched
 
 
@@ -159,6 +268,48 @@ def _is_regular_file(path: Path) -> bool:
         return stat.S_ISREG(os.lstat(path).st_mode)
     except OSError:
         return False
+
+
+def _is_regular_directory(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def validate_static_root(package_root: Path, static_root: Path) -> Path:
+    """Validate the installed Streamlit static directory without following links."""
+
+    package_root = Path(package_root)
+    static_root = Path(static_root)
+    if package_root.is_symlink() or static_root.is_symlink():
+        raise BootstrapError("Streamlit package and static directory must not be symlinks")
+    if not _is_regular_directory(package_root) or not _is_regular_directory(static_root):
+        raise BootstrapError("Streamlit package and static paths must be regular directories")
+
+    # Check every existing component between the package and static roots. A
+    # symlinked ancestor can otherwise resolve inside the package and evade a
+    # check made only on the final directory.
+    current = static_root
+    while True:
+        if current.is_symlink():
+            raise BootstrapError("Streamlit static path contains a symlink")
+        if current == package_root:
+            break
+        parent = current.parent
+        if parent == current:
+            raise BootstrapError("Streamlit static directory is outside the installed package")
+        current = parent
+
+    try:
+        package_resolved = package_root.resolve(strict=True)
+        static_resolved = static_root.resolve(strict=True)
+        static_resolved.relative_to(package_resolved)
+    except (OSError, ValueError) as exc:
+        raise BootstrapError("Streamlit static directory is outside the installed package") from exc
+    if static_resolved == package_resolved:
+        raise BootstrapError("Streamlit static directory must be below the installed package")
+    return static_root
 
 
 def validate_index_path(package_root: Path, index_path: Path) -> Path:
@@ -259,6 +410,97 @@ def _write_temp_bytes(directory: Path, filename: str, data: bytes, mode: int) ->
         raise
 
 
+def _verify_service_worker(worker_path: Path, expected_bytes: bytes) -> None:
+    if worker_path.is_symlink() or not _is_regular_file(worker_path):
+        raise BootstrapError("Installed service-worker.js must be a regular non-symlink file")
+    try:
+        observed = worker_path.read_bytes()
+    except OSError as exc:
+        raise BootstrapError("Unable to read installed service-worker.js") from exc
+    if observed != expected_bytes:
+        raise BootstrapError("Service Worker installation verification failed")
+    try:
+        decoded = observed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BootstrapError("Service Worker is not valid UTF-8") from exc
+    if not decoded.startswith(SERVICE_WORKER_MARKER_BEGIN) or not decoded.rstrip().endswith(
+        SERVICE_WORKER_MARKER_END
+    ):
+        raise BootstrapError("Service Worker markers are missing")
+
+
+def install_service_worker(static_root: Path, *, package_root: Path | None = None) -> bool:
+    """Install the managed root-scope worker into a validated Streamlit static root.
+
+    An existing file is replaced only when it carries this bootstrap's audit
+    markers. Unknown files, links, and non-regular filesystem objects are
+    treated as collisions and stop startup rather than being overwritten.
+    """
+
+    static_root = Path(static_root)
+    package_root = Path(package_root) if package_root is not None else static_root.parent
+    static_root = validate_static_root(package_root, static_root)
+    worker_path = static_root / SERVICE_WORKER_FILENAME
+    expected_bytes = SERVICE_WORKER_SOURCE.encode("utf-8")
+
+    has_existing = os.path.lexists(worker_path)
+    original_bytes: bytes | None = None
+    original_mode = 0o644
+    if has_existing:
+        if worker_path.is_symlink() or not _is_regular_file(worker_path):
+            raise BootstrapError("Existing service-worker.js is not a regular non-symlink file")
+        try:
+            original_bytes = worker_path.read_bytes()
+            original_mode = stat.S_IMODE(os.lstat(worker_path).st_mode)
+        except OSError as exc:
+            raise BootstrapError("Unable to inspect existing service-worker.js") from exc
+        if original_bytes == expected_bytes:
+            _verify_service_worker(worker_path, expected_bytes)
+            return False
+        try:
+            original_text = original_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BootstrapError("Existing service-worker.js is not valid UTF-8") from exc
+        if SERVICE_WORKER_MARKER_BEGIN not in original_text or SERVICE_WORKER_MARKER_END not in original_text:
+            raise BootstrapError("Unknown service-worker.js collision detected")
+
+    temp_path: Path | None = None
+    replaced = False
+    try:
+        temp_path = _write_temp_bytes(static_root, SERVICE_WORKER_FILENAME, expected_bytes, original_mode)
+        os.replace(temp_path, worker_path)
+        temp_path = None
+        replaced = True
+        _verify_service_worker(worker_path, expected_bytes)
+        return True
+    except Exception:
+        if replaced:
+            rollback_path: Path | None = None
+            try:
+                if original_bytes is None:
+                    # Only remove the exact managed file we just committed.
+                    if not worker_path.is_symlink() and _is_regular_file(worker_path):
+                        worker_path.unlink()
+                else:
+                    rollback_path = _write_temp_bytes(
+                        static_root,
+                        SERVICE_WORKER_FILENAME,
+                        original_bytes,
+                        original_mode,
+                    )
+                    os.replace(rollback_path, worker_path)
+                    rollback_path = None
+            except Exception as rollback_error:
+                raise BootstrapError("Service Worker installation failed and rollback was unsuccessful") from rollback_error
+            finally:
+                if rollback_path is not None:
+                    rollback_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def _verify_committed(index_path: Path, expected_bytes: bytes) -> None:
     validate_index_path(index_path.parent.parent, index_path)
     observed = index_path.read_bytes()
@@ -322,7 +564,11 @@ def patch_installed_streamlit_index(
     """Version-check, resolve, and atomically patch the installed index."""
 
     index_path = resolve_streamlit_index(streamlit_module, expected_version=expected_version)
-    return patch_index_file(index_path)
+    # Install the worker before mutating HTML. This makes a foreign worker
+    # collision fail before the startup document is changed.
+    worker_changed = install_service_worker(index_path.parent, package_root=index_path.parent.parent)
+    index_changed = patch_index_file(index_path)
+    return worker_changed or index_changed
 
 
 def run_bootstrap(own_sitecustomize_file: Path | None = None) -> bool:
@@ -340,15 +586,22 @@ def run_bootstrap(own_sitecustomize_file: Path | None = None) -> bool:
 
 __all__ = [
     "EXPECTED_STREAMLIT_VERSION",
+    "BOOTSTRAP_BUILD_VERSION",
     "PWA_MARKER_BEGIN",
     "PWA_MARKER_END",
+    "SERVICE_WORKER_MARKER_BEGIN",
+    "SERVICE_WORKER_MARKER_END",
+    "SERVICE_WORKER_FILENAME",
+    "SERVICE_WORKER_SOURCE",
     "BootstrapError",
     "canonical_metadata_block",
     "find_competing_sitecustomize",
+    "install_service_worker",
     "patch_html",
     "patch_index_file",
     "patch_installed_streamlit_index",
     "resolve_streamlit_index",
     "run_bootstrap",
+    "validate_static_root",
     "validate_index_path",
 ]

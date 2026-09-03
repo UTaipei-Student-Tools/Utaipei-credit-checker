@@ -42,17 +42,21 @@ _SAFE_REQUEST_KEYS = {
     "target_track",
     "target_curriculum_version",
     "target_curriculum_version_candidate",
+    "target_curriculum_year",
     "primary_program",
     "primary_track",
     "program",
     "program_type",
+    "secondary_kind",
     "application_status",
     "school_approval_status",
     "formal_qualification_status",
     "formal_award_status",
+    "input_warning_codes",
     "evaluated_at",
     "request_version",
 }
+_SAFE_INPUT_WARNING_CODES = frozenset({"SCHEDULE_SCOPE_MISMATCH", "SCHEDULE_SCOPE_UNVERIFIED"})
 _EVIDENCE_ID_KEYS = {
     "evidence_id",
     "evidence_record_id",
@@ -584,7 +588,12 @@ def _safe_request(request: Mapping[str, Any], evaluated_at: str) -> MappingProxy
     for source in source_maps:
         for key in _SAFE_REQUEST_KEYS:
             value = source.get(key)
-            if isinstance(value, _SCALAR_TYPES) and not isinstance(value, (bytes, bytearray)):
+            if key == "input_warning_codes":
+                if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                    result[key] = tuple(
+                        code for item in value if (code := _text(item)) in _SAFE_INPUT_WARNING_CODES
+                    )
+            elif isinstance(value, _SCALAR_TYPES) and not isinstance(value, (bytes, bytearray)):
                 result[key] = str(value) if isinstance(value, Decimal) else value
     result["evaluated_at"] = evaluated_at
 

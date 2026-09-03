@@ -51,9 +51,194 @@
       }
     },
     "free_elective": {"total_req": 15},
-    "physical_education": {"semesters_required": 4}
+  "physical_education": {"semesters_required": 4}
   },
   "handbooks": {
+    "111": {
+      "_meta": {
+        "version": "111",
+        "academic_year": "111",
+        "college": "理學院",
+        "source_file": "3-理學院.pdf",
+        "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+        "last_updated": "2026-09-01",
+        "total_graduation_credits": 128,
+        "verification": "官方 PDF 表格與頁面影像逐頁核對；課名／學分僅採可辨識列項",
+        "evidence_state": "VERIFIED",
+        "verification_status": "VERIFIED",
+        "coverage_state": "PARTIAL",
+        "automation_sufficiency": "PARTIAL",
+        "source_pages": {
+          "earth_life": "PDF pp.25-39（印刷 pp.24-38）",
+          "apc": "PDF pp.3-19（印刷 pp.2-18）",
+          "math": "PDF pp.65-82（印刷 pp.64-81）",
+          "cs": "PDF pp.113-122（印刷 pp.112-121）"
+        },
+        "coverage_by_scope": {
+          "primary.earth": "PARTIAL",
+          "primary.apc": "PARTIAL",
+          "primary.math": "PARTIAL",
+          "primary.cs": "PARTIAL",
+          "minor.earth": "PARTIAL",
+          "minor.apc": "PARTIAL",
+          "minor.math": "COMPLETE",
+          "minor.cs": "PARTIAL",
+          "double_major": "PARTIAL"
+        },
+        "original_clause": "111 學年度理學院學生手冊之課程架構、必修／選修表及輔系／雙主修表；未具名額度與未完整表格不轉成自動通過規則。",
+        "manual_review_reason": "地生與部分次專長／雙主修頁仍只有 aggregate 或選擇限制；課程目錄已轉錄的部分可追溯，但整體不得自動宣告畢業。",
+        "document_warnings": [
+          "111 年課程名稱與 112-115 不完全相同；不得以鄰近年度課名補入。",
+          "APC 輔系／雙主修額外必修額度與可見列項的語義須依原頁及系所核准確認。",
+          "雙主修申請資格、申請時點及校方核准不是由本手冊課表推定。"
+        ]
+      },
+      "earth_life_major": {
+        "total_req": 85,
+        "common_compulsory": {
+          "total_req": 24,
+          "courses": {
+            "普通生物學(一)": 3,
+            "普通生物學(二)": 3,
+            "普通生物學實驗": 1,
+            "地球科學實驗": 1,
+            "地球科學(一)": 3,
+            "地球科學(二)": 3,
+            "資料處理與分析": 3,
+            "服務學習": 0,
+            "大學生學習與生涯發展": 0,
+            "基礎生態學": 3,
+            "環境影響評估": 2
+          }
+        },
+        "common_alternatives": [
+          {"label": "專題研究(一)／專業實習(一)（擇一）", "required_credits": 1, "options": {"專題研究(一)": 1, "專業實習(一)": 1}},
+          {"label": "專題研究(二)／專業實習(二)（擇一）", "required_credits": 1, "options": {"專題研究(二)": 1, "專業實習(二)": 1}}
+        ],
+        "domains": {
+          "domain_req": 14,
+          "domain_elective_req": 22,
+          "other_elective_req": 13,
+          "地球環境": {"compulsory": {"地質學": 3, "氣象學": 3, "地球環境變遷": 2, "衛星遙測學": 2, "海洋學": 2, "地球歷史": 2}, "electives": {}},
+          "生命科學": {"compulsory": {"生物化學": 3, "脊椎動物學": 3, "遺傳學(含實驗)": 3, "分子生物學(一)": 3, "分子生物學(二)": 2}, "electives": {}}
+        },
+        "common_electives": {
+          "微積分": 3,
+          "普通物理學(含實驗)": 3,
+          "普通化學(含實驗)": 3,
+          "環境科學": 2,
+          "環境規劃與管理": 2,
+          "數值地形分析": 3,
+          "保育生物學": 2,
+          "有機化學": 3,
+          "微生物學": 2,
+          "生物統計學": 3,
+          "巨量資料探勘": 3,
+          "環境教育": 2,
+          "地理資訊系統": 3,
+          "生物多樣性": 2,
+          "全球環境變遷": 2,
+          "Python程式設計與應用": 3,
+          "自然體驗": 2,
+          "環境化學": 2,
+          "未來生態學": 2,
+          "數值分析": 3,
+          "科學文獻導讀": 2,
+          "生命科學發展史": 2,
+          "統計學": 3,
+          "環境問題調查": 2,
+          "未來地球": 2
+        },
+        "evidence": {
+          "source_reference": "research/math_earth_handbook_matrix_111_115.md#4.1-111",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "27-30",
+          "printed_page": "26-29",
+          "table_location": "地生課程架構、共同必修／共同選修及專業領域課程表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "共同必修 24；專業領域必修 14；專業領域選修至少 22；共同選修與其他專業課程依課程架構配置。",
+          "manual_review_reason": "本次資料保留正式列項，但尚未將所有領域選修的甲乙類、師資生例外及跨桶限制轉成可自動分配模型。"
+        }
+      },
+      "apc_rules": {
+        "basic_core": {
+          "普通物理學(一)": 3,
+          "普通物理實驗(一)": 1,
+          "普通化學(一)": 3,
+          "普通化學實驗(一)": 1,
+          "普通物理學(二)": 3,
+          "普通物理實驗(二)": 1,
+          "普通化學(二)": 3,
+          "普通化學實驗(二)": 1
+        },
+        "shared_other_required": {"應用科學專題(一)": 1, "應用科學專題(二)": 1},
+        "minor": {"basic_req": 16, "other_req": 4, "total_req": 20},
+        "double_major": {"basic_req": 16, "other_req": 24, "total_req": 40},
+        "divisions": {
+          "物理組": {"compulsory": {"物理數學(一)": 3, "電磁學(一)": 3, "電磁學實驗": 1, "力學(一)": 3, "物理數學(二)": 3, "電磁學(二)": 3, "光學": 3, "光學實驗": 1, "半導體元件物理": 3, "光電子學": 3, "近代物理": 3, "近代物理實驗": 1, "電子學(一)": 3, "電子學實驗(一)": 1, "電子學(二)": 3, "電子學實驗(二)": 1, "固態物理(一)": 3, "固態物理(二)": 3}},
+          "化學組": {"compulsory": {"分析化學(一)": 3, "分析化學實驗(一)": 1, "有機化學(一)": 3, "有機化學實驗(一)": 1, "化學數學(一)": 3, "物理化學(一)": 3, "物理化學實驗(一)": 1, "有機化學(二)": 3, "有機化學實驗(二)": 1, "物理化學(二)": 3, "物理化學實驗(二)": 1, "材料科學": 3, "材料科學實驗(一)": 1, "無機化學(一)": 3, "無機化學(二)": 3, "儀器分析(一)": 3, "儀器分析實驗(一)": 1, "物理化學(三)": 3, "生物化學(一)": 3, "生物化學實驗(一)": 1, "材料科學實驗(二)": 1}}
+        },
+        "evidence": {
+          "source_reference": "research/apc_cs_handbook_matrix_111_115.md#apc-111",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "6-18",
+          "printed_page": "5-17",
+          "table_location": "APC 系共同、電子物理組／應用化學組專業必修表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系共同列項 18 學分，依組別免修另一組兩門實驗；電子物理組專業必修 44、應用化學組專業必修 45。",
+          "manual_review_reason": "組別免修、專業選修類別及課程時點仍需在全域配置器中保留限制；講授與實驗不得互抵。"
+        }
+      },
+      "math_rules": {
+        "program_name": "數學系",
+        "common_compulsory": {"微積分(一)": 4, "線性代數(一)": 3, "計算機概論": 3, "微積分(二)": 4, "線性代數(二)": 3, "基礎數學": 3, "高等微積分(一)": 4, "代數學(一)": 3, "機率論": 3, "統計學": 3, "C語言程式設計": 3},
+        "domains": {
+          "數學": {"required": {"高等微積分(一)": 4, "代數學(一)": 3}},
+          "數據科學": {"required": {"統計套裝軟體之應用": 3, "視覺化資料分析": 3}},
+          "數學教育": {"required": {"數學導論": 4}}
+        },
+        "minor": {"required": {"微積分(一)": 4, "微積分(二)": 4}, "elective_req": 12, "evidence_state": "VERIFIED"},
+        "double_major": {"total_req": 40, "required_claim": 21, "elective_req": 18, "evidence_state": "CONFLICTED"},
+        "evidence": {
+          "source_reference": "research/math_earth_handbook_matrix_111_115.md#3.1-111",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "68-76",
+          "printed_page": "67-75",
+          "table_location": "數學系課程架構、必修／選修及雙主修表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系共同必修 36；三專業領域依甲乙類及模組規則採認；輔系必修微積分 8、選修至少 12。",
+          "manual_review_reason": "雙主修表頭總計40與必修21、選修至少18的分項無法安全相加；領域甲乙與師資生例外尚未全部結構化。"
+        }
+      },
+      "cs_rules": {
+        "minor": {"compulsory": {"計算機概論": 3, "C程式設計": 3}, "compulsory_req": 6, "other_req": 14, "total_req": 20},
+        "double_major": {"compulsory": {"計算機概論": 3, "C程式設計": 3, "Java程式設計": 3, "資料結構": 3, "演算法": 3}, "compulsory_req": 15, "other_req": 25, "total_req": 40},
+        "department_courses": {
+          "計算機概論": 3, "Java程式設計": 3, "離散數學": 3, "C程式設計": 3, "資料結構": 3, "數位電子學": 3, "演算法": 3, "數位系統設計": 3, "線性代數": 3, "作業系統": 3, "資訊專題(I)": 1,
+          "微積分(一)": 3, "Java軟體實務": 3, "機率": 3, "計算機網路": 3, "數位電路實驗": 1, "系統程式": 3, "組合語言": 3, "計算機結構": 3, "自動機與形式語言": 3, "資料庫系統": 3, "人工智慧概論": 3, "資訊專題(二)": 1,
+          "Matlab程式設計": 3, "數位學習概論": 3, "微積分(二)": 3, "工程數學": 3, "計算機圖學": 3, "手機程式設計": 3, "電腦動畫": 3, "動態網頁設計": 3, "C++程式設計": 3, "網際網路路由協定": 3, "電腦遊戲設計": 3, "系統模擬": 3, "區域網路與無線網路": 3, "編譯程式設計": 3, "微處理機介面技術": 3, "Swift程式語言與iOS專案設計": 3, "影像處理概論": 3, "資訊安全": 3, "網路程式設計": 3, "電腦遊戲演算法": 3, "機器學習概論": 3, "校外實習": 3, "Android應用程式專案開發與社群媒體應用": 3, "網路攻防技術": 3, "電腦視覺概論": 3, "密碼學概論": 3, "開放式系統概論": 3, "社群網路與應用": 3, "資料探勘概論": 3
+        },
+        "evidence": {
+          "source_reference": "research/apc_cs_handbook_matrix_111_115.md#cs-111",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "115-120",
+          "printed_page": "114-119",
+          "table_location": "資科系專業必修及甲乙類專業選修表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系專業必修 31，專業選修至少 54；校共同課程分配依 111 手冊表格區間處理。",
+          "manual_review_reason": "服務／學習生涯等零學分但有完成條件；專業選修甲乙類、實習時數與共同課程區間尚未全部建模。"
+        }
+      },
+      "academic_year": "111"
+    },
     "112": {
       "_meta": {
         "version": "112",
@@ -67,6 +252,24 @@
           "應物化輔系／雙主修頁以『基礎16學分＋其餘必修4或24學分』呈現；其餘必修須限組別必修課程並由系所最終認定。",
           "資科系另有畢業門檻實施注意事項，本手冊未附具體條件。"
         ],
+        "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MelV5TDNCMFlWOHhNRFF3T1RKZk16YzNORGc0TVY4ek16ZzJOaTV3WkdZPQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+        "evidence_state": "VERIFIED",
+        "verification_status": "VERIFIED",
+        "coverage_state": "PARTIAL",
+        "automation_sufficiency": "PARTIAL",
+        "coverage_by_scope": {
+          "primary.earth": "PARTIAL",
+          "primary.apc": "PARTIAL",
+          "primary.math": "PARTIAL",
+          "primary.cs": "PARTIAL",
+          "minor.earth": "PARTIAL",
+          "minor.apc": "PARTIAL",
+          "minor.math": "COMPLETE",
+          "minor.cs": "PARTIAL",
+          "double_major": "PARTIAL"
+        },
+        "original_clause": "112 學年度理學院學生手冊課程架構、必修／選修表及輔系／雙主修表；未具名額度、選擇限制或上位核准事項不轉成自動通過規則。",
+        "manual_review_reason": "APC 目標課表額外必修未具名；資科其他課程與替代須系所核准；雙主修逐課目錄及申請資格仍需人工確認。",
         "source_pages": {"earth_life": "PDF 25-39", "apc": "PDF 2-19", "math": "PDF 60-77", "cs": "PDF 106-117"}
       },
       "earth_life_major": {
@@ -165,7 +368,24 @@
           "電子物理組學分表為必修60＋選修25；修課須知另有必修61＋選修24的文字矛盾，本規則採逐課與學分表。",
           "資科系另有畢業門檻實施注意事項，本手冊未附具體條件。"
         ],
-        "source_pages": {"earth_life": "PDF 30-45", "apc": "PDF 2-24", "math": "PDF 61-79", "cs": "PDF 102-112"}
+        "source_pages": {"earth_life": "PDF 30-45", "apc": "PDF 2-24", "math": "PDF 61-79", "cs": "PDF 102-112"},
+        "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemcxTDNCMFlWOHhNell5TmpoZk16TXhNREE0TVY4ek1qUXdNUzV3WkdZPQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+        "evidence_state": "VERIFIED",
+        "verification_status": "VERIFIED",
+        "coverage_state": "PARTIAL",
+        "automation_sufficiency": "PARTIAL",
+        "coverage_by_scope": {
+          "primary.earth": "PARTIAL",
+          "primary.apc": "PARTIAL",
+          "primary.math": "CONFLICTED",
+          "primary.cs": "PARTIAL",
+          "minor.earth": "PARTIAL",
+          "minor.apc": "PARTIAL",
+          "minor.math": "CONFLICTED",
+          "minor.cs": "PARTIAL",
+          "double_major": "PARTIAL"
+        },
+        "manual_review_reason": "113 學年度各系課表均有正式來源，但數學刪改、APC／資科次專長未具名課程池與個案適用性仍需人工確認。"
       },
       "earth_life_major": {
         "total_req": 85,
@@ -224,7 +444,24 @@
           "資科系校共同課程細項在學分表與修課須知間有10+16+2／8+16+4矛盾；地生系主修試算沿用10+16+2，總額皆為28。",
           "資科系另有畢業門檻實施注意事項，本手冊未附具體條件。"
         ],
-        "source_pages": {"earth_life": "PDF 31-47", "apc": "PDF 2-24", "math": "PDF 65-82", "cs": "PDF 106-117"}
+        "source_pages": {"earth_life": "PDF 31-47", "apc": "PDF 2-24", "math": "PDF 65-82", "cs": "PDF 106-117"},
+        "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN5TDNCMFlWOHhNemN4TWpSZk5UQTVNalkzTWw4ek9UY3lNUzV3WkdZPQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+        "evidence_state": "VERIFIED",
+        "verification_status": "VERIFIED",
+        "coverage_state": "PARTIAL",
+        "automation_sufficiency": "PARTIAL",
+        "coverage_by_scope": {
+          "primary.earth": "PARTIAL",
+          "primary.apc": "PARTIAL",
+          "primary.math": "CONFLICTED",
+          "primary.cs": "CONFLICTED",
+          "minor.earth": "PARTIAL",
+          "minor.apc": "PARTIAL",
+          "minor.math": "COMPLETE",
+          "minor.cs": "PARTIAL",
+          "double_major": "PARTIAL"
+        },
+        "manual_review_reason": "114 學年度各系課表均有正式來源，但數學／資科共同課程分配矛盾、APC／資科次專長未具名課程池與個案適用性仍需人工確認。"
       },
       "earth_life_major": {
         "total_req": 85,
@@ -258,6 +495,195 @@
           "Matlab程式設計": 3, "數位學習概論": 3, "微積分(II)": 3, "Java軟體實務": 3, "資料科學": 3, "工程數學": 3, "計算機圖學": 3, "手機程式設計": 3, "電腦動畫": 3, "動態網頁設計": 3, "C++程式設計": 3, "網際網路路由協定": 3, "電腦遊戲設計": 3, "系統模擬": 3, "區域網路與無線網路": 3, "編譯程式設計": 3, "微處理機介面技術": 3, "Swift程式語言與iOS專案設計": 3, "影像處理概論": 3, "資訊安全": 3, "網路程式設計": 3, "電腦遊戲演算法": 3, "機器學習概論": 3, "校外實習": 3, "Android應用程式專案開發與社群媒體應用": 3, "電腦視覺概論": 3, "圖論演算法": 3, "網路安全實務與社會": 3, "自然語言處理": 3, "密碼學概論": 3, "開放式系統概論": 3, "社群網路與應用": 3, "資料探勘概論": 3
         }
       }
+    },
+    "115": {
+      "_meta": {
+        "version": "115",
+        "academic_year": "115",
+        "college": "理學院",
+        "source_file": "3-理學院 (115).pdf",
+        "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9Memt3TDNCMFlWOHhOelExTnpKZk1qTXlNak0yWHpjNE5qSXhMbkJrWmc9PQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+        "last_updated": "2026-09-01",
+        "total_graduation_credits": 128,
+        "verification": "官方 PDF 表格與頁面影像逐頁核對；課名／學分僅採可辨識列項",
+        "evidence_state": "VERIFIED",
+        "verification_status": "VERIFIED",
+        "coverage_state": "PARTIAL",
+        "automation_sufficiency": "PARTIAL",
+        "source_pages": {
+          "earth_life": "PDF pp.39-55（印刷 pp.38-54）",
+          "apc": "PDF pp.3-25（印刷 pp.2-24）",
+          "math": "PDF pp.76-93（印刷 pp.75-92）",
+          "cs": "PDF pp.119-127（印刷 pp.118-126）"
+        },
+        "coverage_by_scope": {
+          "primary.earth": "PARTIAL",
+          "primary.apc": "PARTIAL",
+          "primary.math": "PARTIAL",
+          "primary.cs": "PARTIAL",
+          "minor.earth": "PARTIAL",
+          "minor.apc": "COMPLETE",
+          "minor.math": "COMPLETE",
+          "minor.cs": "PARTIAL",
+          "double_major": "PARTIAL"
+        },
+        "original_clause": "115 學年度理學院學生手冊之課程架構、必修／選修表及輔系／雙主修表；資料科學與數學改名及 APC 新課名／學分按本年度保存。",
+        "manual_review_reason": "地生與數學選修分類、CS 共同課程分配及雙主修逐課目錄仍有未結構化或衝突證據；APC 輔系列項可完整辨識但其他必修池仍須依系所核定。",
+        "document_warnings": [
+          "115 年不得沿用 114 年的課名、課程分類或學分。",
+          "APC 化學數學（一）為 2 學分，生物化學不帶（一）；電子物理力學（一）為 2 學分。",
+          "CS 課程架構圖的共同課程至少 15 與表格 28 的說明衝突，維持人工確認。",
+          "雙主修申請資格、申請時點及校方核准不是由本手冊課表推定。"
+        ]
+      },
+      "earth_life_major": {
+        "total_req": 85,
+        "common_compulsory": {
+          "total_req": 24,
+          "courses": {
+            "普通生物學(一)": 3,
+            "普通生物學(二)": 3,
+            "普通生物學實驗": 1,
+            "地球科學實驗": 1,
+            "地球科學(一)": 3,
+            "地球科學(二)": 3,
+            "資料處理與分析": 3,
+            "大學生學習與生涯發展": 0,
+            "服務學習": 0,
+            "基礎生態學": 3,
+            "環境影響評估": 2,
+            "書報討論": 2
+          }
+        },
+        "common_alternatives": [],
+        "domains": {
+          "domain_req": 14,
+          "domain_elective_req": 20,
+          "other_elective_req": 27,
+          "地球環境": {"compulsory": {"地質學": 3, "氣象學": 3, "地球環境變遷": 2, "衛星遙測學": 2, "海洋學": 2, "地球歷史": 2}, "electives": {}},
+          "生命科學": {"compulsory": {"生物化學": 3, "脊椎動物學": 3, "遺傳學(含實驗)": 3, "分子生物學概論": 3, "分子生物學特論": 2}, "electives": {}}
+        },
+        "common_electives": {
+          "Python程式設計與應用": 3,
+          "普通化學(含實驗)": 3,
+          "環境科學": 2,
+          "專題研究": 2,
+          "數值分析": 3,
+          "保育生物學": 2,
+          "微積分": 3,
+          "有機化學": 3,
+          "微生物學": 3,
+          "專業實習": 2,
+          "數值地形分析": 3,
+          "環境倫理學": 2,
+          "普通物理學(含實驗)": 3,
+          "地理資訊系統": 3,
+          "生物多樣性": 2,
+          "統計學": 3,
+          "巨量資料探勘": 3,
+          "生命科學發展史": 2,
+          "環境教育": 2,
+          "自然體驗": 2,
+          "環境化學": 2,
+          "環境規劃與管理": 2,
+          "科學文獻導讀": 2,
+          "未來地球": 2,
+          "全球環境變遷": 2,
+          "未來生態學": 2,
+          "生物統計學": 3,
+          "環境問題調查": 2
+        },
+        "evidence": {
+          "source_reference": "research/math_earth_handbook_matrix_111_115.md#4.5-115",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9Memt3TDNCMFlWOHhOelExTnpKZk1qTXlNak0yWHpjNE5qSXhMbkJrWmc9PQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "41-44",
+          "printed_page": "40-43",
+          "table_location": "地生課程架構、共同必修／共同選修及專業領域課程表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "共同必修 24；專業領域必修 14；專業領域選修至少 20；專題研究／專業實習為共同選修列項。",
+          "manual_review_reason": "本次資料保留 115 年課名與學分，但尚未將所有選修類別、師資生例外及自由／其他專業跨桶限制轉成可自動分配模型。"
+        }
+      },
+      "apc_rules": {
+        "basic_core": {
+          "普通物理學(一)": 3,
+          "普通化學(一)": 3,
+          "微積分(一)": 3,
+          "普通物理學(二)": 3,
+          "普通化學(二)": 3,
+          "微積分(二)": 3
+        },
+        "shared_other_required": {},
+        "minor": {"basic_req": 20, "other_req": 0, "total_req": 20},
+        "double_major": {"basic_req": 20, "other_req": 20, "total_req": 40},
+        "divisions": {
+          "物理組": {"compulsory": {"普通物理實驗(一)": 1, "普通物理實驗(二)": 1, "物理數學(一)": 3, "電磁學(一)": 3, "電磁學實驗": 1, "力學(一)": 2, "電子學(一)": 3, "電子學(二)": 3, "電子學實驗(一)": 1, "物理數學(二)": 3, "電磁學(二)": 3, "光學": 3, "光學實驗": 1, "半導體物理": 3, "光電子學": 3, "近代物理": 3, "近代物理實驗": 1, "電子學實驗(二)": 1, "固態物理(一)": 3}},
+          "化學組": {"compulsory": {"普通化學實驗(一)": 1, "普通化學實驗(二)": 1, "分析化學(一)": 3, "有機化學(一)": 3, "有機化學實驗(一)": 1, "化學數學(一)": 2, "物理化學(一)": 3, "物理化學實驗(一)": 1, "有機化學(二)": 3, "有機化學實驗(二)": 1, "物理化學(二)": 3, "物理化學實驗(二)": 1, "材料科學": 3, "無機化學(一)": 3, "儀器分析(一)": 3, "物理化學(三)": 3, "生物化學": 3, "無機化學(二)": 3, "儀器分析實驗": 1}}
+        },
+        "evidence": {
+          "source_reference": "research/apc_cs_handbook_matrix_111_115.md#apc-115",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9Memt3TDNCMFlWOHhOelExTnpKZk1qTXlNak0yWHpjNE5qSXhMbkJrWmc9PQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "8-23",
+          "printed_page": "7-22",
+          "table_location": "APC 系共同、電子物理組／應用化學組專業必修表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系共同六門各 3 學分；電子物理組與應用化學組專業必修各 42 學分；輔系基礎列項 20，雙主修其餘必修 20。",
+          "manual_review_reason": "雙主修其餘必修完整課程池、專題／專業選修時點與系所核定限制仍需人工確認；實驗與講授保持不同 component。"
+        }
+      },
+      "math_rules": {
+        "program_name": "數據科學與數學系",
+        "common_compulsory": {"微積分(一)": 4, "微積分(二)": 4, "線性代數(一)": 3, "線性代數(二)": 3, "Python程式設計": 3, "資訊科學與科學計算": 3},
+        "domains": {
+          "數學與科學計算": {"required": {"高等微積分(一)": 4, "代數學(一)": 3}},
+          "數據科學": {"required": {"統計與生活": 3, "人工智慧及其應用": 3}},
+          "數學教育": {"required": {"數學導論": 3}}
+        },
+        "minor": {"required": {"微積分(一)": 4, "微積分(二)": 4}, "elective_req": 12, "evidence_state": "VERIFIED"},
+        "double_major": {"total_req": 40, "required_claim": 14, "elective_req": 26, "evidence_state": "VERIFIED"},
+        "evidence": {
+          "source_reference": "research/math_earth_handbook_matrix_111_115.md#3.5-115",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9Memt3TDNCMFlWOHhOelExTnpKZk1qTXlNak0yWHpjNE5qSXhMbkJrWmc9PQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "76-87",
+          "printed_page": "75-86",
+          "table_location": "數據科學與數學系課程架構、必修／選修及雙主修表",
+          "evidence_state": "VERIFIED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系共同必修 20；數學與科學計算領域至少 7 或數據科學領域至少 6；輔系微積分 8、選修至少 12；雙主修必修14、選修至少26。",
+          "manual_review_reason": "領域甲乙類、師資生例外、免修補足及 30+ 限定專班排除規則尚未全部結構化。"
+        }
+      },
+      "cs_rules": {
+        "minor": {"compulsory": {"計算機概論": 3}, "compulsory_req": 6, "other_req": 14, "total_req": 20, "named_core_status": "MISSING", "missing_named_core_credits": 3},
+        "double_major": {"compulsory": {"計算機概論": 3}, "compulsory_req": 15, "other_req": 25, "total_req": 40, "named_core_status": "MISSING", "missing_named_core_credits": 12},
+        "department_courses": {
+          "計算機概論": 3, "Java程式設計": 3, "離散數學": 3, "C程式設計": 3, "資料結構": 3, "數位電子學": 3, "演算法": 3, "數位系統設計": 3, "線性代數": 3, "作業系統": 3, "資訊專題(I)": 1,
+          "微積分(一)": 3, "程式設計技巧": 3, "數位電路實驗": 1, "組合語言": 3, "計算機結構": 3, "自動機與形式語言": 3, "人工智慧": 3, "資訊專題(II)": 1,
+          "Matlab程式設計": 3, "數位學習概論": 3, "微積分(二)": 3, "Java軟體實務": 3, "工程數學": 3, "計算機圖學": 3, "手機程式設計": 3, "電腦動畫": 3, "動態網頁設計": 3, "網際網路路由協定": 3, "電腦遊戲設計": 3, "系統模擬": 3, "區域網路與無線網路": 3, "微處理機介面技術": 3, "Swift程式語言與iOS專案設計": 3, "資訊安全": 3, "網路程式設計": 3, "Android應用程式專案開發與社群媒體應用": 3, "網路攻防技術": 3, "無人機電子通訊系統": 3, "自然語言處理": 3, "軟體工程": 3, "開放式系統概論": 3, "社群網路與應用": 3
+        },
+        "secondary_course_assertions": {
+          "計算機概論": {"credits": 3, "evidence_state": "VERIFIED"},
+          "missing_named_core": {"credits": 3, "evidence_state": "MISSING", "manual_reason": "115 輔系／雙主修表的第二個命名基礎課列項在本地頁面影像不足以安全辨識；不得以 C 程式設計或其他年度名稱補猜。"}
+        },
+        "evidence": {
+          "source_reference": "research/apc_cs_handbook_matrix_111_115.md#cs-115",
+          "source_url": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9Memt3TDNCMFlWOHhOelExTnpKZk1qTXlNak0yWHpjNE5qSXhMbkJrWmc9PQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
+          "pdf_page": "121-126",
+          "printed_page": "120-125",
+          "table_location": "資科系專業必修及甲乙類專業選修表、輔系／雙主修表",
+          "evidence_state": "CONFLICTED",
+          "coverage_state": "PARTIAL",
+          "automation_sufficiency": "PARTIAL",
+          "original_clause": "系專業必修 31、專業選修至少 54；輔系 aggregate 6+14、雙主修 aggregate 15+25；次專長命名列項不足。",
+          "manual_review_reason": "共同課程架構圖的至少15與表格28衝突，且輔系／雙主修可見命名列項不足；保持 aggregate 可稽核但不得自動 PASS。"
+        }
+      },
+      "academic_year": "115"
     }
   }
 }

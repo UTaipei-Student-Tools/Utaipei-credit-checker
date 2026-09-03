@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "utaipei-streamlit-bootstrap"
-version = "0.1.1"
-description = "Fail-closed startup bootstrap for the UTaipei Streamlit PWA metadata"
+version = "0.2.0"
+description = "Fail-closed startup bootstrap for the UTaipei Streamlit PWA shell and service worker"
 requires-python = ">=3.10"
 dependencies = []
 

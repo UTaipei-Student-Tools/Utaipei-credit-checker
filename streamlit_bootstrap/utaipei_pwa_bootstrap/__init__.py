@@ -1,29 +1,43 @@
 """Safe, startup-time PWA metadata patching for the UTaipei Streamlit app."""
 
 from .patch import (
+    BOOTSTRAP_BUILD_VERSION,
     EXPECTED_STREAMLIT_VERSION,
     PWA_MARKER_BEGIN,
     PWA_MARKER_END,
+    SERVICE_WORKER_FILENAME,
+    SERVICE_WORKER_MARKER_BEGIN,
+    SERVICE_WORKER_MARKER_END,
+    SERVICE_WORKER_SOURCE,
     BootstrapError,
     canonical_metadata_block,
     find_competing_sitecustomize,
+    install_service_worker,
     patch_html,
     patch_index_file,
     patch_installed_streamlit_index,
     resolve_streamlit_index,
     run_bootstrap,
+    validate_static_root,
 )
 
 __all__ = [
+    "BOOTSTRAP_BUILD_VERSION",
     "EXPECTED_STREAMLIT_VERSION",
     "PWA_MARKER_BEGIN",
     "PWA_MARKER_END",
+    "SERVICE_WORKER_FILENAME",
+    "SERVICE_WORKER_MARKER_BEGIN",
+    "SERVICE_WORKER_MARKER_END",
+    "SERVICE_WORKER_SOURCE",
     "BootstrapError",
     "canonical_metadata_block",
     "find_competing_sitecustomize",
+    "install_service_worker",
     "patch_html",
     "patch_index_file",
     "patch_installed_streamlit_index",
     "resolve_streamlit_index",
     "run_bootstrap",
+    "validate_static_root",
 ]

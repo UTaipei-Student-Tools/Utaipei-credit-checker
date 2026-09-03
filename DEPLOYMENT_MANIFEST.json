@@ -1,0 +1,226 @@
+{
+  "bundle_digest": "sha256:ee611d0170fbe8c7d823a6ca1b9078ad3989a4e3a835bab52c974f68d295e33b",
+  "files": {
+    ".streamlit/config.toml": {
+      "bytes": 72,
+      "sha256": "a9ef98a1995bfcdff147dfbee2220bd048fd220eff0ef76b6d86225d9fd750a5"
+    },
+    "README.md": {
+      "bytes": 11892,
+      "sha256": "5660eb0a721b37b281598893c82562502dcdb8c641e2c13b9bb9b3eff6f87e3c"
+    },
+    "allocation_engine.py": {
+      "bytes": 89270,
+      "sha256": "0de1ebb8b3f91df542ac5a4fcac92fd8fc2df80eb188bf58e503d5ce03e3703b"
+    },
+    "app.py": {
+      "bytes": 30269,
+      "sha256": "0b4ce678b7d6ae0df78a8a0c67740b070f42ad5eb647d42b935bd3868a8b3476"
+    },
+    "application_resolution.py": {
+      "bytes": 61369,
+      "sha256": "b8b822e205b45813f2d33007fb80f4bceeab26a556803364542df255bdbb2c6a"
+    },
+    "audit_export.py": {
+      "bytes": 19213,
+      "sha256": "91c6e18644946b5ebbc910906346f171697a11e1f4d7c11f8474de0da8643d61"
+    },
+    "course_input_adapter.py": {
+      "bytes": 17684,
+      "sha256": "446378805464acf2f0f1f39b61220ee0a79f8036c887042cb0e8e2543272da5d"
+    },
+    "credit_engine.py": {
+      "bytes": 108887,
+      "sha256": "5b50c738ce0052463fff22648d9d212b4980b2cb27b4ee18a91a1486e64fd46c"
+    },
+    "curriculum_registry.py": {
+      "bytes": 144893,
+      "sha256": "1eb958a7915fef5bf0b607c6580a29d05a668fab146c165add5b9b49a875b25c"
+    },
+    "decision_snapshot.py": {
+      "bytes": 52153,
+      "sha256": "0bf6af37617d2635cf1f2c128125cb5a9630aeee95d50ce0cdf5294fd81042bd"
+    },
+    "equivalency_audit.py": {
+      "bytes": 71324,
+      "sha256": "800bf621de2158715f9e62a221700ab20d11aa22b9afc331c1f59d157035b7eb"
+    },
+    "equivalency_ui.py": {
+      "bytes": 12734,
+      "sha256": "00c8e60ee55852dedd24e2d95afc1d4c1d79428e64264eab9dda5260a900846a"
+    },
+    "graduation_service.py": {
+      "bytes": 97427,
+      "sha256": "ca41337aaa9c2770d775a28f666cc3e1ddf999b4e0690f4a937ee35a157e36e9"
+    },
+    "handbook_rules.py": {
+      "bytes": 35734,
+      "sha256": "15c2bd9824aeb80eb7f9402bde54523b14f62f6d42a4e0d115b3a58324d774f5"
+    },
+    "input_confirmation.py": {
+      "bytes": 20671,
+      "sha256": "3cecbff931d90568bacf46cf3e7ffd24f3484d44732fd450d89ae5554c27d10f"
+    },
+    "lieflat_progress_chart.py": {
+      "bytes": 51270,
+      "sha256": "88badf1cc31d3c8ade2a7757247510700a55d4a9ca13dde1c0c1dbdca59ce868"
+    },
+    "pdf_parser.py": {
+      "bytes": 38292,
+      "sha256": "4d8e11f1595a9a21f22b4ea7258959d152dfa6ee5589680a0e58333f37753d56"
+    },
+    "policy_audit.py": {
+      "bytes": 51938,
+      "sha256": "bfc6a77475c74198825ed16fc37928b9d976805d40c45ccc2d8d9c9d81180fcd"
+    },
+    "portal_scope.py": {
+      "bytes": 21023,
+      "sha256": "237dbd6f79ec32a072bc22194ef1923e0ecc6f80db1fefc60023f4e1a852eb42"
+    },
+    "pyproject.toml": {
+      "bytes": 226,
+      "sha256": "f6c26547d7780b1f0ed2e01475b277fb1404c70bad160507779619e57aaa2f31"
+    },
+    "report_renderer.py": {
+      "bytes": 63591,
+      "sha256": "deb791455e156fa5a0b7d111bf48ea879d5aa7333abddedbd4bf5c120bc1610c"
+    },
+    "requirements.txt": {
+      "bytes": 368,
+      "sha256": "85f61f956cccb7350fe17aacd06ff58d1f8b837eda803e8e6306d5c1a443bad5"
+    },
+    "research/apc_cs_handbook_matrix_111_115.md": {
+      "bytes": 45420,
+      "sha256": "9cf5099202625219d0678ad7bada123884bdbb58cad827d0dd1dca3419a68779"
+    },
+    "research/apc_double_major_equivalency.md": {
+      "bytes": 16332,
+      "sha256": "cfb51dfa02e863f3b903fe23dcc52846e6a679eec495145f0ce10cbe8ade5ca5"
+    },
+    "research/double_major_timing_rules.md": {
+      "bytes": 35492,
+      "sha256": "654208d9247f3646df544b8f5b27863a891ce8a0dc5fd84df4965f66b3a5f5a1"
+    },
+    "research/math_earth_handbook_matrix_111_115.md": {
+      "bytes": 53170,
+      "sha256": "e01a8a9915819a5537434d76636163078d83f9fe1fe071fc2e1ea22cded80ee4"
+    },
+    "research/minor_program_matrix_111_115.md": {
+      "bytes": 29967,
+      "sha256": "9d9586a008a2379884398a3cfd6cecc19400f9da09ada75a6907535c3e158e4a"
+    },
+    "rules_config.json": {
+      "bytes": 51960,
+      "sha256": "3dc4d96a5b0cf1282e236a578f58f0c59aa90b23538bd0b3aa37f1a1d247ea99"
+    },
+    "schedule_parser.py": {
+      "bytes": 18459,
+      "sha256": "3a73a64711bfa7d7861e9cf9da44ac691e60aed1c0f69ba68a3c79b3b65b780b"
+    },
+    "schedule_planner.py": {
+      "bytes": 4199,
+      "sha256": "27d41b00a94524c29c71d9a2f46554e5819bf3a82f4574def2c19bf9cb25de26"
+    },
+    "scraper.py": {
+      "bytes": 41422,
+      "sha256": "486990ab1c79b807a9ecf7b2201ec0dd996ef769218019e55f85b073d321f94a"
+    },
+    "sidebar.py": {
+      "bytes": 66137,
+      "sha256": "304017bf3d17715e0cb005f03bddee11d1172d32082926ba33f7198890d1fe6a"
+    },
+    "snapshot_exports.py": {
+      "bytes": 22827,
+      "sha256": "3867b7e6cd998bb5e4f3065b10b5b62e8d3fea4659e986b1614a8fc34a639556"
+    },
+    "snapshot_projection.py": {
+      "bytes": 75513,
+      "sha256": "276c5c2619a2d6c0eb18e378eec07e01d1c7b3e49aa292287cf31e13ea611a3d"
+    },
+    "snapshot_renderer.py": {
+      "bytes": 70771,
+      "sha256": "6708fd8e3805f6c4d39d861827fd103cea1cbdc7d6b65b5525c9929ad0b51f5e"
+    },
+    "static/icons/apple-touch-icon.png": {
+      "bytes": 17488,
+      "sha256": "3ad573e1335ad4932de860b7a4817e4a2b2614b015b406bad543f2bd81a209a2"
+    },
+    "static/icons/favicon-32.png": {
+      "bytes": 1588,
+      "sha256": "f9c8e5bb22ba70f052c5559e76e6da8add51398cfd270c8c1ecdfbae4cacc0cf"
+    },
+    "static/icons/ut-credit-planner-1024.png": {
+      "bytes": 320819,
+      "sha256": "3d2bad7be3ac96984655c483ef5c6f007017d13c082b3e1c5c584464c5302a28"
+    },
+    "static/icons/ut-credit-planner-192.png": {
+      "bytes": 19546,
+      "sha256": "cd35b24a4b926d4cb96f4a9ea636cd0b263842a659fdd66afd15c8560df0d203"
+    },
+    "static/icons/ut-credit-planner-512.png": {
+      "bytes": 111360,
+      "sha256": "ff9caa8ce6a9f626fc8bd13923ff46b4c201f456fe0f23b3f910f7fac555f547"
+    },
+    "static/icons/ut-graduation-v2-180.png": {
+      "bytes": 24996,
+      "sha256": "dbf0aad15a9f3cd0ce3784e7c7bfd69f16d7a2af7ba0669f7f905150327ac19e"
+    },
+    "static/icons/ut-graduation-v2-192.png": {
+      "bytes": 28304,
+      "sha256": "bc5431235da549ce154626afe2ce8d8607b9f08c6e28885ee1085eba6276091c"
+    },
+    "static/icons/ut-graduation-v2-32.png": {
+      "bytes": 1504,
+      "sha256": "16bdeb11ffeb3181411efff769a182170cb4778e42210d657a9207a2118c376f"
+    },
+    "static/icons/ut-graduation-v2-512.png": {
+      "bytes": 195421,
+      "sha256": "c1a74790813b2be9835a8264d286ee89643ec10800cc649f2d27e43796b72d73"
+    },
+    "static/icons/ut-graduation-v2-source.png": {
+      "bytes": 991801,
+      "sha256": "0ecdcdab930ea9bb4ddd130db4ab9ff1e735aa1288eedc5e9dbdddddcd8e7457"
+    },
+    "static/manifest-v2.webmanifest": {
+      "bytes": 1090,
+      "sha256": "b0842c07babbd40bd1752af2be3fd9afc3db5cf2b2545b2434c12f5111eb4b52"
+    },
+    "streamlit_bootstrap/pyproject.toml": {
+      "bytes": 440,
+      "sha256": "1aabdeea7cf0c92ff7ffcd798dbe74a8dbbfe7637863e6ba4bd825d2775e07b4"
+    },
+    "streamlit_bootstrap/sitecustomize.py": {
+      "bytes": 339,
+      "sha256": "aeb39d7f3b6ded28d4c86ceb0f4b7e9ecb23302025cf85670986c39901d59de8"
+    },
+    "streamlit_bootstrap/utaipei_pwa_bootstrap/__init__.py": {
+      "bytes": 1121,
+      "sha256": "e606d9195a6553562e118f0465ce906dbf0b88a4b95babf52fbfb8062b2e2f68"
+    },
+    "streamlit_bootstrap/utaipei_pwa_bootstrap/patch.py": {
+      "bytes": 25170,
+      "sha256": "fae03342be11bfcfe2e26786081757bdf8da9c518974625898118aeba2899c36"
+    },
+    "streamlit_bootstrap/utaipei_streamlit_bootstrap.egg-info/PKG-INFO": {
+      "bytes": 194,
+      "sha256": "4117511f9717eacb8c199895d44380929fc47086d225f3bc78fb79fe3b10c7ea"
+    },
+    "streamlit_bootstrap/utaipei_streamlit_bootstrap.egg-info/SOURCES.txt": {
+      "bytes": 300,
+      "sha256": "758fffe9fe838053f847f34a344ac1a4a509ccd9010c48d4794d654d636e49a3"
+    },
+    "streamlit_bootstrap/utaipei_streamlit_bootstrap.egg-info/dependency_links.txt": {
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "streamlit_bootstrap/utaipei_streamlit_bootstrap.egg-info/top_level.txt": {
+      "bytes": 36,
+      "sha256": "85008748f5ac564385b1aa7672325b814dd3ca9c3956a3b8e1dc208eb132a961"
+    },
+    "ui_components.py": {
+      "bytes": 73535,
+      "sha256": "17425e8057daa1f9c16b04c7c6c2897442bc930256ef1ac23cae4dca1b8e9a38"
+    }
+  },
+  "schema": "utaipei-hf-bundle.v1"
+}

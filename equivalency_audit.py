@@ -14,16 +14,16 @@ existing audit exporters without adding persistence or a database.
 
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 import re
 import secrets
 import unicodedata
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
+from typing import Any
 
 from handbook_rules import get_apc_target_requirements, normalize_course_name
-
 
 PROPOSED = "proposed"
 PENDING = "pending"

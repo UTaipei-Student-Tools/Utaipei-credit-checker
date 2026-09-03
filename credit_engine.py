@@ -6,12 +6,17 @@ Graduation Credit Evaluation Engine — v2
 import re
 from copy import deepcopy
 
-from handbook_rules import (
-    get_apc_target_requirements,
-    get_credit_requirements,
-    get_rule_sets,
-    get_rules_meta,
-    normalize_course_name,
+from curriculum_registry import (
+    MANUAL_REVIEW as RULE_MANUAL_REVIEW,
+)
+from curriculum_registry import (
+    MISSING as RULE_MISSING,
+)
+from curriculum_registry import (
+    RESOLVED as RULE_RESOLVED,
+)
+from curriculum_registry import (
+    resolve_rule_context,
 )
 from equivalency_audit import (
     apply_equivalency_audit_to_report,
@@ -19,15 +24,21 @@ from equivalency_audit import (
     source_attempt_id,
     source_attempt_identity,
 )
+from handbook_rules import (
+    get_apc_target_requirements,
+    get_credit_requirements,
+    get_rule_sets,
+    get_rules_meta,
+    normalize_course_name,
+)
 from policy_audit import (
-    GRADUATION_UNKNOWN,
-    GRADUATION_NOT_SATISFIED,
-    GRADUATION_SATISFIED,
-    UNKNOWN,
     COURSE_IDENTITY_CONFLICTED,
     COURSE_IDENTITY_MANUAL_APPROVED,
     COURSE_IDENTITY_UNKNOWN,
     COURSE_IDENTITY_VERIFIED,
+    GRADUATION_NOT_SATISFIED,
+    GRADUATION_SATISFIED,
+    UNKNOWN,
     assess_cohort_match,
     assess_course_identity,
     assess_cs_manual_gate,
@@ -1003,17 +1014,105 @@ def _annotate_target_requirements(report, target_plan):
                 missing["target_requirement_name"] = item.get("name", "")
 
 
-def evaluate_cohort_plan(courses, config):
+def _rule_resolution_request(config, *, fallback_cohort=None, fallback_primary=None, fallback_program_type=None):
+    """Translate legacy evaluator config into the public resolution seam."""
+
+    config = config if isinstance(config, dict) else {}
+    target_dept = config.get("target_program") or config.get("target_dept") or config.get("secondary_program")
+    target_track = config.get("target_track") or config.get("secondary_track")
+    request = {
+        "admission_cohort": config.get("admission_cohort") or config.get("handbook_year") or fallback_cohort,
+        "primary_program": config.get("primary_program") or config.get("program_name") or fallback_primary or config.get("domain"),
+        "primary_track": config.get("primary_track") or config.get("track"),
+        "program_type": config.get("program_type") or fallback_program_type or config.get("program", "單主修"),
+        "target_program": target_dept,
+        "target_track": target_track,
+        "target_curriculum_version": config.get("target_curriculum_version") or config.get("target_curriculum_id") or config.get("target_version"),
+        "target_version_evidence_reference": config.get("target_version_evidence_reference") or config.get("target_curriculum_evidence_reference") or config.get("version_evidence_reference"),
+        "scoped_applicability_assertion": config.get("scoped_applicability_assertion") or config.get("target_applicability_assertion") or config.get("version_applicability_assertion"),
+        "application_term": config.get("application_term"),
+        "application_year": config.get("application_year"),
+        "application_semester": config.get("application_semester"),
+    }
+    return {key: value for key, value in request.items() if value not in (None, "")}
+
+
+def _apply_rule_resolution_gate(report, resolution):
+    """Attach one resolution snapshot and make unresolved rules non-PASS."""
+
+    if not isinstance(report, dict):
+        return report
+    resolution = resolution if isinstance(resolution, dict) else {}
+    report["rule_resolution"] = resolution
+    # ``resolution`` is a short compatibility alias used by integrations
+    # that adopted the domain term before the longer key was introduced.
+    report["resolution"] = resolution
+    details = resolution.get("blockers", [])
+    report["rule_blockers"] = list(details) if isinstance(details, list) else []
+    report["blockers"] = list(details) if isinstance(details, list) else []
+    resolution_can_pass = resolution.get("can_pass") is True
+    if resolution_can_pass and not details:
+        return report
+    report["rule_resolution_blocked"] = True
+    report["policy_warnings"] = list(report.get("policy_warnings", []))
+    warning_items = details or [
+        {
+            "code": resolution.get("status", RULE_MANUAL_REVIEW),
+            "dimension": "rule_resolution",
+            "reason": "規則解析未明確允許通過，已安全阻擋畢業判定。",
+        }
+    ]
+    for item in warning_items:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code", RULE_MANUAL_REVIEW)
+        dimension = item.get("dimension", "rule")
+        reason = item.get("reason", "規則解析未完成。")
+        report["policy_warnings"].append(f"規則解析[{code}] {dimension}：{reason}")
+    report["policy_warnings"] = list(dict.fromkeys(str(item) for item in report["policy_warnings"] if item))
+    gates = report.get("graduation_gates")
+    if isinstance(gates, dict):
+        gates["rule_resolution"] = False
+        gates["curriculum_resolution"] = False
+        gates["target_curriculum_version"] = (
+            resolution.get("dimensions", {}).get("target_curriculum_version", {}).get("status")
+            if isinstance(resolution.get("dimensions"), dict)
+            else RULE_MANUAL_REVIEW
+        )
+    summary = report.get("summary")
+    if isinstance(summary, dict):
+        # Keep a definite academic failure visible even when the independent
+        # rule-resolution gate is unresolved.  Only a prior SATISFIED or
+        # UNKNOWN verdict is downgraded to UNKNOWN; unresolved policy evidence
+        # must never erase a known unmet graduation requirement.
+        prior_status = summary.get("graduation_status")
+        if prior_status in {GRADUATION_SATISFIED, UNKNOWN}:
+            summary["graduation_status"] = UNKNOWN
+        summary["graduation_ready"] = False
+    return report
+
+
+def evaluate_cohort_plan(courses, config, *, evidence_resolver=None):
     """Evaluate a selected cohort/primary track with conservative fallbacks."""
 
     from policy_audit import assess_double_major_eligibility
 
+    config = config or {}
     cohort = config.get("admission_cohort") or config.get("handbook_year") or "114"
     primary_value = config.get("primary_program") or config.get("program_name") or config.get("domain", "地生")
     program, track = normalize_primary_program(primary_value, cohort)
     track = config.get("primary_track") or config.get("track") or track
     plan = get_primary_requirements(cohort, primary_value, track)
     program_type = config.get("program_type", "單主修")
+    resolution = resolve_rule_context(
+        _rule_resolution_request(
+            config,
+            fallback_cohort=cohort,
+            fallback_primary=primary_value,
+            fallback_program_type=program_type,
+        ),
+        evidence_resolver=evidence_resolver,
+    )
     parser_diagnostics = config.get("parser_diagnostics") or {}
     detected_cohort = parser_diagnostics.get("detected_admission_cohort") or config.get("detected_admission_cohort")
     cohort_match = assess_cohort_match(
@@ -1025,15 +1124,38 @@ def evaluate_cohort_plan(courses, config):
     target_plan = None
     target_eligibility = None
     target_program = config.get("target_program") or config.get("target_dept")
+    target_resolution = (resolution.get("dimensions") or {}).get("target_curriculum_version", {})
+    target_curriculum = resolution.get("target_curriculum") or {}
+    target_version_cohort = str(target_curriculum.get("version") or cohort)
+    target_version_resolved = target_resolution.get("status") == RULE_RESOLVED
     if program_type == "雙主修":
         if not target_program:
             target_eligibility = assess_double_major_eligibility(program_type=program_type, admission_cohort=cohort)
         else:
             target_program, target_track = normalize_primary_program(target_program, cohort)
-            target_plan = get_double_structure(cohort, target_program, target_track or config.get("target_track"))
+            # A target version is independent from the admission cohort.  If
+            # it was not resolved, retain a diagnostic candidate only so the
+            # legacy report can still show readable aggregate rows; it is
+            # never allowed to act as an authoritative target curriculum.
+            target_plan = get_double_structure(
+                target_version_cohort if target_version_resolved else cohort,
+                target_program,
+                target_track or config.get("target_track"),
+            )
+            if not target_version_resolved:
+                target_plan.update(
+                    {
+                        "candidate_only": True,
+                        "curriculum_id": None,
+                        "curriculum_version": None,
+                        "target_curriculum_version": None,
+                        "registry_status": target_resolution.get("status", RULE_MISSING),
+                        "registry_blockers": list(resolution.get("blockers", [])),
+                    }
+                )
             if target_program == "物化":
                 target_plan["target_requirements"] = _apc_target_plan_for_engine(
-                    cohort,
+                    target_version_cohort if target_version_resolved else cohort,
                     "物化系物理組" if target_track == "電子物理" else "物化系化學組",
                     program_type,
                 )
@@ -1063,6 +1185,22 @@ def evaluate_cohort_plan(courses, config):
         legacy.pop("primary_program", None)
         legacy.pop("primary_track", None)
         legacy.pop("admission_cohort", None)
+        # The detailed legacy evaluator is an implementation adapter, not a
+        # second rule-resolution boundary.  Remove cohort-aware resolution
+        # keys so it cannot recurse back into evaluate_cohort_plan; the outer
+        # report applies the already-resolved snapshot below.
+        for resolution_key in (
+            "target_curriculum_version",
+            "target_curriculum_id",
+            "target_version",
+            "target_version_evidence_reference",
+            "target_curriculum_evidence_reference",
+            "version_evidence_reference",
+            "scoped_applicability_assertion",
+            "target_applicability_assertion",
+            "version_applicability_assertion",
+        ):
+            legacy.pop(resolution_key, None)
         legacy["domain"] = track or "地球環境"
         legacy["handbook_year"] = str(cohort)
         legacy["program"] = program_type
@@ -1072,7 +1210,7 @@ def evaluate_cohort_plan(courses, config):
             legacy["target_requirements"] = target_plan["target_requirements"]
         legacy["equivalency_decisions"] = config.get("equivalency_decisions", [])
         legacy["equivalency_context"] = config.get("equivalency_context", {})
-        report = evaluate_graduation(courses, legacy)
+        report = evaluate_graduation(courses, legacy, evidence_resolver=evidence_resolver)
         report["primary_plan"] = plan
         report["target_plan"] = target_plan
         report["cohort_match"] = cohort_match
@@ -1113,6 +1251,7 @@ def evaluate_cohort_plan(courses, config):
             report["policy_warnings"] = list(dict.fromkeys(report.get("policy_warnings", []) + target_eligibility.get("reasons", [])))
             report["summary"]["graduation_status"] = UNKNOWN
             report["summary"]["graduation_ready"] = False
+        _apply_rule_resolution_gate(report, resolution)
         return report
 
     requirements = _plan_requirements(plan, program_type, target_plan)
@@ -1138,10 +1277,11 @@ def evaluate_cohort_plan(courses, config):
     # A threshold-only plan is useful without a transcript, but it cannot
     # produce a definitive graduation decision or course-level gaps.
     report["summary"]["graduation_status"] = UNKNOWN
+    _apply_rule_resolution_gate(report, resolution)
     return report
 
 
-def evaluate_graduation(courses, config):
+def evaluate_graduation(courses, config, *, evidence_resolver=None):
     """
     Evaluate courses against one explicitly selected Science College handbook.
 
@@ -1155,8 +1295,19 @@ def evaluate_graduation(courses, config):
         }
     """
     config = config or {}
-    if any(key in config for key in ("primary_program", "admission_cohort", "primary_track")):
-        return evaluate_cohort_plan(courses, config)
+    if any(
+        key in config
+        for key in (
+            "primary_program",
+            "admission_cohort",
+            "primary_track",
+            "target_curriculum_version",
+            "target_curriculum_id",
+            "target_version_evidence_reference",
+            "scoped_applicability_assertion",
+        )
+    ):
+        return evaluate_cohort_plan(courses, config, evidence_resolver=evidence_resolver)
 
     domain = config.get("domain", "地球環境")
     program = config.get("program", "單主修")
@@ -2146,6 +2297,22 @@ def evaluate_graduation(courses, config):
             report["citations"].extend(get_double_structure(report["handbook_year"], target_name, target_track).get("citations", []))
     except (ValueError, KeyError):
         report["citations"] = []
+
+    # Legacy callers may still provide only ``handbook_year``.  It remains a
+    # primary-handbook selector, but it must never silently select a
+    # double-major target curriculum.  Apply the same public resolution gate
+    # here as the cohort-aware adapter so both entry points have one verdict
+    # contract.
+    resolution = resolve_rule_context(
+        _rule_resolution_request(
+            config,
+            fallback_cohort=report.get("handbook_year") or handbook_year or "114",
+            fallback_primary=domain,
+            fallback_program_type=program,
+        ),
+        evidence_resolver=evidence_resolver,
+    )
+    _apply_rule_resolution_gate(report, resolution)
 
     return report
 

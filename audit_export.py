@@ -8,7 +8,6 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-
 _SHARED_REUSE_DEFAULTS = {
     "approval_scope": "aggregate_allowance_only",
     "allocation_type": "simulated",

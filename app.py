@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -29,9 +30,15 @@ from input_confirmation import (
     release_formal_attempts,
 )
 from pdf_parser import parse_transcript_pdf
+from portal_scope import (
+    PENDING_SCHEDULE_ROWS_KEY,
+    PENDING_SCHEDULE_SCOPE_KEY,
+    SCHEDULE_SCOPE_KEY,
+    TRANSCRIPT_SCOPE_KEY,
+)
 from schedule_parser import merge_schedule_courses
-from sidebar import render_setup_panel
-from ui_components import collapse_sidebar_if_needed, render_header_card, setup_page
+from sidebar import get_verified_schedule_rows, render_setup_panel
+from ui_components import collapse_sidebar_if_needed, render_header_card, render_html, setup_page
 
 
 def _load_presentation_api():
@@ -43,12 +50,195 @@ def _load_presentation_api():
     return render_snapshot, build_pdf, build_allocation_csv, build_audit_json
 
 
+def _plain_cache_value(value: object) -> object:
+    """Convert the safe request projection into deterministic JSON values.
+
+    ``EvaluationRequest.as_dict()`` is already an allowlisted privacy boundary,
+    but it deliberately returns frozen mappings/tuples.  This adapter keeps the
+    session cache key deterministic without retaining any source bytes or
+    caller-owned objects.
+    """
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain_cache_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_cache_value(item) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return f"<bytes:{len(value)}>"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _evaluation_request_cache_key(request: EvaluationRequest) -> str:
+    """Return a privacy-safe content key for one evaluation request."""
+
+    payload = json.dumps(
+        _plain_cache_value(request.as_dict()),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _new_snapshot_artifact_cache(snapshot: object) -> dict[str, object]:
+    snapshot_id = str(getattr(snapshot, "snapshot_id", "") or "")
+    if not snapshot_id:
+        # Test doubles and legacy callers may not expose the content address.
+        # Their object identity is still session-local and cannot be confused
+        # with another real DecisionSnapshot.
+        snapshot_id = f"object:{id(snapshot)}"
+    return {"snapshot_id": snapshot_id, "rendered_html": None, "exports": {}}
+
+
+def _clear_snapshot_caches() -> None:
+    """Drop the current snapshot and its artifacts from this session."""
+
+    st.session_state["_decision_snapshot_cache_key"] = None
+    st.session_state["_decision_snapshot_cache_value"] = None
+    st.session_state["_snapshot_artifact_cache"] = None
+    st.session_state["_exports_ready"] = False
+    st.session_state["_analysis_exported"] = False
+
+
+def _evaluate_cached_snapshot(request: EvaluationRequest) -> object:
+    """Evaluate at most once for an identical request in the current session.
+
+    Streamlit reruns the script for every widget event.  The cache intentionally
+    lives only in ``st.session_state`` and retains one current snapshot; no
+    global/cache-decorator path can mix one student's transcript with another's.
+    """
+
+    request_key = _evaluation_request_cache_key(request)
+    cached_key = st.session_state.get("_decision_snapshot_cache_key")
+    cached_snapshot = st.session_state.get("_decision_snapshot_cache_value")
+    if cached_key == request_key and cached_snapshot is not None:
+        return cached_snapshot
+
+    # Invalidate before evaluation so an exception while evaluating a changed
+    # request cannot leave the previous student's snapshot/artifacts available
+    # to a later rerun.
+    _clear_snapshot_caches()
+    snapshot = evaluate(request)
+    st.session_state["_decision_snapshot_cache_key"] = request_key
+    st.session_state["_decision_snapshot_cache_value"] = snapshot
+    st.session_state["_snapshot_artifact_cache"] = _new_snapshot_artifact_cache(snapshot)
+    st.session_state["_exports_ready"] = False
+    st.session_state["_analysis_exported"] = False
+    return snapshot
+
+
+def _snapshot_artifact_cache(snapshot: object) -> dict[str, object]:
+    """Return the one session-local artifact entry for ``snapshot``."""
+
+    current = st.session_state.get("_snapshot_artifact_cache")
+    snapshot_id = _new_snapshot_artifact_cache(snapshot)["snapshot_id"]
+    if not isinstance(current, dict) or current.get("snapshot_id") != snapshot_id:
+        current = _new_snapshot_artifact_cache(snapshot)
+        st.session_state["_snapshot_artifact_cache"] = current
+        st.session_state["_exports_ready"] = False
+        st.session_state["_analysis_exported"] = False
+    return current
+
+
+def _report_export_state(markup: str, exported: bool) -> str:
+    """Synchronize the hidden report marker with the current export state."""
+
+    state = "true" if exported else "false"
+    pattern = r"(<(?:span|div)\b[^>]*\bid=[\"']utaipei-analysis-state[\"'][^>]*\bdata-exported=[\"'])(?:true|false)([\"'])"
+    return re.sub(pattern, rf"\g<1>{state}\g<2>", markup, count=1)
+
+
 def _safe_error_message(error: BaseException | object) -> str:
     """Return a fixed user-facing error without exposing exception text."""
 
     from input_confirmation import classify_user_error
 
     return classify_user_error(error).message
+
+
+def _has_ephemeral_value(value: object) -> bool:
+    """Return whether a session value contains meaningful transient data."""
+
+    if value is None or value is False:
+        return False
+    if isinstance(value, (str, bytes, bytearray, memoryview)):
+        return bool(value)
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        return bool(value)
+    return True
+
+
+def _has_ephemeral_student_state(state: Mapping[str, Any] | None = None) -> bool:
+    """Detect every session-only student input that an update could discard.
+
+    This is deliberately a positive allowlist of known transient state rather
+    than a check for released/confirmed rows.  In particular, raw uploads,
+    parsed-but-unconfirmed rows, pending schedules, manual edits, and a cached
+    unexported snapshot all require the same update confirmation.
+    """
+
+    state = st.session_state if state is None else state
+    if _has_ephemeral_value(state.get("transcript_pdf_bytes")):
+        return True
+    if _has_ephemeral_value(state.get("transcript_pdf_path")):
+        return True
+
+    for key in (
+        "_editor_rows",
+        "editor_rows",
+        "manual_rows",
+        "manual_course_rows",
+        "manual_courses",
+        "manual_input_rows",
+        "manual_transcript_rows",
+        "pending_manual_rows",
+        "course_rows",
+        "transcript_rows_editor",
+        "confirmed_course_rows",
+    ):
+        if _has_ephemeral_value(state.get(key)):
+            return True
+
+    confirmation = state.get("_parsed_confirmation")
+    if confirmation is not None:
+        if _has_ephemeral_value(getattr(confirmation, "rows", None)):
+            return True
+        confirmation_state = getattr(confirmation, "state", None)
+        confirmation_value = getattr(confirmation_state, "value", confirmation_state)
+        if str(confirmation_value or "").upper() == ConfirmationState.CONFIRMED.value:
+            return True
+    for key in ("confirmed_input", "input_confirmation", "confirmation"):
+        if _has_ephemeral_value(state.get(key)):
+            return True
+    if _has_ephemeral_value(state.get("transcript_confirmed")):
+        return True
+    if _has_ephemeral_value(state.get("confirmed_course_fingerprint")):
+        return True
+    if _has_ephemeral_value(state.get("_source_fingerprint")):
+        return True
+
+    if _has_ephemeral_value(state.get("schedule_courses")):
+        return True
+    if _has_ephemeral_value(state.get(SCHEDULE_SCOPE_KEY)):
+        return True
+    if _has_ephemeral_value(state.get(PENDING_SCHEDULE_ROWS_KEY)):
+        return True
+    if _has_ephemeral_value(state.get(PENDING_SCHEDULE_SCOPE_KEY)):
+        return True
+    if _has_ephemeral_value(state.get("schedule_html")):
+        return True
+    if _has_ephemeral_value(state.get(TRANSCRIPT_SCOPE_KEY)):
+        return True
+
+    snapshot = state.get("_decision_snapshot_cache_value")
+    if snapshot is not None and not bool(state.get("_analysis_exported", False)):
+        return True
+    snapshot_artifacts = state.get("_snapshot_artifact_cache")
+    if _has_ephemeral_value(snapshot_artifacts) and not bool(state.get("_analysis_exported", False)):
+        return True
+    return False
 
 
 def _log_safe_failure(stage: str, error: BaseException) -> str:
@@ -139,11 +329,21 @@ def _mark_confirmation_unconfirmed(
     )
 
 
+def _verified_schedule_rows_for_analysis(sidebar_state: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """Release only a schedule bound to the current portal transcript scope."""
+
+    return get_verified_schedule_rows(
+        st.session_state,
+        year=sidebar_state.get("crawl_year") or st.session_state.get("crawl_year_input"),
+        semester=sidebar_state.get("crawl_semester") or st.session_state.get("crawl_semester_input"),
+    )
+
+
 def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation:
     """Parse current PDF/portal input and create or reuse parsed confirmation."""
 
     source = st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path")
-    schedule_rows = st.session_state.get("schedule_courses", ())
+    schedule_rows = _verified_schedule_rows_for_analysis(sidebar_state)
     if not source:
         st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
         return _empty_confirmation()
@@ -333,14 +533,22 @@ def _build_evaluation_request(
         transcript_confirmed=transcript_confirmed,
         confirmation_state=state,
         program_type=str(sidebar_state.get("program_type") or "單主修"),
+        secondary_kind=sidebar_state.get("secondary_kind"),
         target_curriculum_id=str(target_id) if target_id else None,
         target_curriculum_version_candidate=str(target_candidate) if target_candidate else None,
+        target_curriculum_year=sidebar_state.get("target_curriculum_year"),
         target_program=sidebar_state.get("target_program"),
         target_track=sidebar_state.get("target_track"),
         application_year=sidebar_state.get("application_year"),
         application_semester=sidebar_state.get("application_semester"),
         application_status=sidebar_state.get("application_self_report") or sidebar_state.get("application_status"),
         school_approval_status=sidebar_state.get("school_approval_self_report") or sidebar_state.get("school_approval_status"),
+        formal_qualification_status=(
+            sidebar_state.get("formal_qualification_self_report")
+            or sidebar_state.get("formal_qualification_status")
+        ),
+        formal_award_status=sidebar_state.get("formal_award_self_report") or sidebar_state.get("formal_award_status"),
+        input_warning_codes=tuple(sidebar_state.get("input_warning_codes", ())),
     )
 
 
@@ -349,12 +557,30 @@ def _render_official_decisions(snapshot: object) -> None:
     if not isinstance(decisions, Mapping):
         return
     st.markdown("### 官方判定（來自同一份分析快照）")
-    labels = (
-        ("primary_graduation", "主修畢業"),
-        ("double_major_qualification", "雙主修資格"),
-        ("formal_double_major_award", "正式授予雙主修"),
-        ("overall", "整體結果"),
+    labels = [("primary_graduation", "主修畢業")]
+    optional_groups = (
+        (
+            "double_major_qualification",
+            (
+                ("double_major_qualification", "雙主修資格"),
+                ("formal_double_major_award", "正式授予雙主修"),
+            ),
+        ),
+        (
+            "minor_application_or_qualification",
+            (
+                ("minor_application_or_qualification", "輔系申請／資格"),
+                ("minor_coursework_completion", "輔系課程完成度"),
+                ("formal_minor_award", "正式授予輔系"),
+            ),
+        ),
     )
+    for sentinel, group in optional_groups:
+        item = decisions.get(sentinel, {})
+        status = item.get("status", "UNKNOWN") if isinstance(item, Mapping) else "UNKNOWN"
+        if status != "NOT_APPLICABLE":
+            labels.extend(group)
+    labels.append(("overall", "整體結果"))
     for key, label in labels:
         item = decisions.get(key, {})
         status = item.get("status", "UNKNOWN") if isinstance(item, Mapping) else "UNKNOWN"
@@ -362,7 +588,7 @@ def _render_official_decisions(snapshot: object) -> None:
 
 
 def _render_snapshot_outputs(snapshot: object) -> None:
-    """Send exactly one snapshot to renderer and each exporter."""
+    """Render one snapshot and build exports only after an explicit action."""
 
     try:
         render_snapshot, build_pdf, build_allocation_csv, build_audit_json = _load_presentation_api()
@@ -370,30 +596,52 @@ def _render_snapshot_outputs(snapshot: object) -> None:
         st.info("報表元件尚在載入，分析快照已保留；請稍後重新整理。")
         return
 
-    try:
-        rendered_html = render_snapshot(snapshot)
-    except Exception as error:
-        _log_safe_failure("snapshot-render", error)
-        st.error("分析資料暫時無法轉為報表；固定分析快照仍保留，請重新整理後再試。")
-        return
+    artifacts = _snapshot_artifact_cache(snapshot)
+    rendered_html = artifacts.get("rendered_html")
+    if rendered_html is None:
+        try:
+            rendered_html = render_snapshot(snapshot)
+        except Exception as error:
+            _log_safe_failure("snapshot-render", error)
+            st.error("分析資料暫時無法轉為報表；固定分析快照仍保留，請重新整理後再試。")
+            return
+        artifacts["rendered_html"] = rendered_html
     try:
         # The report is already complete, sanitized HTML.  Sending it through
         # Markdown can terminate a raw-HTML block at embedded chart boundaries
         # and silently drop later charts and requirement expanders.
-        st.html(rendered_html)
+        render_html(
+            _report_export_state(str(rendered_html), bool(st.session_state.get("_analysis_exported", False))),
+            ui=st,
+        )
     except Exception as error:
         _log_safe_failure("snapshot-html", error)
         st.error("分析報表暫時無法顯示；固定分析快照仍保留，請重新整理後再試。")
         return
 
+    if not bool(st.session_state.get("_exports_ready", False)):
+        prepare = st.button(
+            "準備匯出檔案",
+            use_container_width=True,
+            key="prepare_snapshot_exports",
+            help="只有按下後才會建立 PDF、CSV 與稽核摘要，減少每次畫面重整的等待時間。",
+        )
+        if not prepare:
+            st.caption("需要檔案時再按「準備匯出檔案」；報表畫面不會預先建立匯出檔。")
+            return
+        st.session_state["_exports_ready"] = True
+
     downloads = (
-        ("下載列印 PDF", build_pdf, "utaipei-graduation-report.pdf", "application/pdf"),
-        ("下載課程配置 CSV", build_allocation_csv, "utaipei-allocation.csv", "text/csv"),
-        ("下載規則與判定摘要", build_audit_json, "utaipei-audit.json", "application/json"),
+        ("pdf", "下載列印 PDF", build_pdf, "utaipei-graduation-report.pdf", "application/pdf"),
+        ("csv", "下載課程配置 CSV", build_allocation_csv, "utaipei-allocation.csv", "text/csv"),
+        ("audit", "下載規則與判定摘要", build_audit_json, "utaipei-audit.json", "application/json"),
     )
-    for label, builder, filename, mime in downloads:
+    export_cache = artifacts.setdefault("exports", {})
+    for export_key, label, builder, filename, mime in downloads:
         try:
-            payload = builder(snapshot)
+            if export_key not in export_cache:
+                export_cache[export_key] = builder(snapshot)
+            payload = export_cache[export_key]
             clicked = st.download_button(
                 label,
                 data=payload,
@@ -409,18 +657,22 @@ def _render_snapshot_outputs(snapshot: object) -> None:
             st.session_state["_analysis_exported"] = True
 
 
-def _render_analysis_state_marker(*, active: bool) -> None:
+def _render_analysis_state_marker(*, active: bool | None = None) -> None:
+    # ``active`` remains a compatibility hint for callers/tests, while the
+    # session scan is authoritative so a raw or pending input cannot be missed.
+    has_ephemeral_state = _has_ephemeral_student_state()
+    active_state = has_ephemeral_state if active is None else bool(active) or has_ephemeral_state
     exported = bool(st.session_state.get("_analysis_exported", False))
-    st.markdown(
-        f"<div id='utaipei-analysis-state' data-analysis-active='{str(bool(active)).lower()}' "
+    render_html(
+        f"<div id='utaipei-analysis-state' data-analysis-active='{str(active_state).lower()}' "
         f"data-exported='{str(exported).lower()}'></div>",
-        unsafe_allow_html=True,
+        ui=st,
     )
 
 
 def main():
     setup_page()
-    render_header_card("北市大畢業通", "依入學年度規劃畢業與雙主修", landmark_id="main-content")
+    render_header_card("北市大畢業通", "依入學年度規劃畢業、輔系與雙主修", landmark_id="main-content")
     sidebar_state = render_setup_panel()
     collapse_sidebar_if_needed()
 
@@ -428,19 +680,22 @@ def main():
     has_source = bool(sidebar_state.get("has_transcript"))
     if has_source:
         confirmation = _render_confirmation_editor(confirmation)
+
+    if not has_source:
+        _clear_snapshot_caches()
+        _render_analysis_state_marker(active=False)
+        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；確認資料後這裡會顯示學分進度。")
+        return
+
     released_rows = _confirmed_rows(confirmation)
     request = _build_evaluation_request(sidebar_state, confirmation, released_rows=released_rows)
 
     # This is intentionally the only production evaluation call in this file.
     try:
-        snapshot = evaluate(request)
+        snapshot = _evaluate_cached_snapshot(request)
     except Exception as error:
         st.error(_safe_error_message(error))
         _render_analysis_state_marker(active=False)
-        return
-    if not has_source:
-        _render_analysis_state_marker(active=False)
-        st.info("完成上方設定後，請上傳歷年成績單 PDF，或用校務系統選項抓取；確認資料後這裡會顯示學分進度。")
         return
 
     _render_official_decisions(snapshot)

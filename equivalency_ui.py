@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from html import escape
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import pandas as pd
 import streamlit as st
 
 from equivalency_audit import (
     APPROVED,
-    AMBIGUOUS,
     DECISION_STATES,
     PENDING,
     PROPOSED,
@@ -21,7 +20,6 @@ from equivalency_audit import (
     detect_equivalency_candidates,
     source_attempt_id,
 )
-
 
 _STATE_LABELS = {
     PROPOSED: "候選／建議",

@@ -1112,6 +1112,227 @@ def resolve_formal_award(
     return _gate(UNKNOWN, code="FORMAL_AWARD_UNKNOWN", value=award_state or None, reason="官方正式紀錄沒有明確授予狀態。", record=record, scope="formal_award") | {"award_state": UNKNOWN, "is_official": False}
 
 
+def _resolve_minor_record_gate(
+    evidence_id: Any,
+    *,
+    evidence_resolver: Any,
+    record_types: set[str],
+    term: str | None,
+    program: str | None,
+    track: str | None,
+    state_keys: tuple[str, ...],
+    accepted_states: set[str],
+    rejected_states: set[str],
+    pass_code: str,
+    unknown_code: str,
+    reject_code: str,
+    scope: str,
+    pass_reason: str,
+    missing_reason: str,
+    reject_reason: str,
+) -> dict[str, Any]:
+    """Resolve an opaque minor evidence ID with the existing trust boundary.
+
+    Minor approvals and registrations are not double-major records.  They do
+    share the same server-owned ID, event, programme, authority and source
+    checks, but deliberately do not accept request-owned record dictionaries.
+    A subject binding is optional here because the minimum official evidence
+    for a minor in the research matrix is the department/registrar record
+    scoped to the application event; callers may still provide one and the
+    server resolver can enforce it upstream.
+    """
+
+    record = _resolve_server_record(
+        evidence_id,
+        evidence_resolver,
+        record_types=record_types,
+        term=term,
+        program=program,
+        track=track,
+        require_application_term=True,
+        require_program=True,
+    )
+    if record is None:
+        return _gate(UNKNOWN, code=unknown_code, reason=missing_reason) | {
+            "qualification_state": UNKNOWN,
+            "is_official": False,
+        }
+    value = str(_record_value(record, *state_keys) or "").strip().upper()
+    record_type = _record_type(record)
+    # A server-owned record with a dedicated positive type is itself the
+    # signed decision artifact in the minor evidence contract.  If an adapter
+    # omits a redundant ``status`` field, use only that type-specific default;
+    # never infer approval from the user's self-report.
+    if not value:
+        if "APPROVAL" in record_type:
+            value = "APPROVED"
+        elif "REGISTRATION" in record_type:
+            value = "REGISTERED"
+    if value in accepted_states:
+        result = _gate(PASS, code=pass_code, value=value, record=record, scope=scope, reason=pass_reason)
+        result.update({"qualification_state": value, "is_official": True, "record_type": record_type})
+        return result
+    if value in rejected_states:
+        result = _gate(FAIL, code=reject_code, value=value, record=record, scope=scope, reason=reject_reason)
+        result.update({"qualification_state": value, "is_official": True, "record_type": record_type})
+        return result
+    result = _gate(UNKNOWN, code=unknown_code, value=value or None, record=record, scope=scope, reason=missing_reason)
+    result.update({"qualification_state": UNKNOWN, "is_official": False, "record_type": record_type})
+    return result
+
+
+def resolve_minor_application_case(
+    self_reported: Any,
+    *,
+    department_approval: Any = None,
+    registrar_registration: Any = None,
+    formal_qualification: Any = None,
+    evidence_resolver: Any = None,
+) -> dict[str, Any]:
+    """Resolve the official qualification chain for a minor target.
+
+    ``self_reported`` is context only.  Every official gate still requires an
+    opaque ID resolved by ``evidence_resolver``; a claim such as ``已申請`` can
+    therefore never become a PASS by itself.
+    """
+
+    context = _safe_self_report(self_reported)
+    term = _normalize_term(context.get("application_term"))
+    target_program, target_track = _target_program_and_track(context.get("target_program"))
+    explicit_track = _normalize_track(context.get("target_track"), target_program)
+    if explicit_track:
+        target_track = explicit_track
+    approval = _resolve_minor_record_gate(
+        department_approval,
+        evidence_resolver=evidence_resolver,
+        record_types={"MINOR_APPROVAL", "MINOR_DEPARTMENT_APPROVAL", "MINOR_APPROVAL_RECORD"},
+        term=term,
+        program=target_program,
+        track=target_track,
+        state_keys=("decision", "department_decision", "approval_status", "status"),
+        accepted_states={"APPROVED", "QUALIFIED", "GRANTED"},
+        rejected_states={"REJECTED", "DENIED", "NOT_APPROVED"},
+        pass_code="MINOR_DEPARTMENT_APPROVED",
+        unknown_code="MINOR_DEPARTMENT_APPROVAL_UNKNOWN",
+        reject_code="MINOR_DEPARTMENT_REJECTED",
+        scope="minor_department_approval",
+        pass_reason="系所正式輔系核准紀錄已核實。",
+        missing_reason="缺少與目前申請事件及目標系所相符的系所輔系核准紀錄。",
+        reject_reason="系所正式紀錄顯示輔系申請未核准。",
+    )
+    registration = _resolve_minor_record_gate(
+        registrar_registration,
+        evidence_resolver=evidence_resolver,
+        record_types={"MINOR_REGISTRATION", "MINOR_REGISTRAR_REGISTRATION", "MINOR_REGISTRATION_RECORD"},
+        term=term,
+        program=target_program,
+        track=target_track,
+        state_keys=("registration_status", "status", "decision"),
+        accepted_states={"REGISTERED", "ACTIVE", "APPROVED"},
+        rejected_states={"REJECTED", "DENIED", "NOT_REGISTERED"},
+        pass_code="MINOR_REGISTRAR_REGISTERED",
+        unknown_code="MINOR_REGISTRATION_UNKNOWN",
+        reject_code="MINOR_REGISTRATION_REJECTED",
+        scope="minor_registrar_registration",
+        pass_reason="教務處正式輔系登錄紀錄已核實。",
+        missing_reason="缺少與目前申請事件及目標系所相符的教務處輔系登錄紀錄。",
+        reject_reason="教務處正式紀錄顯示輔系未登錄。",
+    )
+    qualification = _resolve_minor_record_gate(
+        formal_qualification,
+        evidence_resolver=evidence_resolver,
+        record_types={"MINOR_QUALIFICATION", "MINOR_FORMAL_QUALIFICATION", "MINOR_QUALIFICATION_RECORD"},
+        term=term,
+        program=target_program,
+        track=target_track,
+        state_keys=("qualification_status", "qualification_state", "status", "decision"),
+        accepted_states={"QUALIFIED", "APPROVED", "GRANTED", "REGISTERED"},
+        rejected_states={"REJECTED", "DENIED", "NOT_QUALIFIED", "NOT_ELIGIBLE"},
+        pass_code="MINOR_QUALIFICATION_VERIFIED",
+        unknown_code="MINOR_QUALIFICATION_UNKNOWN",
+        reject_code="MINOR_QUALIFICATION_NOT_GRANTED",
+        scope="minor_formal_qualification",
+        pass_reason="官方正式輔系資格紀錄已核實。",
+        missing_reason="沒有與目前申請事件及目標系所相符的官方輔系資格紀錄。",
+        reject_reason="官方正式紀錄顯示未取得輔系資格。",
+    )
+    statuses = [approval.get("status", UNKNOWN), registration.get("status", UNKNOWN)]
+    overall = _aggregate_status(statuses)
+    blockers = []
+    for name, gate in (("department_approval", approval), ("registrar_registration", registration), ("formal_qualification", qualification)):
+        if gate.get("status") in {FAIL, UNKNOWN}:
+            blockers.append({"code": gate.get("code") or gate.get("status"), "dimension": name, "reason": gate.get("reason", "")})
+    evidence_ids = []
+    provenance = []
+    for gate in (approval, registration, qualification):
+        for evidence_id in gate.get("evidence_ids", ()):
+            if evidence_id and evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+        provenance.extend(gate.get("provenance", ()))
+    return {
+        "status": overall,
+        "state": overall,
+        "can_pass": overall == PASS,
+        "application_term": term,
+        "target_program": target_program,
+        "target_track": target_track,
+        "self_reported": _public_self_report(context),
+        "department_decision": approval,
+        "department": approval,
+        "registrar_registration": registration,
+        "registration": registration,
+        "formal_qualification": qualification,
+        "gates": {
+            "department_approval": approval.get("status", UNKNOWN),
+            "registrar_registration": registration.get("status", UNKNOWN),
+            "formal_qualification": qualification.get("status", UNKNOWN),
+        },
+        "blockers": blockers,
+        "evidence_ids": evidence_ids,
+        "provenance": provenance,
+    }
+
+
+def resolve_minor_award(
+    opaque_evidence_id: Any = None,
+    *,
+    evidence_resolver: Any = None,
+    target_program: Any = None,
+    target_track: Any = None,
+) -> dict[str, Any]:
+    """Resolve an independent official ``MINOR_AWARD`` record."""
+
+    program = _normalize_program(target_program) if target_program is not None else None
+    track = _normalize_track(target_track, program) if target_track is not None else None
+    record = _resolve_server_record(
+        opaque_evidence_id,
+        evidence_resolver,
+        record_types={"MINOR_AWARD", "MINOR_FORMAL_AWARD", "MINOR_AWARD_RECORD"},
+        program=program,
+        track=track,
+        require_program=True,
+    )
+    if record is None:
+        return _gate(UNKNOWN, code="MINOR_AWARD_UNKNOWN", reason="沒有可核實的官方 MINOR_AWARD_RECORD；課程完成不能代替正式授予紀錄。") | {
+            "award_state": UNKNOWN,
+            "is_official": False,
+        }
+    award_state = str(_record_value(record, "award_state", "award_status", "decision", "status") or "").strip().upper()
+    if not award_state and "AWARD" in _record_type(record):
+        award_state = GRANTED
+    if award_state == GRANTED:
+        result = _gate(PASS, code="MINOR_AWARD_GRANTED", value=GRANTED, record=record, scope="minor_formal_award", reason="官方正式授予輔系紀錄已核實。")
+        result.update({"award_state": GRANTED, "is_official": True, "record_type": _record_type(record)})
+        return result
+    if award_state in {"REVOKED", "DENIED", "NOT_GRANTED"}:
+        result = _gate(FAIL, code="MINOR_AWARD_NOT_GRANTED", value=award_state, record=record, scope="minor_formal_award", reason="官方正式紀錄顯示未授予或已撤銷輔系。")
+        result.update({"award_state": award_state, "is_official": True, "record_type": _record_type(record)})
+        return result
+    result = _gate(UNKNOWN, code="MINOR_AWARD_UNKNOWN", value=award_state or None, record=record, scope="minor_formal_award", reason="官方正式輔系授予紀錄沒有明確狀態。")
+    result.update({"award_state": UNKNOWN, "is_official": False, "record_type": _record_type(record)})
+    return result
+
+
 __all__ = [
     "ACTIVE",
     "CONFLICTED",
@@ -1129,6 +1350,8 @@ __all__ = [
     "SUBMISSION_UNKNOWN",
     "UNKNOWN",
     "get_notice_resolution",
+    "resolve_minor_application_case",
+    "resolve_minor_award",
     "resolve_application_case",
     "resolve_formal_qualification",
     "resolve_formal_award",

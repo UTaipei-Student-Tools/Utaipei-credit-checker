@@ -28,6 +28,30 @@ def format_credit(value):
     return f"{numeric:.1f}"
 
 
+def render_html(markup, *, ui=None):
+    """Render a non-script HTML fragment through Streamlit's HTML element.
+
+    ``st.markdown(..., unsafe_allow_html=True)`` is intentionally kept out of
+    this seam.  Large style/raw-HTML blocks can be parsed as visible Markdown
+    by a deployed Streamlit build, which exposes implementation markup to the
+    user.  ``st.html`` keeps the fragment in the HTML element boundary.  The
+    fallback is only for older test/legacy runtimes that do not expose
+    ``st.html``; it is never used for JavaScript.
+    """
+
+    markup = str(markup)
+    if "<script" in markup.casefold():
+        raise ValueError("render_html only accepts non-script markup")
+    ui = ui or st
+    html_renderer = getattr(ui, "html", None)
+    if callable(html_renderer):
+        return html_renderer(markup)
+    markdown_renderer = getattr(ui, "markdown", None)
+    if callable(markdown_renderer):  # Streamlit 1.49 and older compatibility.
+        return markdown_renderer(markup, unsafe_allow_html=True)
+    raise AttributeError("Streamlit HTML renderer is unavailable")
+
+
 def setup_page():
     page_icon = Path(__file__).resolve().parent / "static" / "icons" / "ut-graduation-v2-32.png"
     st.set_page_config(
@@ -37,10 +61,7 @@ def setup_page():
         initial_sidebar_state="collapsed",
     )
     inject_theme_css()
-    st.markdown(
-        '<a class="skip-link" href="#main-content">跳到主要內容</a>',
-        unsafe_allow_html=True,
-    )
+    render_html('<a class="skip-link" href="#main-content">跳到主要內容</a>')
     _inject_update_menu_script()
 
 
@@ -59,7 +80,10 @@ def _build_update_menu_script():
     const LABEL = "更新至最新版";
     const ITEM_TEST_ID = "utMainMenuItem-update";
     const STATE_KEY = "__utaipeiGraduationMenuEnhancer";
-    const ANALYSIS_STATE_SELECTOR = "#utaipei-analysis-state[data-analysis-active='true'][data-exported='false']";
+    // This marker covers all transient student state, including data that was
+    // already exported but is still resident in this browser session.  The
+    // server owns the truth table; the DOM only carries a non-sensitive bool.
+    const ANALYSIS_STATE_SELECTOR = "#utaipei-analysis-state[data-analysis-active='true']";
     const STATIC_CACHE_PREFIX = "utaipei-graduation-static-";
     const THEME_STATE_KEY = "__utaipeiGraduationThemeBridge";
     const THEME_STATE_VERSION = 2;
@@ -325,7 +349,7 @@ def _build_update_menu_script():
         // Check before touching the worker or Cache Storage.  Cancel therefore
         // has no mutation and no navigation side effect.
         if (unsavedAnalysis) {
-            if (!parentWindow.confirm("分析資料尚未匯出，更新可能需要重新確認上傳內容。仍要更新嗎？")) {
+            if (!parentWindow.confirm("本次工作階段仍有暫存分析資料，更新後可能需要重新確認上傳內容。仍要更新嗎？")) {
                 return;
             }
         }
@@ -499,7 +523,7 @@ def inject_theme_css():
     legacy data-theme fallbacks, and a final parent-document bridge override.
     """
 
-    st.markdown(
+    render_html(
         """
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&display=swap');
@@ -1494,8 +1518,8 @@ def inject_theme_css():
             *::-webkit-scrollbar-thumb:hover { background: var(--ui-accent); }
             * { scrollbar-color: var(--ui-border-strong) var(--ui-canvas-raised); scrollbar-width: thin; }
         </style>
+        <span data-utaipei-theme-style-marker hidden aria-hidden="true"></span>
         """,
-        unsafe_allow_html=True,
     )
 
 
@@ -1510,7 +1534,7 @@ def draw_premium_progress(label, completed, required, ip=0.0):
     required_text = format_credit(required)
     ip_markup = f'／修讀中 <b class="credit-ip">{ip_text}</b>' if ip > 0 else ""
 
-    st.markdown(
+    render_html(
         f"""
         <div class="progress-container" role="group" aria-label="{escape(str(label))}進度">
             <div class="progress-label-row">
@@ -1523,25 +1547,23 @@ def draw_premium_progress(label, completed, required, ip=0.0):
             </div>
         </div>
         """,
-        unsafe_allow_html=True,
     )
 
 
 def render_header_card(title, subtitle, landmark_id=None):
     landmark_attr = f' id="{escape(str(landmark_id))}"' if landmark_id else ""
-    st.markdown(
+    render_html(
         f"""
         <header class="header-card"{landmark_attr} tabindex="-1">
             <div class="header-title">{escape(str(title))}</div>
             <div class="header-subtitle">{escape(str(subtitle))}</div>
         </header>
         """,
-        unsafe_allow_html=True,
     )
 
 
 def render_landing_message():
-    st.markdown(
+    render_html(
         """
         <section class="hero-callout" aria-label="開始方式">
             <b>開始畢業盤點</b><br>
@@ -1549,5 +1571,4 @@ def render_landing_message():
             <small>結果供自我檢查；正式畢業資格仍以校方審核為準。</small>
         </section>
         """,
-        unsafe_allow_html=True,
     )

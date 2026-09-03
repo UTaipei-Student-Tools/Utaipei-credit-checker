@@ -37,6 +37,9 @@ _CSV_FIELDS = (
     "unallocated_credits",
     "requirement_id",
     "requirement_name",
+    "requirement_status",
+    "requirement_status_authoritative",
+    "requirement_observed_status",
     "credits",
     "allocation_kind",
     "direction",
@@ -45,8 +48,14 @@ _CSV_FIELDS = (
     "allocation_reason",
     "allocations_json",
     "warnings_json",
+    "presentation_warnings_json",
+    "course_counts_json",
+    "requirement_counts_json",
     "blockers_json",
+    "statistics_schema",
+    "statistics_digest",
     "statistics_json",
+    "chart_datasets_json",
     "decisions_json",
 )
 
@@ -91,6 +100,14 @@ def _requirement_names(view: Mapping[str, Any]) -> Mapping[str, str]:
     }
 
 
+def _requirement_views(view: Mapping[str, Any]) -> Mapping[str, Mapping[str, Any]]:
+    return {
+        _text(item.get("requirement_id")): item
+        for item in view.get("requirements", ())
+        if isinstance(item, Mapping) and _text(item.get("requirement_id"))
+    }
+
+
 def build_snapshot_export_payload(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
     """Return the canonical export payload derived from one snapshot read."""
 
@@ -102,6 +119,10 @@ def build_snapshot_export_payload(snapshot: DecisionSnapshot) -> Mapping[str, An
         "_export_schema": _EXPORT_SCHEMA,
         "_source": "DecisionSnapshot",
         "_projection_schema": view.get("_projection_schema"),
+        "statistics_schema": view.get("statistics_schema") or (view.get("summary", {}).get("statistics_schema") if isinstance(view.get("summary"), Mapping) else ""),
+        "statistics_digest": view.get("statistics_digest") or (view.get("summary", {}).get("statistics_digest") if isinstance(view.get("summary"), Mapping) else ""),
+        "_statistics_schema": view.get("statistics_schema") or (view.get("summary", {}).get("statistics_schema") if isinstance(view.get("summary"), Mapping) else ""),
+        "_statistics_digest": view.get("statistics_digest") or (view.get("summary", {}).get("statistics_digest") if isinstance(view.get("summary"), Mapping) else ""),
         "snapshot_id": view.get("snapshot_id"),
         "_snapshot_id": view.get("snapshot_id"),
         "evaluated_at": view.get("evaluated_at"),
@@ -115,8 +136,12 @@ def build_snapshot_export_payload(snapshot: DecisionSnapshot) -> Mapping[str, An
         "allocation": _plain(view.get("allocation", {})),
         "alternatives": _plain(view.get("alternatives", ())),
         "warnings": _plain(view.get("warnings", ())),
+        "presentation_warnings": _plain(view.get("presentation_warnings", ())),
+        "course_counts": _plain(view.get("course_counts", view.get("summary", {}).get("course_counts", {}) if isinstance(view.get("summary"), Mapping) else {})),
+        "requirement_counts": _plain(view.get("requirement_counts", view.get("summary", {}).get("requirement_counts", {}) if isinstance(view.get("summary"), Mapping) else {})),
         "blockers": _plain(view.get("blockers", ())),
         "statistics": _plain(view.get("statistics", {})),
+        "chart_datasets": _plain(view.get("chart_datasets", {})),
         "rule_provenance": _plain(view.get("rule_provenance", ())),
         "remediation_suggestions": _plain(view.get("remediation_suggestions", ())),
         "input_confirmation": _plain(view.get("input_confirmation", {})),
@@ -130,6 +155,7 @@ def _allocation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         if isinstance(item, Mapping) and _text(item.get("attempt_id"))
     }
     requirement_names = _requirement_names(payload)
+    requirement_views = _requirement_views(payload)
     allocations = [item for item in payload.get("allocations", ()) if isinstance(item, Mapping)]
     rows: list[dict[str, Any]] = []
     for allocation in allocations:
@@ -153,18 +179,28 @@ def _allocation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             # exported detail file is independently auditable.
             "allocations_json": _json(payload.get("allocations", ())),
             "warnings_json": _json(payload.get("warnings", ())),
+            "presentation_warnings_json": _json(payload.get("presentation_warnings", ())),
+            "course_counts_json": _json(payload.get("course_counts", {})),
+            "requirement_counts_json": _json(payload.get("requirement_counts", {})),
             "blockers_json": _json(payload.get("blockers", ())),
+            "statistics_schema": payload.get("statistics_schema", ""),
+            "statistics_digest": payload.get("statistics_digest", ""),
             "statistics_json": _json(payload.get("statistics", {})),
+            "chart_datasets_json": _json(payload.get("chart_datasets", {})),
             "decisions_json": _json(payload.get("decisions", {})),
         }
         if portions:
             for portion in portions:
                 requirement_id = _text(portion.get("requirement_id"))
+                requirement_view = requirement_views.get(requirement_id, {})
                 rows.append(
                     {
                         **base,
                         "requirement_id": requirement_id,
                         "requirement_name": requirement_names.get(requirement_id, ""),
+                        "requirement_status": requirement_view.get("status", UNKNOWN),
+                        "requirement_status_authoritative": requirement_view.get("status_authoritative", False),
+                        "requirement_observed_status": requirement_view.get("observed_status", UNKNOWN),
                         "credits": portion.get("credits", ""),
                         "allocation_kind": portion.get("allocation_kind", ""),
                         "direction": portion.get("direction", ""),
@@ -178,6 +214,9 @@ def _allocation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                     **base,
                     "requirement_id": "",
                     "requirement_name": "",
+                    "requirement_status": UNKNOWN,
+                    "requirement_status_authoritative": False,
+                    "requirement_observed_status": UNKNOWN,
                     "credits": "0",
                     "allocation_kind": "UNALLOCATED",
                     "direction": "",
@@ -202,6 +241,9 @@ def _allocation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "unallocated_credits": "0",
             "requirement_id": "",
             "requirement_name": "",
+            "requirement_status": UNKNOWN,
+            "requirement_status_authoritative": False,
+            "requirement_observed_status": UNKNOWN,
             "credits": "0",
             "allocation_kind": "NO_DATA",
             "direction": "",
@@ -210,8 +252,14 @@ def _allocation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "allocation_reason": MANUAL_LABEL,
             "allocations_json": _json(payload.get("allocations", ())),
             "warnings_json": _json(payload.get("warnings", ())),
+            "presentation_warnings_json": _json(payload.get("presentation_warnings", ())),
+            "course_counts_json": _json(payload.get("course_counts", {})),
+            "requirement_counts_json": _json(payload.get("requirement_counts", {})),
             "blockers_json": _json(payload.get("blockers", ())),
+            "statistics_schema": payload.get("statistics_schema", ""),
+            "statistics_digest": payload.get("statistics_digest", ""),
             "statistics_json": _json(payload.get("statistics", {})),
+            "chart_datasets_json": _json(payload.get("chart_datasets", {})),
             "decisions_json": _json(payload.get("decisions", {})),
         }
     ]
@@ -238,19 +286,27 @@ def build_audit_json(snapshot: DecisionSnapshot) -> bytes:
 
 def _pdf_lines(payload: Mapping[str, Any]) -> list[str]:
     summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    course_counts = payload.get("course_counts") if isinstance(payload.get("course_counts"), Mapping) else {}
+    requirement_counts = payload.get("requirement_counts") if isinstance(payload.get("requirement_counts"), Mapping) else {}
     lines = [
         "北市大畢業通｜可稽核分析摘要",
         f"DecisionSnapshot：{_text(payload.get('snapshot_id'))}",
         f"評估時間：{_text(payload.get('evaluated_at'))}",
         f"判定：{_text(payload.get('verdict'), 'UNKNOWN')}",
+        f"統計 schema／digest：{_text(payload.get('_statistics_schema'), 'decision-statistics.v2')}／{_text(payload.get('_statistics_digest'), MANUAL_LABEL)}",
         "",
         "摘要",
-        f"總畢業學分：{_text(summary.get('total_graduation_credits'), MANUAL_LABEL)}",
+        f"來源實得學分：{_text(summary.get('source_earned_credits'), MANUAL_LABEL)}（不等於畢業要求總量）",
+        f"正式配置學分：{_text(summary.get('counted_exclusive_credits'), MANUAL_LABEL)}",
         f"要求總量：{_text(summary.get('required_graduation_credits'), MANUAL_LABEL)}",
         f"主修完成度：{_text(summary.get('primary_status'), UNKNOWN)}",
         f"雙主修完成度：{_text(summary.get('double_major_status'), NOT_APPLICABLE)}",
-        f"已完成／修習中：{_text(summary.get('completed'), MANUAL_LABEL)}／{_text(summary.get('in_progress'), MANUAL_LABEL)}",
-        f"尚缺／待確認：{_text(summary.get('missing'), MANUAL_LABEL)}／{_text(summary.get('unknown'), MANUAL_LABEL)}",
+        f"輔系申請／資格：{_text(summary.get('minor_application_status'), NOT_APPLICABLE)}",
+        f"輔系課程完成度：{_text(summary.get('minor_coursework_status'), NOT_APPLICABLE)}；已配置 {_text(summary.get('minor_credits'), '0')} 學分",
+        f"正式授予輔系：{_text(summary.get('formal_minor_award_status'), NOT_APPLICABLE)}",
+        f"課程列數（已完成／修習中／待確認）：{_text(course_counts.get('PASS'), MANUAL_LABEL)}／{_text(course_counts.get('IN_PROGRESS'), MANUAL_LABEL)}／{_text(course_counts.get('UNKNOWN'), MANUAL_LABEL)}",
+        f"要求項目數（通過／未通過／待確認）：{_text(requirement_counts.get('PASS'), MANUAL_LABEL)}／{_text(requirement_counts.get('FAIL'), MANUAL_LABEL)}／{_text(requirement_counts.get('UNKNOWN'), MANUAL_LABEL)}",
+        f"要求缺額項目數：{_text(requirement_counts.get('deficit_count'), MANUAL_LABEL)}",
         f"已認列／尚未配置：{_text(summary.get('recognized_credits'), MANUAL_LABEL)}／{_text(summary.get('unallocated_credits'), MANUAL_LABEL)}",
         "",
         "判定與規則來源",
@@ -308,7 +364,10 @@ def _pdf_lines(payload: Mapping[str, Any]) -> list[str]:
     lines.extend(("警告",))
     warnings = payload.get("warnings", ())
     lines.extend(f"- {_text(item)}" for item in warnings) if warnings else lines.append("無")
-    lines.extend(("最短安全補修建議",))
+    lines.append("呈現提醒")
+    presentation_warnings = payload.get("presentation_warnings", ())
+    lines.extend(f"- {_text(item)}" for item in presentation_warnings) if presentation_warnings else lines.append("無")
+    lines.extend((f"安全補修方向（{_text(summary.get('remediation_status'), 'DIRECTION_ONLY')}）",))
     suggestions = payload.get("remediation_suggestions", ())
     lines.extend(f"- {_text(item)}" for item in suggestions) if suggestions else lines.append(MANUAL_LABEL)
     lines.extend(
@@ -319,8 +378,12 @@ def _pdf_lines(payload: Mapping[str, Any]) -> list[str]:
             "verdict=" + _text(payload.get("verdict"), UNKNOWN),
             "allocations=" + _json(payload.get("allocations", ())),
             "warnings=" + _json(payload.get("warnings", ())),
+            "presentation_warnings=" + _json(payload.get("presentation_warnings", ())),
+            "course_counts=" + _json(payload.get("course_counts", {})),
+            "requirement_counts=" + _json(payload.get("requirement_counts", {})),
             "blockers=" + _json(payload.get("blockers", ())),
             "statistics=" + _json(payload.get("statistics", {})),
+            "chart_datasets=" + _json(payload.get("chart_datasets", {})),
         )
     )
     return lines

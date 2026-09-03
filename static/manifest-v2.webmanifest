@@ -2,7 +2,7 @@
   "id": "/utaipei-graduation-credit-planner",
   "name": "北市大畢業通",
   "short_name": "畢業通",
-  "description": "依北市大學生手冊與成績單規劃畢業門檻、雙主修與學分缺口。",
+  "description": "依北市大學生手冊與成績單規劃畢業門檻、輔系、雙主修與學分缺口。",
   "lang": "zh-TW",
   "start_url": "/",
   "scope": "/",

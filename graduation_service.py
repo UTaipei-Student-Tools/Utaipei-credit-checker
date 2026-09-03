@@ -44,7 +44,12 @@ from allocation_engine import (
     RequirementSpec,
     allocate_credits,
 )
-from application_resolution import resolve_application_case, resolve_formal_award
+from application_resolution import (
+    resolve_application_case,
+    resolve_formal_award,
+    resolve_minor_application_case,
+    resolve_minor_award,
+)
 from curriculum_registry import get_curriculum, resolve_rule_context
 from decision_snapshot import DecisionSnapshot
 from input_confirmation import (
@@ -54,12 +59,14 @@ from input_confirmation import (
     fingerprint_course_rows,
     release_formal_attempts,
 )
+from snapshot_projection import build_statistics_v2
 
 SERVICE_SCHEMA_VERSION = "graduation-evaluation.v1"
 ENGINE_VERSION = "graduation-service.v1"
 
 _DOUBLE_MAJOR = "雙主修"
-_TEXT_FIELDS = frozenset({"admission_cohort", "primary_curriculum_id", "program_type"})
+_TEXT_FIELDS = frozenset({"admission_cohort", "primary_curriculum_id", "program_type", "secondary_kind", "target_curriculum_year"})
+INPUT_WARNING_CODES = frozenset({"SCHEDULE_SCOPE_MISMATCH", "SCHEDULE_SCOPE_UNVERIFIED"})
 _EVIDENCE_FIELDS = (
     "target_curriculum_evidence_id",
     "rule_applicability_evidence_id",
@@ -133,6 +140,26 @@ def _is_double_major(value: Any) -> bool:
     return normalized == _DOUBLE_MAJOR or normalized.lower() in {"double", "double_major", "dm"}
 
 
+def _secondary_kind(value: Any, program_type: Any = None) -> str:
+    """Normalize the additive secondary role without breaking old callers."""
+
+    candidate = _text(value) or _text(program_type)
+    normalized = candidate.lower().replace("-", "_").replace(" ", "")
+    if normalized in {"minor", "minor_target", "secondary_minor", "輔系"}:
+        return "minor"
+    if _is_double_major(candidate):
+        return "double_major"
+    return "none"
+
+
+def _is_minor_request(request: EvaluationRequest) -> bool:
+    return _secondary_kind(request.secondary_kind, request.program_type) == "minor"
+
+
+def _is_double_request(request: EvaluationRequest) -> bool:
+    return _secondary_kind(request.secondary_kind, request.program_type) == "double_major"
+
+
 def _course_label(value: Any) -> str:
     """Normalize punctuation/spacing only; never perform fuzzy matching."""
 
@@ -185,6 +212,12 @@ def _safe_provenance(record: Any, *, requirement_id: str = "", scope: str = "") 
         "coverage_state",
         "extraction_method",
         "named_course_pool_state",
+        "research_file",
+        "verification_status",
+        "automatic_decision",
+        "manual_reason",
+        "original_clause",
+        "original_text",
     )
     for key in keys:
         value = record.get(key)
@@ -194,7 +227,12 @@ def _safe_provenance(record: Any, *, requirement_id: str = "", scope: str = "") 
     coverage_state = _text(result.get("coverage_state")) or NONE
     result["evidence_state"] = evidence_state
     result["coverage_state"] = coverage_state
-    result["automatic_decision"] = evidence_state == VERIFIED and coverage_state == COMPLETE
+    explicit_automatic = result.get("automatic_decision")
+    result["automatic_decision"] = (
+        bool(explicit_automatic)
+        if isinstance(explicit_automatic, bool)
+        else evidence_state == VERIFIED and coverage_state == COMPLETE
+    )
     return result
 
 
@@ -227,6 +265,12 @@ def _safe_curriculum(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "status",
         "pass_eligible",
         "legacy_planning",
+        "research_file",
+        "warnings",
+        "blockers",
+        "manual_review_reasons",
+        "zero_credit_gate",
+        "conflicted_course_names",
     ):
         value = record.get(key)
         if isinstance(value, (str, int, float, bool, Decimal)):
@@ -278,13 +322,60 @@ def _safe_curriculum(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
             "dept",
             "section",
             "named_course_pool_state",
+            "eligible_course_names",
+            "eligible_course_options",
+            "accept_any",
+            "waiver",
+            "waiver_generates_credits",
+            "allow_combined_lab_source",
+            "source_assertion_id",
+            "assertion_id",
+            "research_file",
+            "verification_status",
+            "automatic_decision",
+            "manual_reason",
+            "original_clause",
+            "original_text",
+            "table_location",
         ):
             value = row.get(key)
             if isinstance(value, (str, int, float, bool, Decimal)):
                 safe[key] = str(value) if isinstance(value, Decimal) else value
+            elif key == "eligible_course_names" and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                safe[key] = tuple(_text(item) for item in value if _text(item))
+            elif key == "eligible_course_options" and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                safe[key] = tuple(
+                    {"name": _text(item.get("name")), "credits": _text(item.get("credits"))}
+                    for item in value
+                    if isinstance(item, Mapping) and _text(item.get("name"))
+                )
         catalog.append(safe)
     result["course_catalog"] = tuple(sorted(catalog, key=lambda item: (str(item.get("id", "")), str(item.get("name", "")))))
+    for key in ("warnings", "manual_review_reasons"):
+        value = record.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            result[key] = tuple(_text(item) for item in value if _text(item))
+    blockers = record.get("blockers")
+    if isinstance(blockers, Sequence) and not isinstance(blockers, (str, bytes, bytearray)):
+        result["blockers"] = tuple(
+            _safe_blocker(item) if isinstance(item, Mapping) else {"reason": _text(item)}
+            for item in blockers
+            if isinstance(item, Mapping) or _text(item)
+        )
+    for key in ("zero_credit_gate",):
+        if isinstance(record.get(key), bool):
+            result[key] = bool(record[key])
+    for key in ("conflicted_course_names",):
+        value = record.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            result[key] = tuple(_text(item) for item in value if _text(item))
     result["citations"] = tuple(_safe_provenance(item) for item in record.get("citations", ()) if isinstance(item, Mapping))
+    result["source_assertions"] = tuple(
+        _safe_provenance({**dict(record), **dict(item)}, scope="curriculum_assertion")
+        for item in record.get("source_assertions", record.get("assertions", ()))
+        if isinstance(item, Mapping)
+    )
+    result["assertions"] = result["source_assertions"]
     return result
 
 
@@ -326,12 +417,16 @@ class EvaluationRequest:
     course_confirmation: CourseConfirmation | None = None
     input_confirmation_state: str | None = None
     program_type: str = "單主修"
+    # Explicit secondary role; ``program_type`` remains a compatibility
+    # spelling for existing single/double-major callers.
+    secondary_kind: str | None = None
     target_curriculum_id: str | None = None
     target_curriculum_version_candidate: str | None = None
     # ``target_curriculum_version`` is retained as an explicit alias because
     # older callers use that wording.  It is never inferred from cohort.
     target_curriculum_version: str | None = None
     target_curriculum_version_id: str | None = None
+    target_curriculum_year: str | int | None = None
     target_program: str | None = None
     target_track: str | None = None
     application_year: str | int | None = None
@@ -361,6 +456,9 @@ class EvaluationRequest:
     notice_evidence_ids: tuple[str, ...] = ()
     as_of: str | None = None
     search_limit: int = 10000
+    # Only fixed, non-sensitive warning codes may cross the UI -> service
+    # boundary.  Account fingerprints, scopes, and raw portal data never do.
+    input_warning_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         rows = self.confirmed_course_rows
@@ -387,6 +485,7 @@ class EvaluationRequest:
         object.__setattr__(self, "admission_cohort", _text(self.admission_cohort))
         object.__setattr__(self, "primary_curriculum_id", _text(self.primary_curriculum_id))
         object.__setattr__(self, "program_type", _text(self.program_type) or "單主修")
+        object.__setattr__(self, "secondary_kind", _secondary_kind(self.secondary_kind, self.program_type))
         fingerprint = _text(self.confirmed_course_fingerprint) or _text(self.confirmed_fingerprint)
         object.__setattr__(self, "confirmed_course_fingerprint", fingerprint)
         object.__setattr__(self, "confirmed_fingerprint", fingerprint)
@@ -420,6 +519,7 @@ class EvaluationRequest:
             "target_curriculum_version",
             "target_program",
             "target_track",
+            "target_curriculum_year",
             "application_term",
             "application_status",
             "school_approval_status",
@@ -458,6 +558,14 @@ class EvaluationRequest:
         object.__setattr__(self, "equivalency_binding_ids", self.equivalency_evidence_ids)
         object.__setattr__(self, "official_evidence_ids", _unique_text(self.official_evidence_ids))
         object.__setattr__(self, "notice_evidence_ids", _unique_text(self.notice_evidence_ids))
+        warning_codes = []
+        raw_warning_codes = self.input_warning_codes
+        if isinstance(raw_warning_codes, Sequence) and not isinstance(raw_warning_codes, (str, bytes, bytearray)):
+            for item in raw_warning_codes:
+                code = _text(item)
+                if code in INPUT_WARNING_CODES and code not in warning_codes:
+                    warning_codes.append(code)
+        object.__setattr__(self, "input_warning_codes", tuple(warning_codes))
         try:
             limit = int(self.search_limit)
         except (TypeError, ValueError, OverflowError):
@@ -517,9 +625,11 @@ class EvaluationRequest:
             "transcript_confirmed": self.transcript_confirmed,
             "confirmation_state": self.confirmation_state,
             "program_type": self.program_type,
+            "secondary_kind": self.secondary_kind,
             "target_curriculum_id": self.target_curriculum_id,
             "target_curriculum_version_candidate": self.target_curriculum_version_candidate,
             "target_curriculum_version": self.target_curriculum_version,
+            "target_curriculum_year": self.target_curriculum_year,
             "target_program": self.target_program,
             "target_track": self.target_track,
             "application_year": self.application_year,
@@ -529,6 +639,7 @@ class EvaluationRequest:
             "school_approval_status": self.school_approval_status,
             "formal_qualification_status": self.formal_qualification_status,
             "formal_award_status": self.formal_award_status,
+            "input_warning_codes": self.input_warning_codes,
             "equivalency_evidence_ids": self.equivalency_evidence_ids,
             "official_evidence_ids": self.official_evidence_ids,
             "notice_evidence_ids": self.notice_evidence_ids,
@@ -567,9 +678,11 @@ def _context_request(request: EvaluationRequest, primary: Mapping[str, Any] | No
     target_track = _text(request.target_track) or _text((target or {}).get("track_slug"))
     result: dict[str, Any] = {
         "admission_cohort": request.admission_cohort,
+        "primary_curriculum_id": request.primary_curriculum_id,
         "primary_program": primary_program,
         "primary_track": primary_track,
         "program_type": request.program_type,
+        "secondary_kind": request.secondary_kind,
         "target_program": target_program,
         "target_track": target_track,
         "application_term": request.resolved_application_term,
@@ -578,6 +691,8 @@ def _context_request(request: EvaluationRequest, primary: Mapping[str, Any] | No
     }
     if request.target_version:
         result["target_curriculum_version"] = request.target_version
+    if request.target_curriculum_year:
+        result["target_curriculum_year"] = request.target_curriculum_year
     if request.target_curriculum_evidence_id:
         result["target_version_evidence_reference"] = request.target_curriculum_evidence_id
     return {key: value for key, value in result.items() if value not in (None, "")}
@@ -604,6 +719,8 @@ def _safe_rule_resolution(result: Mapping[str, Any]) -> dict[str, Any]:
             "state",
             "resolved",
             "can_pass",
+            "secondary_kind",
+            "target_role",
             "blocker",
             "admission_cohort",
             "application_term",
@@ -858,6 +975,13 @@ def _compile_requirements(
     seen: set[str] = set()
     rows = _curriculum_rows(record)
     for index, row in enumerate(rows):
+        row_type = _text(row.get("requirement_type")).lower().replace("-", "_").replace(" ", "_")
+        if row_type in {"conflict_candidate", "candidate_alias"}:
+            # A conflict candidate is retained in the curriculum provenance,
+            # but it is not a separate credit consumer.  The evaluation gate
+            # below marks the overall minor UNKNOWN only when a transcript
+            # actually uses that candidate.
+            continue
         name = _text(row.get("name") or row.get("raw_title") or row.get("display_name"))
         credits = _positive_number(row.get("credits"))
         if not name or credits <= 0:
@@ -877,7 +1001,7 @@ def _compile_requirements(
         row_coverage = _coverage(row.get("coverage_state") or record_coverage)
         component = _text(row.get("component_type") or row.get("component") or row.get("lecture_or_lab"))
         kind = component.upper() if component else ""
-        generic = _text(row.get("requirement_type")).lower() in {"credit_quota", "quota", "aggregate"} or not _text(row.get("name"))
+        generic = row_type in {"credit_quota", "quota", "aggregate"} or not _text(row.get("name"))
         official_course_id = _text(
             row.get("course_code")
             or row.get("official_course_code")
@@ -889,7 +1013,9 @@ def _compile_requirements(
         bucket = _text(row.get("bucket")) or scope
         owner = "PRIMARY" if scope == "primary" else "TARGET" if scope == "target" else _text(scope).upper()
         domain = _text(row.get("domain") or row.get("requirement_domain")) or f"{scope}:{bucket}"
-        eligible_names = () if generic else (name,)
+        row_names = tuple(_text(item) for item in row.get("eligible_course_names", ()) if _text(item)) if isinstance(row.get("eligible_course_names"), Sequence) and not isinstance(row.get("eligible_course_names"), (str, bytes, bytearray)) else ()
+        eligible_names = () if generic else row_names or (name,)
+        accept_any = bool(row.get("accept_any")) if not generic else False
         spec = RequirementSpec(
             requirement_id=rid,
             name=name,
@@ -901,9 +1027,10 @@ def _compile_requirements(
             coverage_state=row_coverage,
             evidence_state=row_evidence,
             required=True,
-            accept_any=False,
+            waiver=bool(row.get("waiver")),
+            accept_any=accept_any,
             bucket=bucket,
-            kind="AGGREGATE" if generic else "NAMED_COURSE",
+            kind="AGGREGATE" if generic else _text(row.get("kind")) or "NAMED_COURSE",
             owner=owner,
             domain=domain,
         )
@@ -926,6 +1053,13 @@ def _compile_requirements(
             ),
             "bucket": spec.bucket,
             "generic": generic,
+            "eligible_course_names": eligible_names,
+            "accept_any": accept_any,
+            "choice_group": _text(row.get("choice_group")),
+            "choice_rule": _text(row.get("choice_rule")),
+            "waiver": bool(row.get("waiver")),
+            "waiver_generates_credits": bool(row.get("waiver_generates_credits")),
+            "component_type": component,
             "source": _safe_provenance({**dict(record), **dict(row)}, requirement_id=rid, scope=scope),
         }
         metadata[rid] = meta
@@ -936,7 +1070,10 @@ def _compile_requirements(
         curriculum_id=curriculum_id,
         record_coverage=record_coverage,
         record_evidence=record_evidence,
-        existing_generic=any(bool(item.get("generic")) for item in metadata.values()),
+        # Minor catalogues encode their own aggregate rows (including APC's
+        # explicit unnamed quota).  Do not append registry threshold aliases
+        # as extra credit consumers; that would double count the same rule.
+        existing_generic=scope == "minor" or any(bool(item.get("generic")) for item in metadata.values()),
     )
     for spec in quota_specs:
         specs.append(spec)
@@ -1140,6 +1277,7 @@ def _compile_bindings(
     requirements: Sequence[RequirementSpec],
     metadata: Mapping[str, Mapping[str, Any]],
     evidence_resolver: Callable[[str], Any] | None,
+    forbid_shared: bool = False,
 ) -> tuple[tuple[EquivalencyBinding, ...], tuple[dict[str, Any], ...], tuple[str, ...], tuple[str, ...]]:
     bindings: list[EquivalencyBinding] = []
     projections: list[dict[str, Any]] = []
@@ -1188,6 +1326,23 @@ def _compile_bindings(
         target_owner = _text(record.get("target_owner") or record.get("target_role")) if isinstance(record, Mapping) else ""
         source_domain = _text(record.get("source_domain")) if isinstance(record, Mapping) else ""
         target_domain = _text(record.get("target_domain")) if isinstance(record, Mapping) else ""
+        if shared and forbid_shared:
+            # A minor may not project a primary allocation through a shadow
+            # ledger.  Preserve the opaque evidence ID as a pending audit row
+            # but never hand the binding to the allocator.
+            projections.append(_binding_projection(binding_id, reason="輔系不得使用雙主修 shared/shadow credit。"))
+            blockers.append("MINOR_SHARED_CREDIT_FORBIDDEN")
+            warnings.append("MINOR_SHARED_CREDIT_FORBIDDEN")
+            bindings.append(
+                EquivalencyBinding(
+                    binding_id=binding_id,
+                    source_attempt_id="",
+                    target_requirement_id="",
+                    evidence_state=UNKNOWN,
+                    decision="PENDING",
+                )
+            )
+            continue
         if shared:
             # Shared credit is a projection from one exact allocated source
             # requirement.  Never infer source scope, direction, owner or
@@ -1346,55 +1501,45 @@ def _self_report_claimed_state(value: Any) -> str:
     return f"使用者自述：{text}"
 
 
+def _minor_coursework_blockers(
+    target: Mapping[str, Any] | None,
+    attempts: Sequence[CourseAttempt],
+    allocation: AllocationResult,
+) -> tuple[str, ...]:
+    """Return only source-backed minor gates that allocation cannot encode."""
+
+    if not isinstance(target, Mapping):
+        return ()
+    blockers: list[str] = []
+    if bool(target.get("zero_credit_gate")):
+        blockers.append("MINOR_ZERO_CREDIT_GATE_MANUAL_REVIEW")
+    conflicted_names = {
+        _course_label(item)
+        for item in target.get("conflicted_course_names", ())
+        if _course_label(item)
+    }
+    attempts_by_id = {attempt.attempt_id: attempt for attempt in attempts}
+    conflict_used = any(
+        _course_label(attempts_by_id.get(item.attempt_id).course_name) in conflicted_names
+        and item.allocation_kind == "EXCLUSIVE"
+        and _positive_number(item.credits) > 0
+        for allocation_item in allocation.allocations
+        for item in allocation_item.portions
+        if attempts_by_id.get(item.attempt_id) is not None
+    )
+    if conflicted_names and conflict_used:
+        blockers.append("MINOR_SOURCE_CONFLICT_USED")
+    return tuple(dict.fromkeys(blockers))
+
+
 def _statistics(
     attempts: Sequence[CourseAttempt],
     requirements: Sequence[RequirementSpec],
     allocation: AllocationResult,
+    *,
+    decisions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    by_bucket: dict[str, Decimal] = defaultdict(Decimal)
-    requirement_by_id = {item.requirement_id: item for item in requirements}
-    status_counts: dict[str, int] = defaultdict(int)
-    deficits: list[dict[str, Any]] = []
-    for result in allocation.requirement_results:
-        requirement = requirement_by_id.get(result.requirement_id)
-        bucket = requirement.bucket if requirement else "unknown"
-        by_bucket[bucket] += result.effective_credits
-        status_counts[result.status] += 1
-        if result.deficit > 0:
-            deficits.append(
-                {
-                    "requirement_id": result.requirement_id,
-                    "name": requirement.name if requirement else result.requirement_id,
-                    "deficit": str(result.deficit),
-                    "status": result.status,
-                }
-            )
-    attempt_status_counts: dict[str, int] = defaultdict(int)
-    for attempt in attempts:
-        attempt_status_counts[attempt.status] += 1
-    suggestions = [
-        f"{item['name']} 尚缺 {item['deficit']} 學分；請依官方課表補修。"
-        for item in sorted(deficits, key=lambda entry: (entry["status"] != FAIL, entry["requirement_id"]))
-        if item["status"] == FAIL
-    ]
-    if not suggestions and deficits:
-        suggestions = [f"{item['name']} 的缺額或課程池仍需人工確認。" for item in deficits]
-    return {
-        "total_graduation_credits": str(allocation.source_earned_credits),
-        "recognized_credits": str(allocation.recognized_credits),
-        "effective_recognized_credits": str(allocation.effective_recognized_credits),
-        "unallocated_credits": str(allocation.unallocated_credits),
-        "shared_shadow_credits": str(sum((item.credits for item in allocation.shadow_allocations), Decimal("0"))),
-        "credit_conservation": allocation.credit_conservation,
-        "by_bucket": {key: str(by_bucket[key]) for key in sorted(by_bucket)},
-        "requirement_status_counts": {key: status_counts[key] for key in sorted(status_counts)},
-        "course_status_counts": {key: attempt_status_counts[key] for key in sorted(attempt_status_counts)},
-        "completed": sum(1 for item in attempts if item.status == PASS),
-        "in_progress": sum(1 for item in attempts if item.status == "IN_PROGRESS"),
-        "unresolved": sum(1 for item in attempts if item.status == UNKNOWN),
-        "deficits": tuple(sorted(deficits, key=lambda entry: entry["requirement_id"])),
-        "shortest_safe_remediation": tuple(suggestions),
-    }
+    return build_statistics_v2(attempts, requirements, allocation, decisions=decisions)
 
 
 def _evidence_projection(
@@ -1474,8 +1619,12 @@ def evaluate(
             registry_blockers.append("PRIMARY_CURRICULUM_MISSING")
     except (KeyError, TypeError, ValueError):
         registry_blockers.append("PRIMARY_CURRICULUM_UNRESOLVED")
+    secondary_kind = _secondary_kind(request.secondary_kind, request.program_type)
+    is_minor = secondary_kind == "minor"
+    is_double = secondary_kind == "double_major"
     target_candidate = request.target_version
-    if target_candidate and target_candidate.startswith("target:"):
+    target_prefixes = ("minor:",) if is_minor else ("target:",) if is_double else ()
+    if target_candidate and target_prefixes and target_candidate.startswith(target_prefixes):
         try:
             target = get_curriculum(target_candidate)
         except (KeyError, TypeError, ValueError):
@@ -1495,7 +1644,8 @@ def evaluate(
     if primary is None:
         registry_blockers.append("PRIMARY_CURRICULUM_UNRESOLVED")
     primary_specs, primary_meta, primary_provenance = _compile_requirements(primary, scope="primary")
-    target_specs, target_meta, target_provenance = _compile_requirements(target, scope="target") if _is_double_major(request.program_type) else ((), {}, ())
+    target_scope = "minor" if is_minor else "target"
+    target_specs, target_meta, target_provenance = _compile_requirements(target, scope=target_scope) if (is_minor or is_double) else ((), {}, ())
     requirements = tuple(sorted((*primary_specs, *target_specs), key=lambda item: item.requirement_id))
     metadata = {**primary_meta, **target_meta}
     provenance = tuple(
@@ -1504,7 +1654,7 @@ def evaluate(
                 *primary_provenance,
                 *target_provenance,
                 *_curriculum_provenance(primary, scope="primary"),
-                *_curriculum_provenance(target, scope="target"),
+                *_curriculum_provenance(target, scope=target_scope),
             ),
             key=lambda item: (
                 str(item.get("requirement_id", "")),
@@ -1521,14 +1671,34 @@ def evaluate(
         requirements=requirements,
         metadata=metadata,
         evidence_resolver=evidence_resolver,
+        forbid_shared=is_minor,
     )
+    minor_shared_blockers: list[str] = []
+    if is_minor and any(binding.shared for binding in bindings):
+        # A minor has no shared/shadow-credit path.  Keep the evidence row for
+        # audit, but remove it from the allocator rather than letting a
+        # malformed cross-curriculum binding create credit from nowhere.
+        minor_shared_blockers.append("MINOR_SHARED_CREDIT_FORBIDDEN")
+        binding_warnings = (*binding_warnings, "MINOR_SHARED_CREDIT_FORBIDDEN")
+        bindings = tuple(binding for binding in bindings if not binding.shared)
+        binding_projections = tuple(
+            {
+                **dict(item),
+                "decision": "PENDING",
+                "shared": False,
+                "reason": "輔系不得使用雙主修 shared/shadow credit。",
+            }
+            if item.get("shared")
+            else item
+            for item in binding_projections
+        )
     allocation = allocate_credits(attempts, requirements, bindings, search_limit=request.search_limit)
     generic_ids = {rid for rid, meta in metadata.items() if bool(meta.get("generic"))}
     allocation = _with_generic_unknown(allocation, generic_ids)
 
     application: Mapping[str, Any] | None = None
     formal_award: Mapping[str, Any] | None = None
-    if _is_double_major(request.program_type):
+    if is_double:
         app_request = {
             "application_term": request.resolved_application_term,
             "target_program": request.target_program or (target or {}).get("program_slug"),
@@ -1560,6 +1730,37 @@ def evaluate(
                 target_program=request.target_program or (target or {}).get("program_slug"),
                 target_track=request.target_track or (target or {}).get("track_slug"),
                 subject_ref=request.subject_ref,
+            )
+        except Exception:
+            formal_award = {"status": UNKNOWN, "state": UNKNOWN, "award_state": UNKNOWN, "is_official": False}
+    elif is_minor:
+        minor_app_request = {
+            "application_term": request.resolved_application_term,
+            "target_program": request.target_program or (target or {}).get("program_slug"),
+            "target_track": request.target_track or (target or {}).get("track_slug"),
+            "application_status": request.application_status,
+        }
+        try:
+            application = resolve_minor_application_case(
+                minor_app_request,
+                department_approval=request.department_decision_evidence_id,
+                registrar_registration=request.registrar_registration_evidence_id,
+                formal_qualification=request.formal_qualification_evidence_id,
+                evidence_resolver=evidence_resolver,
+            )
+        except Exception:
+            application = {
+                "status": UNKNOWN,
+                "state": UNKNOWN,
+                "can_pass": False,
+                "blockers": [{"code": "MINOR_APPLICATION_RESOLUTION_UNKNOWN", "reason": "官方輔系申請證據無法解析。"}],
+            }
+        try:
+            formal_award = resolve_minor_award(
+                request.formal_award_evidence_id,
+                evidence_resolver=evidence_resolver,
+                target_program=request.target_program or (target or {}).get("program_slug"),
+                target_track=request.target_track or (target or {}).get("track_slug"),
             )
         except Exception:
             formal_award = {"status": UNKNOWN, "state": UNKNOWN, "award_state": UNKNOWN, "is_official": False}
@@ -1595,7 +1796,27 @@ def evaluate(
         "claimed_state": _self_report_claimed_state(request.application_status),
         "reason": "這是使用者自述，不能升級任何官方資格或授予 gate。",
     }
-    if not _is_double_major(request.program_type):
+    minor_application: dict[str, Any] = {
+        "status": NOT_APPLICABLE,
+        "state": NOT_APPLICABLE,
+        "can_pass": False,
+        "self_report": application_self_report,
+        "reason": "目前規劃不是輔系。",
+    }
+    minor_decision: dict[str, Any] = {
+        "status": NOT_APPLICABLE,
+        "state": NOT_APPLICABLE,
+        "can_pass": False,
+        "reason": "目前規劃不是輔系。",
+    }
+    formal_minor_award: dict[str, Any] = {
+        "status": NOT_APPLICABLE,
+        "state": NOT_APPLICABLE,
+        "can_pass": False,
+        "award_state": NOT_APPLICABLE,
+        "reason": "目前規劃不是輔系。",
+    }
+    if not (is_double or is_minor):
         double_decision: dict[str, Any] = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False, "reason": "目前規劃不是雙主修。"}
         formal_decision: dict[str, Any] = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False, "award_state": NOT_APPLICABLE, "reason": "目前規劃不是雙主修。"}
         department_approval = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False, "authoritative": True}
@@ -1603,6 +1824,105 @@ def evaluate(
         formal_qualification = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False, "authoritative": True}
         target_coursework = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False}
         award_eligibility = {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False}
+    elif is_minor:
+        minor_rule_blockers = _minor_coursework_blockers(target, attempts, allocation)
+        if (
+            target_dimension.get("status") != "RESOLVED"
+            or allocation_uncertain
+            or input_blockers
+            or minor_rule_blockers
+        ):
+            target_status = UNKNOWN
+        app_status = _safe_status(safe_application.get("status"))
+        department_status = _safe_status(safe_application.get("department_decision", {}).get("status"))
+        registrar_status = _safe_status(safe_application.get("registration", {}).get("status"))
+        qualification_status = _safe_status(safe_application.get("formal_qualification", {}).get("status"))
+        department_approval = {
+            **safe_application.get("department_decision", {}),
+            "status": department_status,
+            "state": department_status,
+            "can_pass": department_status == PASS,
+            "authoritative": True,
+        }
+        registrar_registration = {
+            **safe_application.get("registration", {}),
+            "status": registrar_status,
+            "state": registrar_status,
+            "can_pass": registrar_status == PASS,
+            "authoritative": True,
+        }
+        formal_qualification = {
+            **safe_application.get("formal_qualification", {}),
+            "status": qualification_status,
+            "state": qualification_status,
+            "can_pass": qualification_status == PASS and safe_application.get("formal_qualification", {}).get("is_official") is True,
+            "authoritative": True,
+        }
+        # ``minor_application_or_qualification`` only requires the official
+        # department approval + registrar registration chain.  A self-report
+        # and coursework completion are kept as independent dimensions.
+        minor_application = {
+            "status": _combine_status(department_status, registrar_status),
+            "state": _combine_status(department_status, registrar_status),
+            "can_pass": department_status == PASS and registrar_status == PASS,
+            "self_report": application_self_report,
+            "application": safe_application,
+            "department_approval": department_approval,
+            "registrar_registration": registrar_registration,
+            "formal_qualification": formal_qualification,
+            "requirement": "系所正式核准 + 教務處正式登錄；自述不具核准效力。",
+            "reason": "系所核准與教務登錄均已核實。" if department_status == PASS and registrar_status == PASS else "輔系申請／正式修讀資格仍缺官方核准鏈。",
+        }
+        if minor_rule_blockers:
+            minor_application["blockers"] = tuple(minor_rule_blockers)
+        target_coursework = {
+            "status": target_status,
+            "state": target_status,
+            "can_pass": target_status == PASS,
+            "requirement_ids": tuple(item.requirement_id for item in target_specs),
+            "blockers": tuple(minor_rule_blockers),
+            "reason": "輔系目標課程配置可安全判定。" if target_status == PASS else "輔系課表、課程配置或年度 gate 仍需確認。",
+        }
+        award_eligibility_status = _combine_status(minor_application["status"], target_status)
+        award_eligibility = {
+            "status": award_eligibility_status,
+            "state": award_eligibility_status,
+            "can_pass": award_eligibility_status == PASS,
+            "requires": ("minor_application_or_qualification", "minor_coursework_completion"),
+            "reason": "輔系官方修讀資格與課程均已核實。" if award_eligibility_status == PASS else "輔系官方修讀資格或課程仍未全部核實。",
+        }
+        minor_decision_status = _combine_status(minor_application["status"], target_status)
+        double_decision = {
+            "status": NOT_APPLICABLE,
+            "state": NOT_APPLICABLE,
+            "can_pass": False,
+            "reason": "目前規劃是輔系，雙主修決策不適用。",
+        }
+        formal_decision = {
+            "status": NOT_APPLICABLE,
+            "state": NOT_APPLICABLE,
+            "can_pass": False,
+            "award_state": NOT_APPLICABLE,
+            "reason": "目前規劃是輔系，正式雙主修授予不適用。",
+        }
+        minor_decision = {
+            "status": minor_decision_status,
+            "state": minor_decision_status,
+            "can_pass": minor_decision_status == PASS,
+            "coursework_status": target_status,
+            "application": minor_application,
+            "requirement_ids": tuple(item.requirement_id for item in target_specs),
+            "reason": "輔系課程與正式修讀資格均已核實。" if minor_decision_status == PASS else "輔系課程、年度規則或官方修讀資格仍需確認。",
+        }
+        formal_minor_status = _safe_status(safe_formal_award.get("status"))
+        formal_minor_award = {
+            "status": formal_minor_status,
+            "state": formal_minor_status,
+            "can_pass": formal_minor_status == PASS and safe_formal_award.get("is_official") is True,
+            "award_state": safe_formal_award.get("award_state", UNKNOWN),
+            "formal_award": safe_formal_award,
+            "reason": "官方正式授予輔系紀錄已核實。" if formal_minor_status == PASS else "正式授予輔系需要獨立的教務處官方紀錄。",
+        }
     else:
         if target_dimension.get("status") != "RESOLVED" or rule_status in {UNKNOWN, MISSING, MANUAL_REVIEW, CONFLICTED} or allocation_uncertain or input_blockers:
             target_status = UNKNOWN
@@ -1665,8 +1985,9 @@ def evaluate(
             "formal_award": safe_formal_award,
             "reason": "官方正式授予紀錄已核實。" if formal_status == PASS else "正式授予雙主修需要獨立的教務處官方紀錄。",
         }
-    overall_status = _combine_status(primary_status, double_decision["status"])
-    if input_blockers or registry_blockers or binding_blockers or allocation_uncertain:
+    secondary_decision = minor_decision if is_minor else double_decision
+    overall_status = _combine_status(primary_status, secondary_decision["status"])
+    if input_blockers or registry_blockers or binding_blockers or minor_shared_blockers or allocation_uncertain:
         overall_status = UNKNOWN
     decisions = {
         "primary_graduation": primary_decision,
@@ -1677,8 +1998,11 @@ def evaluate(
         "registrar_registration": registrar_registration,
         "formal_qualification": formal_qualification,
         "target_coursework_completion": target_coursework,
+        "minor_application_or_qualification": minor_application,
+        "minor_coursework_completion": target_coursework if is_minor else {"status": NOT_APPLICABLE, "state": NOT_APPLICABLE, "can_pass": False, "reason": "目前規劃不是輔系。"},
+        "formal_minor_award": formal_minor_award,
         "award_eligibility": award_eligibility,
-        "formal_award": formal_decision,
+        "formal_award": formal_minor_award if is_minor else formal_decision,
         "overall": {
             "status": overall_status,
             "state": overall_status,
@@ -1691,9 +2015,18 @@ def evaluate(
         code_text = _text(code)
         if code_text:
             context_blockers.append(f"RULE_CONTEXT:{code_text}")
-    blockers = tuple(dict.fromkeys((*input_blockers, *registry_blockers, *context_blockers, *binding_blockers, *(f"APPLICATION:{item.get('code') or item.get('status')}" for item in safe_application.get("blockers", ()) if isinstance(item, Mapping) and (item.get("code") or item.get("status"))), *allocation.blockers)))
-    warnings = tuple(dict.fromkeys((*binding_warnings, *(_text(item) for item in raw_rule_resolution.get("warnings", ()) if _text(item)), *allocation.warnings)))
-    statistics = _statistics(attempts, requirements, allocation)
+    blockers = tuple(dict.fromkeys((*input_blockers, *registry_blockers, *context_blockers, *binding_blockers, *minor_shared_blockers, *(f"APPLICATION:{item.get('code') or item.get('status')}" for item in safe_application.get("blockers", ()) if isinstance(item, Mapping) and (item.get("code") or item.get("status"))), *allocation.blockers)))
+    warnings = tuple(
+        dict.fromkeys(
+            (
+                *request.input_warning_codes,
+                *binding_warnings,
+                *(_text(item) for item in raw_rule_resolution.get("warnings", ()) if _text(item)),
+                *allocation.warnings,
+            )
+        )
+    )
+    statistics = _statistics(attempts, requirements, allocation, decisions=decisions)
     input_request = request.as_dict()
     safe_request = dict(input_request)
     # Request rows are already normalized, but they are available in the
@@ -1714,7 +2047,7 @@ def evaluate(
     }
     safe_rule_provenance = tuple(provenance)
     evidence = _evidence_projection(request, rule_resolution=raw_rule_resolution, application=application, bindings=binding_projections)
-    remediation = tuple(statistics.get("shortest_safe_remediation", ()))
+    remediation = tuple(statistics.get("safe_remediation_directions", ()))
     initial = DecisionSnapshot(
         snapshot_id="",
         evaluated_at=request.as_of or "UNSPECIFIED",
@@ -1750,6 +2083,7 @@ def evaluate(
 __all__ = [
     "ENGINE_VERSION",
     "SERVICE_SCHEMA_VERSION",
+    "INPUT_WARNING_CODES",
     "EvaluationRequest",
     "evaluate",
 ]
