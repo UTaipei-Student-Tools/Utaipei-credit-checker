@@ -648,6 +648,7 @@ def _clear_loaded_data():
     }.items():
         st.session_state[key] = default
     st.session_state.pop("cohort_mismatch_confirmation", None)
+    _set_portal_state("IDLE", "IDLE")
 
 
 def _render_rules_meta_card(rules_meta, ui=None):
