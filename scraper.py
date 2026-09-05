@@ -194,6 +194,8 @@ class PortalErrorCode(str, Enum):
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     AUTH_REJECTED = "AUTH_REJECTED"
     RATE_LIMITED = "RATE_LIMITED"
+    TRANSCRIPT_IDENTITY_MISMATCH = "TRANSCRIPT_IDENTITY_MISMATCH"
+    TRANSCRIPT_VALIDATION_FAILED = "TRANSCRIPT_VALIDATION_FAILED"
 
 
 _PORTAL_MESSAGES = {
@@ -205,6 +207,8 @@ _PORTAL_MESSAGES = {
     PortalErrorCode.PDF_NOT_FOUND: "校務系統未提供可驗證的成績單 PDF，請改用 PDF 上傳。",
     PortalErrorCode.AUTH_REJECTED: "校務系統拒絕登入，請確認帳號密碼或改用 PDF。",
     PortalErrorCode.RATE_LIMITED: "校務系統暫時限制請求，請稍後再試。",
+    PortalErrorCode.TRANSCRIPT_IDENTITY_MISMATCH: "成績單學號與登入帳號不一致，資料未套用；請確認登入帳號。",
+    PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED: "成績單內容或學分核對未完成，資料未套用；請改用正確的歷年成績單 PDF。",
 }
 
 

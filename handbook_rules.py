@@ -16,6 +16,15 @@ from copy import deepcopy
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules_config.json")
 ADMISSION_COHORTS = ["111", "112", "113", "114", "115"]
+COURSE_POOL_SCHEMA = "pool:v1"
+COURSE_POOL_IDENTITY_FIELDS = (
+    "curriculum_version",
+    "program_slug",
+    "track_slug",
+    "raw_title",
+    "credits",
+    "lecture_or_lab",
+)
 
 # The JSON contains source-scoped records for all supported admission cohorts.
 # A record can still be PARTIAL: that describes an intentionally incomplete
@@ -369,6 +378,14 @@ def get_rule_sets(year=None):
     return {
         "academic_year": handbook["academic_year"],
         "handbook_meta": deepcopy(handbook.get("_meta", {})),
+        "course_pool_schema": {
+            "version": COURSE_POOL_SCHEMA,
+            "identity_fields": COURSE_POOL_IDENTITY_FIELDS,
+            "named_requirement_field": "pool_ids",
+            "quota_requirement_field": "eligible_pool_ids",
+            "candidate_row_requirement_type": "candidate_course",
+            "allow_user_claimed_department": False,
+        },
         "university_common": university_common,
         "earth_life_major": earth_life_major,
         "apc_rules": deepcopy(handbook["apc_rules"]),
@@ -470,6 +487,114 @@ def _apc_target_source(selected, selected_track, program_type):
     }
 
 
+def _apc_target_course_pools(
+    selected,
+    selected_track,
+    program_type,
+    source,
+    base_rows,
+    candidate_catalogue,
+    other_required,
+    evidence,
+    coverage,
+    warnings,
+):
+    """Build target pools while keeping candidate rows out of requirements."""
+
+    target_scope = "double_major" if program_type == "雙主修" else "minor"
+    track_slug = _apc_target_slug(selected_track)
+    base_pool_id = f"pool:{target_scope}:{selected}:apc:{track_slug}:base"
+    other_pool_id = f"pool:{target_scope}:{selected}:apc:{track_slug}:other_required"
+
+    def candidate_entry(pool_id, name, credits):
+        component = "lab" if "實驗" in str(name) else "lecture"
+        slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", str(name)).strip("_").lower() or "course"
+        return {
+            "name": str(name),
+            "raw_title": str(name),
+            "credits": float(credits),
+            "component": component,
+            "component_type": component,
+            "lecture_or_lab": component,
+            "curriculum_version": selected,
+            "program_slug": "apc",
+            "track_slug": track_slug,
+            "official_course_identity": f"{selected}:apc:{track_slug}:{slug}",
+            "pool_ids": (pool_id,),
+            "candidate_only": True,
+            "requirement_type": "candidate_course",
+            "evidence_state": "VERIFIED" if evidence != "MISSING" else "MISSING",
+            "source_reference": f"{source['source_reference']}:pool:{pool_id.rsplit(':', 1)[-1]}:course:{slug}",
+        }
+
+    base_candidates = tuple(candidate_entry(base_pool_id, name, credits) for name, credits, _ in base_rows)
+    other_candidates = tuple(candidate_entry(other_pool_id, name, credits) for name, credits in candidate_catalogue.items())
+
+    def pool_record(pool_id, label, bucket, required_credits, selection_rule, candidates, clause, policy, pool_coverage):
+        return {
+            "id": pool_id,
+            "pool_id": pool_id,
+            "schema": COURSE_POOL_SCHEMA,
+            "scope": target_scope,
+            "kind": "double_major_target" if target_scope == "double_major" else "minor_target",
+            "curriculum_version": selected,
+            "program_slug": "apc",
+            "track_slug": track_slug,
+            "label": label,
+            "bucket": bucket,
+            "required_credits": float(required_credits),
+            "candidate_only": True,
+            "eligible_pool_ids": (pool_id,),
+            "overflow_routes": (),
+            "selection_rule": selection_rule,
+            "identity_fields": COURSE_POOL_IDENTITY_FIELDS,
+            "allow_user_claimed_department": False,
+            "allowed_components": ("lecture", "lab"),
+            "evidence_state": evidence,
+            "verification_status": evidence,
+            "coverage_state": pool_coverage,
+            "automation_sufficiency": "COMPLETE" if pool_coverage == "COMPLETE" else "PARTIAL",
+            "manual_reason": "; ".join(warnings),
+            "source_reference": f"{source['source_reference']}:pool:{bucket}",
+            "source_url": source["source_url"],
+            "source_file": source["source_file"],
+            "research_file": source["research_file"],
+            "pdf_page": source["pdf_page"],
+            "printed_page": source["printed_page"],
+            "pages": source["pages"],
+            "table_location": source["table_location"],
+            "original_clause": clause,
+            "policy": policy,
+            "candidate_courses": candidates,
+            "courses": candidates,
+        }
+
+    return {
+        base_pool_id: pool_record(
+            base_pool_id,
+            f"{selected_track}基礎列項",
+            "base",
+            sum(float(credits) for _, credits, _ in base_rows),
+            "exact_title_credit_component",
+            base_candidates,
+            f"{source['table_location']}：基礎列項。",
+            {"exact_title_credit_component": True},
+            coverage,
+        ),
+        other_pool_id: pool_record(
+            other_pool_id,
+            f"{selected_track}其餘必修課程池",
+            "other_required",
+            other_required,
+            "manual_department_approval",
+            other_candidates,
+            f"{source['table_location']}：其餘必修課程 {float(other_required):g} 學分。",
+            {"requires_department_approval": True, "candidate_only": True},
+            "COMPLETE" if not other_required else "PARTIAL",
+        ),
+    }
+
+
 def get_apc_target_requirements(cohort, track="化學組", program_type="雙主修"):
     """Return auditable APC target rows for one cohort and track.
 
@@ -495,6 +620,10 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
     program_key = "double_major" if program_type == "雙主修" else "minor"
     program_rules = apc.get(program_key, {})
     source = _apc_target_source(selected, selected_track, program_type)
+    target_scope = "double_major" if program_type == "雙主修" else "minor"
+    track_slug = _apc_target_slug(selected_track)
+    base_pool_id = f"pool:{target_scope}:{selected}:apc:{track_slug}:base"
+    other_pool_id = f"pool:{target_scope}:{selected}:apc:{track_slug}:other_required"
     if selected == "115":
         base_rows = _APC_115_BASE[selected_track]
         # The 115 handbook verifies the aggregate "other required" amount,
@@ -531,17 +660,17 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
         ]
     else:
         base_rows = _APC_SPLIT_BASE
-        # 111–114 pages verify the fixed eight-row amount, but the remaining
-        # quota is either unnamed (minor) or, for 111/112 chemistry, has a
-        # contradictory footer.  Do not expose a primary-track catalogue as
-        # an automatically consumable target pool.
+        # 111–114 pages verify the fixed eight-row amount.  The 111/112
+        # chemistry footer also verifies an additional 24-credit target
+        # requirement; its named pool is still incomplete.  Do not expose a
+        # primary-track catalogue as an automatically consumable target pool.
         candidate_catalogue = dict(apc.get("shared_other_required", {}))
         candidate_catalogue.update(apc.get("divisions", {}).get(selected_track, {}).get("compulsory", {}))
         other_required = float(program_rules.get("other_req", 0.0) or 0.0)
         coverage = "PARTIAL"
         if program_type == "雙主修" and selected_track == "化學組" and selected in {"111", "112"}:
-            evidence = "CONFLICTED"
-            warnings = ["111／112 應用化學雙主修表的可見 16 學分與表尾必修 24 學分語義衝突，不能自動解讀其餘課程。"]
+            evidence = "VERIFIED"
+            warnings = ["111／112 應用化學雙主修表已核對可見16學分＋額外目標必修24學分＝40；24學分的正式目標課程池與核准 mapping 尚未完整轉錄。"]
         else:
             evidence = "VERIFIED"
             warnings = ["111–114 物化目標表的其餘必修課名／選擇條件未完整核對，固定列項可供規劃預覽但整體需人工確認。"]
@@ -559,6 +688,12 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
                 "credits": float(credits),
                 "bucket": "base",
                 "kind": "course",
+                "requirement_type": "named_course",
+                "candidate_only": False,
+                "pool_requirement": False,
+                "pool_ids": (base_pool_id,),
+                "eligible_pool_ids": (),
+                "overflow_routes": (),
                 "evidence": evidence,
                 "evidence_state": "VERIFIED" if evidence != "CONFLICTED" else "VERIFIED",
                 "verification_status": "VERIFIED" if evidence != "CONFLICTED" else "VERIFIED",
@@ -609,6 +744,12 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
             "credits": float(other_required),
             "bucket": "other_required",
             "kind": "quota",
+            "requirement_type": "credit_quota",
+            "candidate_only": False,
+            "pool_requirement": True,
+            "pool_ids": (),
+            "eligible_pool_ids": (other_pool_id,),
+            "overflow_routes": (),
             "evidence": evidence,
             "evidence_state": evidence,
             "verification_status": evidence,
@@ -652,6 +793,18 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
             },
         }
     )
+    course_pools = _apc_target_course_pools(
+        selected,
+        selected_track,
+        program_type,
+        source,
+        base_rows,
+        candidate_catalogue,
+        other_required,
+        evidence,
+        coverage,
+        warnings,
+    )
     return {
         "cohort": selected,
         "program": "物化",
@@ -661,6 +814,16 @@ def get_apc_target_requirements(cohort, track="化學組", program_type="雙主�
         "base_required": sum(row["credits"] for row in requirements if row["bucket"] == "base"),
         "other_required": float(other_required),
         "requirements": requirements,
+        "course_pool_schema": {
+            "version": COURSE_POOL_SCHEMA,
+            "identity_fields": COURSE_POOL_IDENTITY_FIELDS,
+            "named_requirement_field": "pool_ids",
+            "quota_requirement_field": "eligible_pool_ids",
+            "candidate_row_requirement_type": "candidate_course",
+            "allow_user_claimed_department": False,
+        },
+        "course_pools": course_pools,
+        "pools": deepcopy(course_pools),
         "course_requirements": {
             row["name"]: row["credits"] for row in requirements if row["kind"] == "course"
         },
@@ -694,6 +857,59 @@ get_target_requirements = get_apc_target_requirements
 get_apc_requirement_catalog = get_apc_target_requirements
 
 
+def _legacy_policy_scope(target_dept):
+    """Infer the narrow legacy policy scope from a displayed department name.
+
+    ``get_credit_requirements`` predates the registry's scoped policy contract
+    and only receives a free-form target department.  Keep its numeric return
+    shape, but select the matching year/program/track contract so Math's cap
+    and the other departments' Science College subset are not silently
+    flattened into one shared default.
+    """
+
+    text = str(target_dept or "")
+    if "資科" in text or "資訊科學" in text:
+        return "cs", "department"
+    if "數學" in text:
+        return "math", "department"
+    if "應物" in text or "物化" in text or "應用物理" in text:
+        return "apc", "chemistry" if "化學" in text else "physics"
+    if "生命" in text or "生物" in text:
+        return "earth", "life_science"
+    if "地球" in text or "環境" in text:
+        return "earth", "earth_environment"
+    return "earth", "department"
+
+
+def _legacy_policy_contract(handbook, policy_key, program, track):
+    """Return one year/program/track policy contract for legacy callers."""
+
+    policy = handbook.get(policy_key, {})
+    if not isinstance(policy, dict):
+        return {}
+    evidence = policy.get("evidence_by_cohort", {})
+    if policy_key != "free_elective" or not isinstance(evidence, dict):
+        return policy
+    cohort = str(handbook.get("academic_year") or "")
+    cohort_contract = evidence.get(cohort, {})
+    if not isinstance(cohort_contract, dict):
+        return policy
+    program_contract = cohort_contract.get(program, {})
+    if not isinstance(program_contract, dict):
+        return policy
+    selected = {
+        key: deepcopy(value)
+        for key, value in program_contract.items()
+        if key != "tracks"
+    }
+    tracks = program_contract.get("tracks", {})
+    if isinstance(tracks, dict):
+        track_contract = tracks.get(track) or tracks.get("default", {})
+        if isinstance(track_contract, dict):
+            selected.update(deepcopy(track_contract))
+    return {**policy, **selected}
+
+
 def get_credit_requirements(program="單主修", target_dept="", handbook_year=None):
     handbook = get_handbook_config(handbook_year)
     meta = handbook.get("_meta", {})
@@ -701,6 +917,20 @@ def get_credit_requirements(program="單主修", target_dept="", handbook_year=N
     ge = common["ge_categories"]
     major = handbook["earth_life_major"]
     domains = major["domains"]
+    policy_program, policy_track = _legacy_policy_scope(target_dept)
+    free_policy = _legacy_policy_contract(
+        handbook,
+        "free_elective",
+        policy_program,
+        policy_track,
+    )
+    physical_policy = handbook.get("physical_education", {})
+    physical_policy = physical_policy if isinstance(physical_policy, dict) else {}
+    physical_contract = physical_policy.get("evidence_by_cohort", {}).get(
+        str(handbook.get("academic_year") or ""),
+        {},
+    )
+    physical_contract = physical_contract if isinstance(physical_contract, dict) else {}
     requirements = {
         "total": float(meta.get("total_graduation_credits", 128)),
         "common_total": float(common.get("total_req", 28)),
@@ -713,8 +943,13 @@ def get_credit_requirements(program="單主修", target_dept="", handbook_year=N
         "domain_compulsory": float(domains.get("domain_req", 14)),
         "domain_elective": float(domains.get("domain_elective_req", 20)),
         "major_other_elective": float(domains.get("other_elective_req", 27)),
-        "free_elective": float(handbook["free_elective"].get("total_req", 15)),
-        "pe_semesters": int(handbook["physical_education"].get("semesters_required", 4)),
+        "free_elective": float(free_policy.get("total_req", 15)),
+        "pe_semesters": int(
+            physical_contract.get(
+                "semesters_required",
+                physical_policy.get("semesters_required", 4),
+            )
+        ),
         "target_total": 0.0,
     }
     if program in {"雙主修", "輔系"}:

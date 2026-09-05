@@ -38,10 +38,10 @@ from ui_components import collapse_sidebar_if_needed, render_header_card, render
 def _load_presentation_api():
     """Load the snapshot-only renderer/export contract on demand."""
 
-    from snapshot_exports import build_allocation_csv, build_audit_json, build_pdf
+    from snapshot_exports import build_audit_json, build_student_allocation_csv, build_student_pdf
     from snapshot_renderer import render_snapshot
 
-    return render_snapshot, build_pdf, build_allocation_csv, build_audit_json
+    return render_snapshot, build_student_pdf, build_student_allocation_csv, build_audit_json
 
 
 def _plain_cache_value(value: object) -> object:
@@ -272,6 +272,26 @@ def _safe_source_digest(source: object, *, source_label: str = "") -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _cohort_mismatch_confirmation_key(
+    source_digest: str,
+    detected_cohort: str,
+    selected_cohort: str,
+) -> str:
+    """Return a widget key scoped to one source/cohort mismatch context."""
+
+    context = json.dumps(
+        {
+            "source": source_digest,
+            "detected_cohort": detected_cohort,
+            "selected_cohort": selected_cohort,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"cohort_mismatch_confirmation:{hashlib.sha256(context.encode('utf-8')).hexdigest()}"
+
+
 def _safe_student_display(student_info: Mapping[str, Any] | None) -> dict[str, str]:
     """Keep only masked student display values in session/UI state."""
 
@@ -299,22 +319,182 @@ def _mark_confirmation_unconfirmed(
     )
 
 
+def _safe_parser_amount(value: object) -> str | None:
+    """Return only a simple finite-looking amount from parser diagnostics."""
+
+    text = str(value).strip() if isinstance(value, (str, int, float)) and not isinstance(value, bool) else ""
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    return None
+
+
+def _safe_parser_count(value: object) -> int | None:
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return count if count >= 0 else None
+
+
+def _safe_parser_delta(value: object) -> str | None:
+    """Return a non-negative, finite-looking difference for UI text."""
+
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return None
+    text = text.lstrip("-")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _safe_parser_warning(value: object) -> str | None:
+    """Keep only known parser-generated Chinese warnings for the student UI."""
+
+    if not isinstance(value, str):
+        return None
+    message = value.strip()
+    if not message or len(message) > 240 or re.search(r"[\r\n]", message):
+        return None
+    folded = message.casefold()
+    if any(
+        token.casefold() in folded
+        for token in (
+            "UNKNOWN",
+            "DecisionSnapshot",
+            "EXCLUSIVE",
+            "shadow",
+            "Traceback",
+            "例外",
+            "PRIVATE-",
+        )
+    ):
+        return None
+    if not message.startswith(("修習學分核對", "實得學分核對", "成績單出現互相衝突", "發現", "成績單含抵免")):
+        return None
+    return message
+
+
+def _parser_diagnostic_messages(parse_diagnostics: Mapping[str, Any] | None, adapted_diagnostics: Iterable[Any] = ()) -> tuple[str, ...]:
+    """Translate trusted parser flags into concrete, non-sensitive UI guidance."""
+
+    diagnostics = parse_diagnostics if isinstance(parse_diagnostics, Mapping) else {}
+    messages: list[str] = []
+    reconciliation = diagnostics.get("reconciliation")
+    reconciliation_status = ""
+    reconciliation_detail = False
+    if isinstance(reconciliation, Mapping):
+        reconciliation_status = str(reconciliation.get("status") or "").strip().lower()
+        if reconciliation_status not in {"conflict", "limited", "not_available"}:
+            for key, title in (("attempted", "修習學分"), ("earned", "實得學分")):
+                section = reconciliation.get(key)
+                if not isinstance(section, Mapping) or section.get("reconciled") is not False:
+                    continue
+                parsed = _safe_parser_amount(section.get("parsed"))
+                reported = _safe_parser_amount(section.get("reported"))
+                difference = _safe_parser_delta(section.get("difference"))
+                if parsed is not None and reported is not None:
+                    detail = f"{title}核對結果：課程列合計 {parsed} 學分，成績單標示 {reported} 學分"
+                    if difference is not None:
+                        detail += f"，相差 {difference} 學分"
+                    messages.append(detail + "；請確認是否漏列學期資料。")
+                    reconciliation_detail = True
+                elif title == "修習學分":
+                    messages.append("修習學分總額尚未取得可核對的雙方數字；請確認成績單摘要。")
+                    reconciliation_detail = True
+                else:
+                    messages.append("實得學分總額尚未取得可核對的雙方數字；請確認成績單摘要。")
+                    reconciliation_detail = True
+        if reconciliation_status == "conflict" and not reconciliation_detail:
+            messages.append("成績單中的修習或實得總額互相衝突，無法完成學分核對；請確認原始成績單。")
+        elif reconciliation_status == "limited" and not reconciliation_detail:
+            messages.append("成績單含抵免／抵認資料，但缺少正式實得學分；請確認校方登載。")
+        elif reconciliation_status == "not_available" and not reconciliation_detail:
+            messages.append("尚未找到完整的全歷年修習與實得總額，暫不能完成學分核對。")
+        elif reconciliation_status == "mismatch" and not reconciliation_detail:
+            messages.append("已辨識的課程列尚未與成績單總額核對一致；請確認是否漏列學期資料。")
+    elif diagnostics.get("total_reconciled") is False:
+        parsed_total = _safe_parser_amount(diagnostics.get("parsed_total"))
+        reported_total = _safe_parser_amount(diagnostics.get("reported_total"))
+        if parsed_total is not None and reported_total is not None:
+            messages.append(
+                f"已辨識課程列合計 {parsed_total} 學分，但成績單標示總額為 {reported_total} 學分；請確認是否漏列學期資料。"
+            )
+        else:
+            messages.append("已辨識的課程列尚未與成績單總額核對一致；請確認是否漏列學期資料。")
+    fatal_warnings = diagnostics.get("fatal_warnings")
+    if isinstance(fatal_warnings, (list, tuple, set, frozenset)):
+        for item in fatal_warnings:
+            warning = _safe_parser_warning(item)
+            if warning and warning not in messages:
+                messages.append(warning)
+    if diagnostics.get("complete") is False:
+        missing_fields = diagnostics.get("missing_fields")
+        if isinstance(missing_fields, (list, tuple, set, frozenset)) and missing_fields:
+            messages.append("成績單基本欄位尚未完整辨識，請逐列檢視後再確認。")
+        elif not messages:
+            messages.append("成績單解析尚未完整，請逐列檢視或改用其他來源。")
+    if diagnostics.get("department_detected") is False:
+        messages.append("尚未辨識主修系所／組別；主修分類需要人工核對。")
+    course_code_missing = _safe_parser_count(diagnostics.get("course_code_missing"))
+    if course_code_missing:
+        messages.append(
+            f"有 {course_code_missing} 門課未提供課號；已能依課程名稱與學分核對的課程可照常處理，"
+            "只有需要精確身分辨識的規則才需人工確認。"
+        )
+    department_missing = _safe_parser_count(diagnostics.get("offering_department_missing"))
+    if department_missing:
+        messages.append(
+            f"有 {department_missing} 門課未提供開課系所；已能依課程名稱與學分核對的課程可照常處理，"
+            "跨系同名或需要系所條件的規則才需人工確認。"
+        )
+    if diagnostics.get("identity_warnings"):
+        messages.append("部分課程身分欄位尚未完整，請在確認表補齊可核對資料。")
+    if diagnostics.get("warnings") and not messages:
+        messages.append("成績單部分欄位尚待核對，請檢視確認表中的提示。")
+    for item in adapted_diagnostics:
+        message = getattr(item, "message", None)
+        if isinstance(message, str) and message.strip():
+            cleaned = message.strip()
+            folded = cleaned.casefold()
+            if any(
+                token.casefold() in folded
+                for token in ("UNKNOWN", "DecisionSnapshot", "EXCLUSIVE", "shadow", "Traceback")
+            ):
+                continue
+            if cleaned not in messages:
+                messages.append(cleaned)
+    return tuple(messages)
+
+
 def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation:
     """Parse current PDF/portal input and create or reuse parsed confirmation."""
 
     source = st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path")
     if not source:
         st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
+        st.session_state.pop("_parser_confirmation_cohort", None)
         return _empty_confirmation()
 
     source_digest = _safe_source_digest(source, source_label=sidebar_state.get("source_label", ""))
+    selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
     cached_digest = st.session_state.get("_source_fingerprint")
+    cached_cohort = str(st.session_state.get("_parser_confirmation_cohort") or "").strip()
     cached_confirmation = st.session_state.get("_parsed_confirmation")
     cached_has_cohort_blocker = bool(
         isinstance(cached_confirmation, CourseConfirmation)
         and any(item.code == "COHORT_MISMATCH" for item in cached_confirmation.diagnostics)
     )
-    if cached_digest == source_digest and isinstance(cached_confirmation, CourseConfirmation) and not cached_has_cohort_blocker:
+    # The selected handbook/cohort is part of the parser confirmation context.
+    # A source digest alone is insufficient: the same transcript can be
+    # confirmed under one cohort and then accidentally reused after settings
+    # switch to another cohort with different rules.
+    if (
+        cached_digest == source_digest
+        and cached_cohort == selected_cohort
+        and isinstance(cached_confirmation, CourseConfirmation)
+        and not cached_has_cohort_blocker
+    ):
         return cached_confirmation
 
     try:
@@ -323,7 +503,15 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
         confirmation = adapted.confirmation
         st.session_state["_student_display"] = _safe_student_display(student_info)
         parse_diagnostics = student_info.get("parse_diagnostics", {}) if isinstance(student_info, Mapping) else {}
-        if isinstance(parse_diagnostics, Mapping) and parse_diagnostics.get("complete") is False:
+        parser_has_fatal_issue = bool(
+            isinstance(parse_diagnostics, Mapping)
+            and (
+                parse_diagnostics.get("complete") is False
+                or parse_diagnostics.get("fatal") is True
+                or parse_diagnostics.get("fatal_warnings")
+            )
+        )
+        if parser_has_fatal_issue:
             confirmation = _mark_confirmation_unconfirmed(
                 confirmation,
                 code="PARSER_INCOMPLETE",
@@ -335,7 +523,6 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
         detected_cohort = detected_cohort or (
             str(student_info.get("admission_cohort") or "").strip() if isinstance(student_info, Mapping) else ""
         )
-        selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
         if detected_cohort and selected_cohort and detected_cohort != selected_cohort:
             st.warning(
                 f"成績資料辨識為 {detected_cohort} 學年度，與目前選定 {selected_cohort} 學年度手冊不同；"
@@ -344,7 +531,7 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
             mismatch_confirmed = st.checkbox(
                 "我已核對適用規定，仍使用目前選定手冊",
                 value=bool(sidebar_state.get("cohort_mismatch_confirmed", False)),
-                key="cohort_mismatch_confirmation",
+                key=_cohort_mismatch_confirmation_key(source_digest, detected_cohort, selected_cohort),
             )
             if not mismatch_confirmed:
                 confirmation = _mark_confirmation_unconfirmed(
@@ -352,10 +539,7 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
                     code="COHORT_MISMATCH",
                     message="成績資料與選定入學 cohort 不一致，需人工確認。",
                 )
-        if adapted.diagnostics:
-            st.session_state["_parser_diagnostics"] = tuple(item.message for item in adapted.diagnostics)
-        else:
-            st.session_state["_parser_diagnostics"] = ()
+        st.session_state["_parser_diagnostics"] = _parser_diagnostic_messages(parse_diagnostics, adapted.diagnostics)
     except Exception as error:
         # Never expose parser details or retain the parser's student record.
         st.session_state["_student_display"] = {"name": "＊＊", "student_id": "••••"}
@@ -381,6 +565,7 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
     # Any source change creates a new parsed state and invalidates a prior
     # confirmation.  The stored object contains normalized scalar rows only.
     st.session_state["_source_fingerprint"] = source_digest
+    st.session_state["_parser_confirmation_cohort"] = selected_cohort
     st.session_state["_parsed_confirmation"] = confirmation
     st.session_state["_editor_rows"] = tuple(row.as_dict() for row in confirmation.rows)
     st.session_state["_analysis_exported"] = False
@@ -402,18 +587,119 @@ def _as_editor_records(value: object) -> tuple[Mapping[str, Any], ...] | None:
     return tuple(item for item in value if isinstance(item, Mapping))
 
 
+_EDITOR_STATUS_LABELS = {
+    "COMPLETED": "已修畢",
+    "PASS": "已修畢",
+    "IN_PROGRESS": "修習中",
+    "FAILED": "不及格",
+    "FAIL": "不及格",
+    "WITHDRAWN": "停修／撤選",
+    "NOT_TAKEN": "未修課",
+    "NOT_ATTEMPTED": "未修課",
+    "WAIVED": "免修／抵認",
+    "TRANSFERRED": "抵免／抵認",
+    "UNKNOWN": "需要補資料",
+}
+_EDITOR_STATUS_CODES = {
+    label: code
+    for code, label in _EDITOR_STATUS_LABELS.items()
+    if code not in {"PASS", "FAIL", "NOT_ATTEMPTED"}
+}
+_EDITOR_STATUS_CODES.update({"已修畢": "COMPLETED", "不及格": "FAILED", "未修課": "NOT_TAKEN"})
+
+
+def _editor_display_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Translate normalized course rows for the editable student table."""
+
+    display_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        status = str(item.get("status") or "UNKNOWN").upper().replace("-", "_")
+        item["status"] = _EDITOR_STATUS_LABELS.get(status, "需要補資料")
+        display_rows.append(item)
+    return display_rows
+
+
+def _editor_internal_records(records: Iterable[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    """Map the Chinese table values back to input_confirmation status codes."""
+
+    internal: list[Mapping[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        status = str(item.get("status") or "需要補資料").strip()
+        item["status"] = _EDITOR_STATUS_CODES.get(status, status)
+        internal.append(item)
+    return tuple(internal)
+
+
+def _confirmation_column_config() -> dict[str, object]:
+    """Return Chinese Streamlit column labels without relying on a version API."""
+
+    config = getattr(st, "column_config", None)
+    if config is None:
+        return {}
+
+    def make(name: str, title: str, **kwargs: object) -> object | None:
+        factory = getattr(config, name, None)
+        if factory is None:
+            return None
+        try:
+            return factory(title, **kwargs)
+        except (TypeError, ValueError):
+            try:
+                return factory(title)
+            except (TypeError, ValueError):
+                return None
+
+    columns: dict[str, object] = {}
+    for key, title in (
+        ("course_code", "課程代碼"),
+        ("course_name", "課程名稱"),
+        ("term", "修課學期"),
+        ("academic_year", "學年度"),
+        ("semester", "學期"),
+        ("grade", "成績"),
+        ("department", "開課系所"),
+        ("course_type", "課程類型"),
+    ):
+        column = make("TextColumn", title)
+        if column is not None:
+            columns[key] = column
+    for key, title in (("credits", "課程學分"), ("earned_credits", "實得學分")):
+        column = make("NumberColumn", title, format="%g")
+        if column is not None:
+            columns[key] = column
+    status_column = make("SelectboxColumn", "修課狀態", options=list(dict.fromkeys(_EDITOR_STATUS_LABELS.values())))
+    if status_column is None:
+        status_column = make("TextColumn", "修課狀態")
+    if status_column is not None:
+        columns["status"] = status_column
+    # Keep this identity field in the normalized rows for confirmation and
+    # re-release, while keeping an opaque grouping token out of the student
+    # editor's primary view.
+    columns["attempt_group"] = None
+    return columns
+
+
 def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfirmation:
     """Render normalized rows and return the current lifecycle state."""
 
     display = st.session_state.get("_student_display")
     if isinstance(display, Mapping):
         st.caption(f"成績資料：{display.get('name', '＊＊')}／學號 {display.get('student_id', '••••')}（預設遮罩）")
-    diagnostics = st.session_state.get("_parser_diagnostics", ())
+    diagnostics = tuple(
+        item.strip()
+        for item in st.session_state.get("_parser_diagnostics", ())
+        if isinstance(item, str) and item.strip()
+    )
     if diagnostics:
         st.warning("成績資料尚有待確認項目，請檢視下方列資料後再確認。")
+        with st.expander("查看解析核對原因", expanded=True):
+            for message in diagnostics:
+                st.write(f"• {message}")
 
     current = confirmation
-    editor_rows = [row.as_dict() for row in confirmation.rows]
+    editor_rows = _editor_display_rows(row.as_dict() for row in confirmation.rows)
     if editor_rows:
         try:
             edited = st.data_editor(
@@ -423,11 +709,13 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
                 num_rows="dynamic",
                 use_container_width=True,
                 disabled=["attempt_group"],
+                column_config=_confirmation_column_config(),
             )
             records = _as_editor_records(edited)
             current_records = tuple(row.as_dict() for row in current.rows)
-            if records is not None and tuple(dict(record) for record in records) != current_records:
-                current = edit_confirmation(current, records)
+            internal_records = _editor_internal_records(records) if records is not None else None
+            if internal_records is not None and internal_records != current_records:
+                current = edit_confirmation(current, internal_records)
         except (AttributeError, TypeError, ValueError):
             # A missing editor keeps the formal release gate closed.
             current = confirmation
@@ -441,7 +729,16 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
             st.warning("課程列在上次確認後已變更，請重新檢視並確認。")
         elif current.state is ConfirmationState.UNCONFIRMED:
             st.warning("課程列尚未通過安全檢查，不能產生正式通過判定。")
-        if st.button("確認目前成績列", type="primary", use_container_width=True, key="confirm_transcript_rows"):
+        # Parser fatal diagnostics make ``valid`` false.  Keep the button in
+        # the same place so the user can see the next step, but make the
+        # unsafe action impossible until there are rows without diagnostics.
+        if st.button(
+            "確認目前成績列",
+            type="primary",
+            use_container_width=True,
+            key="confirm_transcript_rows",
+            disabled=not (current.valid and bool(current.rows)),
+        ):
             confirmed = confirm_confirmation(current, current.fingerprint)
             if confirmed.state is ConfirmationState.CONFIRMED:
                 current = confirmed
@@ -508,41 +805,6 @@ def _build_evaluation_request(
         formal_award_status=sidebar_state.get("formal_award_self_report") or sidebar_state.get("formal_award_status"),
         input_warning_codes=tuple(sidebar_state.get("input_warning_codes", ())),
     )
-
-
-def _render_official_decisions(snapshot: object) -> None:
-    decisions = getattr(snapshot, "decisions", {})
-    if not isinstance(decisions, Mapping):
-        return
-    st.markdown("### 官方判定（來自同一份分析快照）")
-    labels = [("primary_graduation", "主修畢業")]
-    optional_groups = (
-        (
-            "double_major_qualification",
-            (
-                ("double_major_qualification", "雙主修資格"),
-                ("formal_double_major_award", "正式授予雙主修"),
-            ),
-        ),
-        (
-            "minor_application_or_qualification",
-            (
-                ("minor_application_or_qualification", "輔系申請／資格"),
-                ("minor_coursework_completion", "輔系課程完成度"),
-                ("formal_minor_award", "正式授予輔系"),
-            ),
-        ),
-    )
-    for sentinel, group in optional_groups:
-        item = decisions.get(sentinel, {})
-        status = item.get("status", "UNKNOWN") if isinstance(item, Mapping) else "UNKNOWN"
-        if status != "NOT_APPLICABLE":
-            labels.extend(group)
-    labels.append(("overall", "整體結果"))
-    for key, label in labels:
-        item = decisions.get(key, {})
-        status = item.get("status", "UNKNOWN") if isinstance(item, Mapping) else "UNKNOWN"
-        st.write(f"{label}：{status}")
 
 
 def _render_snapshot_outputs(snapshot: object) -> None:
@@ -645,6 +907,13 @@ def main():
         st.info("完成上方設定後，請上傳歷年成績單 PDF，或使用校務系統帳密即時抓取；確認資料後這裡會顯示學分進度。")
         return
 
+    primary_id = str(sidebar_state.get("primary_curriculum_id") or "")
+    if not primary_id or primary_id in {f"primary:{year}:math" for year in ("113", "114", "115")}:
+        _clear_snapshot_caches()
+        _render_analysis_state_marker(active=False)
+        st.info("請完成主修設定；數學系 113 學年度起須選擇主修專業領域，再按「套用設定」。")
+        return
+
     released_rows = _confirmed_rows(confirmation)
     request = _build_evaluation_request(sidebar_state, confirmation, released_rows=released_rows)
 
@@ -656,7 +925,6 @@ def main():
         _render_analysis_state_marker(active=False)
         return
 
-    _render_official_decisions(snapshot)
     try:
         _render_snapshot_outputs(snapshot)
     except Exception as error:

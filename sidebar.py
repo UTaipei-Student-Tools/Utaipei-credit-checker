@@ -16,6 +16,7 @@ from handbook_rules import (
     get_rules_meta,
 )
 from input_confirmation import mask_student_id
+from pdf_parser import parse_transcript_pdf
 from policy_audit import (
     get_primary_program_options,
     get_primary_requirements,
@@ -36,11 +37,16 @@ from scraper import (
     PortalErrorCode,
     fetch_transcript,
 )
-from ui_components import render_landing_message
 
 _PORTAL_STATE_KEY = "_utaipei_portal_state"
 _PORTAL_CODE_KEY = "_utaipei_portal_code"
 _PORTAL_STATES = frozenset({"IDLE", "RUNNING", "SUCCESS", "ERROR"})
+_PORTAL_CREDENTIAL_KEYS = (
+    "student_id",
+    "student_pwd",
+    "portal_account_input",
+    "portal_password_input",
+)
 
 _SECONDARY_KINDS = {
     "單主修": "none",
@@ -158,6 +164,49 @@ def _set_portal_state(state, code=None):
         code = PortalErrorCode.PORTAL_CHANGED.value
     st.session_state[_PORTAL_STATE_KEY] = state
     st.session_state[_PORTAL_CODE_KEY] = code
+
+
+def _clear_portal_credential_state():
+    """Remove legacy credential widget values from the session boundary."""
+
+    for key in _PORTAL_CREDENTIAL_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _validate_live_transcript(pdf_content, account):
+    """Validate a fetched transcript before it can replace session data.
+
+    The parser output stays local to this call.  Only an exact account
+    identity match and a complete, reconciled parser result are eligible for
+    the later commit; parser exceptions are intentionally converted to a safe
+    portal error so raw PDF text and exception details never reach the UI.
+    """
+
+    try:
+        parsed_student, _courses = parse_transcript_pdf(pdf_content)
+    except Exception:
+        raise PortalError(PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED) from None
+
+    if not isinstance(parsed_student, Mapping):
+        raise PortalError(PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED)
+
+    parsed_student_id = str(parsed_student.get("student_id") or "").strip()
+    expected_account = str(account or "").strip()
+    if not parsed_student_id or parsed_student_id == "未辨識":
+        raise PortalError(PortalErrorCode.TRANSCRIPT_IDENTITY_MISMATCH)
+    if parsed_student_id.casefold() != expected_account.casefold():
+        raise PortalError(PortalErrorCode.TRANSCRIPT_IDENTITY_MISMATCH)
+
+    diagnostics = parsed_student.get("parse_diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        raise PortalError(PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED)
+    if diagnostics.get("complete") is not True or diagnostics.get("fatal") is True:
+        raise PortalError(PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED)
+
+    reconciliation = diagnostics.get("reconciliation")
+    if not isinstance(reconciliation, Mapping) or reconciliation.get("status") != "reconciled":
+        raise PortalError(PortalErrorCode.TRANSCRIPT_VALIDATION_FAILED)
+    return parsed_student
 
 
 def _render_portal_state_marker(ui=None, *, placeholder=None):
@@ -466,16 +515,18 @@ def _render_settings_fragment(draft, settings_before, *, panel_title, expanded):
     # Streamlit 1.57 fragments must own the containers into which they render;
     # do not call this function inside an expander created by the parent page.
     with st.expander(panel_title, expanded=expanded):
-        st.caption(
-            "所有必要操作都在這裡完成；手機不需要打開側欄。"
-            if not expanded
-            else "可在此選擇入學年度、主修、輔系／雙主修與申請資訊。"
-        )
         rules_meta = _render_handbook_selector(st, draft)
-        _render_rules_meta_card(rules_meta, st)
         _render_major_settings(draft.get("primary_handbook_year"), st, draft)
-        st.caption("上方選項會即時更新；完成整份設定後，再按一次「套用設定」才會開始使用新的條件。")
-        if st.button("套用設定", type="primary", use_container_width=True):
+        # Keep provenance available without taking space away from the four
+        # primary choices.  Students can open it after choosing the settings.
+        with st.expander("手冊來源與核對狀態", expanded=False):
+            _render_rules_meta_card(rules_meta, st)
+        math_domain_missing = (
+            draft.get("primary_program") == "數學"
+            and str(draft.get("primary_handbook_year")) in {"113", "114", "115"}
+            and draft.get("primary_curriculum_id") not in _math_primary_choices(draft.get("primary_handbook_year"))
+        )
+        if st.button("套用設定", type="primary", use_container_width=True, disabled=math_domain_missing):
             draft = _commit_settings_draft()
             if _handle_settings_apply(settings_before, preserve_secondary_self_reports=draft):
                 st.session_state["_settings_apply_notice"] = True
@@ -498,8 +549,6 @@ def render_setup_panel():
     _init_session_state()
     portal_marker = _render_portal_state_marker(st)
     has_transcript = bool(st.session_state.get("transcript_pdf_bytes") or st.session_state.get("transcript_pdf_path"))
-    if not has_transcript:
-        render_landing_message()
     panel_title = "審查設定（點開調整）" if has_transcript else "開始設定：先選手冊、主修，再載入成績"
     # Settings widgets intentionally stay inside the fragment-owned expander
     # so dependent choices rerun immediately without rendering into an
@@ -516,22 +565,11 @@ def render_setup_panel():
     if st.session_state.pop("_settings_apply_notice", False):
         st.success("設定已套用；已依新的手冊與修讀身分更新分析條件。")
     with st.expander("成績資料與校務系統（點開載入）", expanded=not has_transcript):
-        st.caption("可上傳歷年成績單，或使用校務系統帳密即時抓取；手機不需要打開側欄。")
+        st.caption("上傳歷年成績單，或使用校務系統登入抓取；抓取失敗時會保留前次資料。")
         st.markdown("---")
         _render_upload_section(st)
         st.markdown("---")
         _render_login_section(st, portal_marker=portal_marker)
-
-    _render_handbook_preview(
-        st,
-        st.session_state.get("primary_handbook_year", st.session_state.get("handbook_year")),
-        st.session_state.get("primary_program", "地生"),
-        st.session_state.get("primary_track"),
-        st.session_state.get("program_type", "單主修"),
-        st.session_state.get("target_program"),
-        st.session_state.get("target_track"),
-        st.session_state.get("target_curriculum_year"),
-    )
     return _build_state(rules_meta)
 
 
@@ -548,7 +586,6 @@ def render_sidebar():
 def _render_handbook_selector(ui=None, draft=None):
     ui = ui or st
     draft = draft if isinstance(draft, dict) else _ensure_settings_draft()
-    ui.markdown("### 📚 適用學生手冊")
     # Registry IDs, rather than legacy handbook metadata, define the available
     # admission cohorts.  This keeps 111–115 visible even when a handbook PDF
     # has aggregate-only coverage and therefore cannot auto-pass.
@@ -565,7 +602,9 @@ def _render_handbook_selector(ui=None, draft=None):
     admission_current = str(draft.get("admission_cohort") or get_default_handbook_year())
     if admission_current not in years:
         admission_current = get_default_handbook_year()
-    admission = ui.selectbox(
+    columns = ui.columns(2) if callable(getattr(ui, "columns", None)) else (ui, ui)
+    admission_ui, primary_ui = columns
+    admission = admission_ui.selectbox(
         "入學年度",
         options=years,
         index=years.index(admission_current),
@@ -578,7 +617,7 @@ def _render_handbook_selector(ui=None, draft=None):
     )
     if primary_current not in years:
         primary_current = get_default_handbook_year()
-    primary_handbook = ui.selectbox(
+    primary_handbook = primary_ui.selectbox(
         "主修適用學生手冊",
         options=years,
         index=years.index(primary_current),
@@ -597,7 +636,7 @@ def _render_handbook_selector(ui=None, draft=None):
 
 def _render_upload_section(ui=None):
     ui = ui or st
-    ui.markdown("### 上傳成績單")
+    ui.markdown("### 匯入成績單")
     uploaded_pdf = ui.file_uploader(
         "歷年成績單 PDF",
         type=["pdf"],
@@ -793,6 +832,26 @@ def _primary_registry_id(cohort, program, track):
     return None
 
 
+def _math_primary_choices(cohort):
+    return tuple(
+        curriculum_id for curriculum_id in list_curriculum_ids(kind="primary", cohort=str(cohort))
+        if get_curriculum(curriculum_id).get("program_slug") == "math"
+        and get_curriculum(curriculum_id).get("track_slug") in {
+            "math_scientific_computing", "data_science", "math_education"
+        }
+    )
+
+
+def _math_domain_label(curriculum_id):
+    if not curriculum_id:
+        return "請選擇主修專業領域"
+    return {
+        "math_scientific_computing": "數學與科學計算",
+        "data_science": "數據科學",
+        "math_education": "數學教育",
+    }.get(get_curriculum(curriculum_id).get("track_slug"), "專業領域待確認")
+
+
 def _curriculum_label(curriculum_id):
     try:
         record = get_curriculum(curriculum_id)
@@ -804,6 +863,9 @@ def _curriculum_label(curriculum_id):
         "life_science": "生命科學",
         "physics": "物理組",
         "chemistry": "化學組",
+        "math_scientific_computing": "數學與科學計算",
+        "data_science": "數據科學",
+        "math_education": "數學教育",
     }
     program = names.get(record.get("program_slug"), str(record.get("program") or "未命名系所"))
     track = tracks.get(record.get("track_slug"))
@@ -859,7 +921,6 @@ def _target_registry_kind(program_type):
 def _render_major_settings(handbook_year, ui=None, draft=None):
     ui = ui or st
     draft = draft if isinstance(draft, dict) else _ensure_settings_draft()
-    ui.markdown("### 主修與修讀身分")
 
     # Capture the previous draft context before rendering the dependent
     # widgets.  The comparison below clears only stale secondary evidence;
@@ -867,13 +928,20 @@ def _render_major_settings(handbook_year, ui=None, draft=None):
     previous_program_type = draft.get("program_type")
     previous_target_year = draft.get("target_curriculum_year")
     previous_target_id = draft.get("target_curriculum_id")
+    previous_primary_id = draft.get("primary_curriculum_id")
 
     primary_handbook_year = str(draft.get("primary_handbook_year") or handbook_year or get_default_handbook_year())
     options = get_primary_program_options(primary_handbook_year) or ["地生（地球環境）"]
     current_label = draft.get("primary_program_label")
     if current_label not in options:
-        current_label = options[0]
-    selected_label = ui.selectbox(
+        previous_program = draft.get("primary_program")
+        current_label = next(
+            (label for label in options if normalize_primary_program(label, primary_handbook_year)[0] == previous_program),
+            options[0],
+        )
+    columns = ui.columns(2) if callable(getattr(ui, "columns", None)) else (ui, ui)
+    primary_ui, planning_ui = columns
+    selected_label = primary_ui.selectbox(
         "主修系所／組別",
         options=options,
         index=options.index(current_label),
@@ -892,7 +960,7 @@ def _render_major_settings(handbook_year, ui=None, draft=None):
     current_program_type = draft.get("program_type")
     if current_program_type not in planning_options:
         current_program_type = "單主修"
-    program_type = ui.selectbox(
+    program_type = planning_ui.selectbox(
         "規劃類型",
         options=planning_options,
         index=planning_options.index(current_program_type),
@@ -901,42 +969,65 @@ def _render_major_settings(handbook_year, ui=None, draft=None):
     draft["program_type"] = program_type
     draft["secondary_kind"] = _secondary_kind(program_type)
 
-    target_kind = _target_registry_kind(program_type)
-    target_years = _curriculum_years(target_kind) if target_kind else []
-    target_year_options = ["未選擇", *target_years]
-    current_target_year = str(draft.get("target_curriculum_year") or "未選擇")
-    if current_target_year not in target_year_options:
-        current_target_year = "未選擇"
-    selected_target_year = ui.selectbox(
-        "輔系／雙主修目標課表年度",
-        options=target_year_options,
-        index=target_year_options.index(current_target_year),
-        format_func=lambda year: "未選擇" if year == "未選擇" else f"{year} 學年度課表",
-        disabled=(program_type == "單主修"),
-        help="先選目標課表年度，再顯示該年度有正式登錄的輔系／雙主修系所。",
-    )
-    draft["target_curriculum_year"] = (
-        str(selected_target_year) if target_kind and selected_target_year != "未選擇" else None
-    )
+    if primary_program == "數學" and primary_handbook_year in {"113", "114", "115"}:
+        math_choices = (None, *_math_primary_choices(primary_handbook_year))
+        selected_math = ui.selectbox(
+            "主修專業領域",
+            options=math_choices,
+            index=math_choices.index(previous_primary_id) if previous_primary_id in math_choices else 0,
+            format_func=_math_domain_label,
+            key=f"settings_math_domain_{primary_handbook_year}",
+            help="依學生手冊選擇實際主修領域；不同領域的必修課與選修最低學分不同。",
+        )
+        draft["primary_curriculum_id"] = selected_math
+        draft["primary_track"] = get_curriculum(selected_math).get("track_slug") if selected_math else None
+        primary_track = draft["primary_track"]
+        ui.caption("此處依非師資生畢業規則規劃。")
+        if not selected_math:
+            ui.info("請先選擇主修專業領域，再套用設定。")
 
-    target_ids = (
-        list_curriculum_ids(kind=target_kind, cohort=draft["target_curriculum_year"])
-        if target_kind and draft["target_curriculum_year"]
-        else []
-    )
-    current_target = draft.get("target_curriculum_id")
-    if current_target not in target_ids:
-        current_target = None
-    target_select_options = [None, *target_ids]
-    selected_target = ui.selectbox(
-        "輔系／雙主修目標系所／組別",
-        options=target_select_options,
-        index=target_select_options.index(current_target),
-        format_func=lambda value: "未選擇" if value is None else _curriculum_label(value),
-        disabled=(program_type == "單主修" or not draft["target_curriculum_year"]),
-        help="只列出所選年度、所選修讀類型的版本；候選不等於校方核准，仍需官方證據。",
-    )
-    draft["target_curriculum_id"] = selected_target if target_kind else None
+    target_kind = _target_registry_kind(program_type)
+    if target_kind:
+        target_years = _curriculum_years(target_kind)
+        target_year_options = ["未選擇", *target_years]
+        current_target_year = str(draft.get("target_curriculum_year") or "未選擇")
+        if current_target_year not in target_year_options:
+            current_target_year = "未選擇"
+        selected_target_year = ui.selectbox(
+            "輔系／雙主修目標課表年度",
+            options=target_year_options,
+            index=target_year_options.index(current_target_year),
+            format_func=lambda year: "未選擇" if year == "未選擇" else f"{year} 學年度課表",
+            help="先選目標課表年度，再顯示該年度有正式登錄的輔系／雙主修系所。",
+        )
+        draft["target_curriculum_year"] = (
+            str(selected_target_year) if selected_target_year != "未選擇" else None
+        )
+
+        target_ids = (
+            list_curriculum_ids(kind=target_kind, cohort=draft["target_curriculum_year"])
+            if draft["target_curriculum_year"]
+            else []
+        )
+        current_target = draft.get("target_curriculum_id")
+        if current_target not in target_ids:
+            current_target = None
+        target_select_options = [None, *target_ids]
+        selected_target = ui.selectbox(
+            "輔系／雙主修目標系所／組別",
+            options=target_select_options,
+            index=target_select_options.index(current_target),
+            format_func=lambda value: "未選擇" if value is None else _curriculum_label(value),
+            help="只列出所選年度、所選修讀類型的版本；候選不等於校方核准，仍需官方證據。",
+        )
+        draft["target_curriculum_id"] = selected_target
+    else:
+        # A single-major student has no secondary curriculum to choose.  Do
+        # not render disabled controls that imply an additional requirement.
+        draft["target_curriculum_year"] = None
+        draft["target_curriculum_id"] = None
+        draft["target_program"] = None
+        draft["target_track"] = None
     _normalize_secondary_draft(
         draft,
         previous_program_type=previous_program_type,
@@ -1112,21 +1203,21 @@ def _render_login_section(ui=None, *, portal_marker=None):
     """
 
     ui = ui or st
-    ui.markdown("### 校務系統（選用）")
-    ui.caption("雲端出口可能被校務系統封鎖；抓取失敗時可改用上方 PDF。送出後密碼欄位會清除。")
+    ui.markdown("### 校務系統登入（選用）")
+    ui.caption("抓取失敗時會保留前次資料，也可以改用上方 PDF；送出後密碼欄位會清除。")
     with ui.form("portal_credentials_form", clear_on_submit=True):
         account = ui.text_input(
-            "學號 / Account",
+            "學號",
             value="",
             placeholder="請輸入您的學號",
         )
         password = ui.text_input(
-            "密碼 / Password",
+            "密碼",
             type="password",
             placeholder="僅本次送出使用，不會保存",
         )
         scrape_clicked = ui.form_submit_button(
-            "使用校務系統即時抓取成績單",
+            "登入並抓取成績單",
             type="primary",
             use_container_width=True,
             help="登入校務系統並下載歷年成績單 PDF；下載後仍須逐列確認才能分析。",
@@ -1137,13 +1228,7 @@ def _render_login_section(ui=None, *, portal_marker=None):
         # Clear keys from older widget versions even if a browser session
         # survives an upgrade.  Current form values remain local variables
         # and are cleared by ``clear_on_submit`` after this run.
-        for legacy_secret_key in (
-            "student_id",
-            "student_pwd",
-            "portal_account_input",
-            "portal_password_input",
-        ):
-            st.session_state.pop(legacy_secret_key, None)
+        _clear_portal_credential_state()
         _attempt_live_scrape(account, password, ui=ui, portal_marker=portal_marker)
 
 
@@ -1186,6 +1271,9 @@ def _attempt_live_scrape(
 
     ui = ui or st
     account = str(account or "").strip()
+    # Keep both direct callers and the form path safe if a prior app version
+    # left a raw credential widget value in session state.
+    _clear_portal_credential_state()
     if not account or not password:
         _set_portal_state("ERROR", PortalErrorCode.AUTH_REJECTED)
         _render_portal_state_marker(ui, placeholder=portal_marker)
@@ -1204,6 +1292,7 @@ def _attempt_live_scrape(
         pdf_content = bytes(fetch_transcript(account, password, **fetch_kwargs) or b"")
         if not pdf_content.startswith(b"%PDF-"):
             raise PortalError(PortalErrorCode.PDF_NOT_FOUND)
+        _validate_live_transcript(pdf_content, account)
     except PortalError as exc:
         _set_portal_state("ERROR", exc.code)
         _render_portal_state_marker(ui, placeholder=portal_marker)

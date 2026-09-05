@@ -77,13 +77,300 @@ def _open_transcript(source):
     return fitz.open(stream=bytes(data), filetype="pdf")
 
 
+_TOTAL_TOLERANCE = 0.01
+_SUMMARY_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$")
+
+
+def _group_words_by_row(words, y_tol=4):
+    """Group PyMuPDF words into visual rows without joining columns."""
+
+    rows = []
+    for word in sorted(words, key=lambda item: (item[1], item[0])):
+        y0 = word[1]
+        for row in rows:
+            if abs(y0 - row["y"]) < y_tol:
+                row["words"].append(word)
+                # Keep the representative close to the center of a wrapped
+                # row so later rows with a small baseline shift still join.
+                row["y"] = (row["y"] * (len(row["words"]) - 1) + y0) / len(row["words"])
+                break
+        else:
+            rows.append({"y": y0, "words": [word]})
+    return rows
+
+
+def _summary_label_kind(text):
+    """Return a cumulative-summary field name for a label, if unambiguous."""
+
+    compact = re.sub(r"\s+", "", str(text or ""))
+    lower = compact.casefold()
+    if "修習中" in compact and "學分" in compact and ("總" in compact or "歷年" in compact):
+        return "in_progress"
+    if (
+        ("修習" in compact or "修讀" in compact or "修課" in compact)
+        and "學分" in compact
+        and ("總" in compact or "歷年" in compact)
+    ) or lower in {
+        "attemptedcredits",
+        "totalattemptedcredits",
+        "creditsattempted",
+    }:
+        return "attempted"
+    if (
+        "實得" in compact
+        and "學分" in compact
+        and ("總" in compact or "歷年" in compact)
+    ) or lower in {
+        "earnedcredits",
+        "totalearnedcredits",
+        "creditsearned",
+    }:
+        return "earned"
+    return None
+
+
+def _summary_label_boxes(page):
+    """Find cumulative labels and their visual bounding boxes on one page."""
+
+    words = page.get_text("words")
+    rows = _group_words_by_row(words, y_tol=4)
+    boxes = []
+    # A bilingual/multi-level heading may put each part on an adjacent row.
+    # Join at most four close rows, but never rows from a separate table.
+    for start in range(len(rows)):
+        found = False
+        for end in range(start, min(len(rows), start + 4)):
+            if rows[end]["y"] - rows[start]["y"] > 48:
+                break
+            row_words = [word for row in rows[start : end + 1] for word in row["words"]]
+            # Summary columns can share one visual row.  Keep the threshold
+            # below the roughly 20-point gap used by the portal's two-column
+            # footer while still joining words within one bilingual label.
+            clusters = []
+            for word in sorted(row_words, key=lambda item: item[0]):
+                if not clusters or word[0] - clusters[-1][-1][2] > 14:
+                    clusters.append([word])
+                else:
+                    clusters[-1].append(word)
+            for cluster in clusters:
+                text_words = [word for word in cluster if _SUMMARY_NUMERIC_RE.fullmatch(re.sub(r"\s+", "", str(word[4] or ""))) is None]
+                label = "".join(word[4] for word in text_words)
+                kind = _summary_label_kind(label)
+                if not kind or not text_words:
+                    continue
+                boxes.append(
+                    (
+                        kind,
+                        (
+                            min(word[0] for word in text_words),
+                            min(word[1] for word in text_words),
+                            max(word[2] for word in text_words),
+                            max(word[3] for word in text_words),
+                        ),
+                    )
+                )
+                found = True
+            if found:
+                # Once the label is recognized, do not absorb its numeric
+                # value into the bounding box on a later row.
+                break
+    # The sliding windows above intentionally find wrapped headings, so
+    # collapse the same physical box before collecting values.
+    unique = []
+    for kind, box in boxes:
+        if any(
+            kind == other_kind
+            and abs(box[0] - other_box[0]) < 1
+            and abs(box[1] - other_box[1]) < 1
+            and abs(box[2] - other_box[2]) < 1
+            and abs(box[3] - other_box[3]) < 1
+            for other_kind, other_box in unique
+        ):
+            continue
+        unique.append((kind, box))
+    return unique
+
+
+def _summary_value_for_box(page, box):
+    """Read the closest numeric value below a summary label's column."""
+
+    x0, y0, x1, y1 = box
+    center = (x0 + x1) / 2.0
+    width = max(1.0, x1 - x0)
+    values = []
+    for word in page.get_text("words"):
+        token = re.sub(r"\s+", "", str(word[4] or ""))
+        if not _SUMMARY_NUMERIC_RE.fullmatch(token):
+            continue
+        gap = word[1] - y1
+        if gap < -1 or gap > 120:
+            continue
+        word_center = (word[0] + word[2]) / 2.0
+        if word_center < x0 - 24 or word_center > x1 + 24:
+            # A narrow label can have a centered value just outside its box,
+            # but a value from a neighboring summary column must stay out.
+            continue
+        distance = 0.0 if x0 - 8 <= word_center <= x1 + 8 else abs(word_center - center)
+        if distance > max(38.0, width * 0.9):
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if value < 0:
+            continue
+        values.append((gap, distance, value))
+    if not values:
+        return None
+    values.sort(key=lambda item: (item[0], item[1]))
+    return values[0][2]
+
+
+def _extract_reported_totals_from_doc(doc):
+    """Extract cumulative attempted/earned totals by label-to-value alignment.
+
+    This deliberately has no full-text fallback: a term heading such as
+    ``修習學分`` is not evidence of a cumulative total.
+    """
+
+    values = {"attempted": [], "earned": [], "in_progress": []}
+    for page_index, page in enumerate(doc):
+        for kind, box in _summary_label_boxes(page):
+            value = _summary_value_for_box(page, box)
+            if value is not None:
+                values[kind].append((page_index, value))
+
+    def resolve(kind):
+        candidates = [value for _page_index, value in values[kind]]
+        unique_values = []
+        for value in candidates:
+            if not any(abs(value - prior) <= _TOTAL_TOLERANCE for prior in unique_values):
+                unique_values.append(value)
+        conflict = len(unique_values) > 1
+        return (None if conflict or not unique_values else unique_values[0]), unique_values, conflict
+
+    attempted, attempted_candidates, attempted_conflict = resolve("attempted")
+    earned, earned_candidates, earned_conflict = resolve("earned")
+    in_progress, in_progress_candidates, in_progress_conflict = resolve("in_progress")
+    return {
+        "reported_total": attempted,
+        "reported_earned_total": earned,
+        "reported_in_progress_total": in_progress,
+        "attempted_candidates": attempted_candidates,
+        "earned_candidates": earned_candidates,
+        "in_progress_candidates": in_progress_candidates,
+        "attempted_conflict": attempted_conflict,
+        "earned_conflict": earned_conflict,
+        "in_progress_conflict": in_progress_conflict,
+    }
+
+
+def _parse_credit_value(value):
+    token = re.sub(r"\s+", "", str(value or ""))
+    if not token or token == "--":
+        return 0.0
+    try:
+        parsed = float(token)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed >= 0 else 0.0
+
+
+def _semester_status(score, credit):
+    """Classify one semester using the same conservative status vocabulary."""
+
+    if credit <= 0:
+        return "ZERO_CREDIT"
+    token = re.sub(r"\s+", "", str(score or "")).casefold()
+    if token in {"未", "在修", "修習中", "修讀中", "修課中", "inprogress", "enrolled", "taking", "", "--"}:
+        return "IN_PROGRESS"
+    if token in {"p", "pass", "passed", "及格", "通過", "已修", "已完成", "修畢", "completed", "complete"}:
+        return "COMPLETED"
+    if token in {"免", "免修", "waived"}:
+        return "WAIVED"
+    if token in {"抵", "抵免", "抵認", "transfer", "transferred", "transfercredit"}:
+        return "TRANSFERRED"
+    if token in {"f", "fail", "failed", "不及格", "不通過", "停", "w", "withdrawn", "停修", "撤選"}:
+        return "ENDED_NO_EARNED"
+    try:
+        return "COMPLETED" if float(token) >= 60 else "ENDED_NO_EARNED"
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+
+
+def _totals_from_courses(course_list):
+    """Compute totals per semester so mixed-status rows are never whole-row counted."""
+
+    totals = {
+        "all_course_credits": 0.0,
+        "completed_attempted_credits": 0.0,
+        "earned_credits": 0.0,
+        "in_progress_credits": 0.0,
+        "waived_credits": 0.0,
+        "unverified_transfer_credits": 0.0,
+        "unknown_credits": 0.0,
+    }
+    for course in course_list:
+        for credit_key, score_key in (("sem1_credit", "sem1_score"), ("sem2_credit", "sem2_score")):
+            if credit_key not in course or course.get(credit_key) in (None, ""):
+                continue
+            credit = _parse_credit_value(course.get(credit_key))
+            if credit <= 0:
+                continue
+            status = _semester_status(course.get(score_key), credit)
+            totals["all_course_credits"] += credit
+            if status == "IN_PROGRESS":
+                totals["in_progress_credits"] += credit
+            elif status == "COMPLETED":
+                totals["completed_attempted_credits"] += credit
+                totals["earned_credits"] += credit
+            elif status == "ENDED_NO_EARNED":
+                totals["completed_attempted_credits"] += credit
+            elif status == "WAIVED":
+                totals["waived_credits"] += credit
+            elif status == "TRANSFERRED":
+                totals["unverified_transfer_credits"] += credit
+            else:
+                totals["unknown_credits"] += credit
+    return {key: round(value, 2) for key, value in totals.items()}
+
+
+def _duplicate_course_rows(course_list):
+    """Return whether the selected parse contains exact repeated attempts."""
+
+    seen = set()
+    duplicates = 0
+    for course in course_list:
+        key = (
+            course.get("name", ""),
+            course.get("academic_year", ""),
+            course.get("sem1_credit", ""),
+            course.get("sem1_score", ""),
+            course.get("sem2_credit", ""),
+            course.get("sem2_score", ""),
+            course.get("type", ""),
+        )
+        if key in seen:
+            duplicates += 1
+        seen.add(key)
+    return duplicates
+
+
 def parse_transcript_pdf(pdf_path):
     doc = _open_transcript(pdf_path)
+    try:
+        return _parse_transcript_document(doc)
+    finally:
+        # Closing in a finally block also covers malformed documents and
+        # parser exceptions before the normal return path.
+        doc.close()
+
+
+def _parse_transcript_document(doc):
     if len(doc) == 0:
         raise ValueError("PDF file is empty")
 
     all_pages = [page for page in doc]
-    full_text = "\n".join(page.get_text() for page in all_pages)
     first_page_text = all_pages[0].get_text()
     detected = detect_department_track(first_page_text)
 
@@ -235,40 +522,9 @@ def parse_transcript_pdf(pdf_path):
             i += 1
         return merged_rows
 
-    def extract_reported_totals_from_doc(doc):
-        for page in doc:
-            words = page.get_text("words")
-            rows = group_words_by_row(words, y_tol=4)
-            for idx, row in enumerate(rows):
-                row_text = "".join([w[4] for w in sorted(row["words"], key=lambda w: w[0])])
-                if "修習總學分數" in row_text:
-                    if idx + 1 < len(rows):
-                        next_row = sorted(rows[idx + 1]["words"], key=lambda w: w[0])
-                        nums = []
-                        for w in next_row:
-                            try:
-                                nums.append(float(w[4]))
-                            except Exception:
-                                pass
-                        if nums:
-                            return nums[0], nums[1] if len(nums) > 1 else None
-        reported_total = None
-        reported_ip = None
-        m = re.search(r"修習學分(?:[:：\s]*)?(\d+(?:\.\d+)?)", full_text)
-        if m:
-            try:
-                reported_total = float(m.group(1))
-            except Exception:
-                reported_total = None
-        m2 = re.search(r"修習中(?:學分)?(?:[:：\s]*)?(\d+(?:\.\d+)?)", full_text)
-        if m2:
-            try:
-                reported_ip = float(m2.group(1))
-            except Exception:
-                reported_ip = None
-        return reported_total, reported_ip
-
-    reported_total, _reported_ip = extract_reported_totals_from_doc(all_pages)
+    reported_totals = _extract_reported_totals_from_doc(all_pages)
+    reported_total = reported_totals["reported_total"]
+    reported_earned_total = reported_totals["reported_earned_total"]
 
     def page_contains_course_rows(words):
         return any(w[4] in ("必", "選") for w in words)
@@ -423,47 +679,55 @@ def parse_transcript_pdf(pdf_path):
 
         return parsed
 
-    parsed_courses = []
-    for page in all_pages:
-        page_words = page.get_text("words")
-        parsed_courses.extend(parse_page_words(page_words, y_tol=3))
+    parse_candidates = []
+    for ytol in (3, 6, 9, 12, 18):
+        raw_courses = []
+        for page in all_pages:
+            raw_courses.extend(parse_page_words(page.get_text("words"), y_tol=ytol))
+        candidate_courses = split_two_semester_courses(raw_courses)
+        parse_candidates.append(
+            {
+                "y_tol": ytol,
+                "courses": candidate_courses,
+                "totals": _totals_from_courses(candidate_courses),
+                "duplicate_rows": _duplicate_course_rows(candidate_courses),
+            }
+        )
 
-    def totals_from_courses(course_list):
-        total = sum((c.get("total_credit") or 0.0) for c in course_list)
-        ip = sum((c.get("total_credit") or 0.0) for c in course_list if c.get("is_in_progress"))
-        return total, ip
+    # A wider row tolerance is useful only when it improves agreement with
+    # the labelled cumulative fields.  Never select the largest parse or a
+    # value merely because it reaches a lower-bound threshold.
+    target_totals = []
+    if reported_total is not None and not reported_totals["attempted_conflict"]:
+        target_totals.append(("completed_attempted_credits", reported_total))
+    if reported_earned_total is not None and not reported_totals["earned_conflict"]:
+        target_totals.append(("earned_credits", reported_earned_total))
 
-    parsed_total, _ = totals_from_courses(parsed_courses)
+    if target_totals:
+        def candidate_rank(item):
+            totals = item["totals"]
+            distance = sum(abs(totals[key] - expected) for key, expected in target_totals)
+            exact = distance <= _TOTAL_TOLERANCE * len(target_totals)
+            return (
+                1 if item["duplicate_rows"] else 0,
+                0 if exact else 1,
+                distance,
+                item["y_tol"],
+            )
 
-    if reported_total and parsed_total + 0.01 < reported_total:
-        tried = False
-        for ytol in (6, 9, 12, 18):
-            alt = []
-            for page in all_pages:
-                alt.extend(parse_page_words(page.get_text("words"), y_tol=ytol))
-            alt_total, _ = totals_from_courses(alt)
-            if alt_total >= reported_total - 0.01:
-                parsed_courses = alt
-                parsed_total = alt_total
-                tried = True
-                break
-        if not tried:
-            best = parsed_courses
-            best_total = parsed_total
-            for ytol in (6, 9, 12, 18):
-                alt = []
-                for page in all_pages:
-                    alt.extend(parse_page_words(page.get_text("words"), y_tol=ytol))
-                alt_total, _ = totals_from_courses(alt)
-                if alt_total > best_total:
-                    best, best_total = alt, alt_total
-            parsed_courses = best
+        selected_candidate = min(parse_candidates, key=candidate_rank)
+    else:
+        # Without a trusted cumulative target there is no safe basis for
+        # choosing a different row reconstruction.
+        selected_candidate = parse_candidates[0]
 
-    parsed_courses = split_two_semester_courses(parsed_courses)
+    parsed_courses = selected_candidate["courses"]
+    parsed_course_totals = selected_candidate["totals"]
+    parsed_total = parsed_course_totals["completed_attempted_credits"]
+    duplicate_rows = selected_candidate["duplicate_rows"]
     missing_fields = [key for key in ("name", "student_id", "department", "admission_year") if student_info.get(key) in ("", "未辨識")]
     course_code_missing = sum(1 for course in parsed_courses if not course.get("course_code"))
     department_metadata_missing = sum(1 for course in parsed_courses if not course.get("offering_department"))
-    total_reconciled = reported_total is None or parsed_total + 0.01 >= reported_total
     diagnostic_warnings = []
     identity_warnings = []
     fatal_warnings = []
@@ -481,10 +745,118 @@ def parse_transcript_pdf(pdf_path):
         # These fields are warnings for the title-based Earth/Life evaluator,
         # but they are an explicit identity limitation for other programs.
         identity_warnings.append(warning)
-    if not total_reconciled:
-        warning = f"解析課程學分 {parsed_total:g} 未能對上成績單總額 {reported_total:g}。"
+
+    reconciliation_issues = []
+    attempted_conflict = bool(reported_totals["attempted_conflict"])
+    earned_conflict = bool(reported_totals["earned_conflict"])
+    transfer_unverified = parsed_course_totals["unverified_transfer_credits"] > _TOTAL_TOLERANCE
+    if attempted_conflict:
+        warning = "成績單出現互相衝突的全歷年修習總學分，無法選擇可信數值。"
         diagnostic_warnings.append(warning)
         fatal_warnings.append(warning)
+        reconciliation_issues.append(warning)
+    if earned_conflict:
+        warning = "成績單出現互相衝突的全歷年實得總學分，無法選擇可信數值。"
+        diagnostic_warnings.append(warning)
+        fatal_warnings.append(warning)
+        reconciliation_issues.append(warning)
+    if duplicate_rows:
+        warning = f"發現 {duplicate_rows} 筆完全重複的課程紀錄，無法安全核對。"
+        diagnostic_warnings.append(warning)
+        fatal_warnings.append(warning)
+        reconciliation_issues.append(warning)
+    if transfer_unverified:
+        warning = "成績單含抵免課程但未提供正式登載的實得學分，無法完成學分核對。"
+        diagnostic_warnings.append(warning)
+        fatal_warnings.append(warning)
+        reconciliation_issues.append(warning)
+
+    def compare_total(label, parsed_value, reported_value):
+        if reported_value is None:
+            return None
+        difference = round(parsed_value - reported_value, 2)
+        if abs(difference) <= _TOTAL_TOLERANCE:
+            return None
+        direction = "過多" if difference > 0 else "過少"
+        amount = abs(difference)
+        if label == "修習學分":
+            warning = (
+                f"修習學分核對{direction}：解析出的已結束修習學分 {parsed_value:g}，"
+                f"成績單全歷年修習總額 {reported_value:g}，差 {amount:g}。"
+            )
+        else:
+            warning = (
+                f"實得學分核對{direction}：解析出的實得學分 {parsed_value:g}，"
+                f"成績單全歷年實得總額 {reported_value:g}，差 {amount:g}。"
+            )
+        diagnostic_warnings.append(warning)
+        fatal_warnings.append(warning)
+        reconciliation_issues.append(warning)
+        return warning
+
+    attempted_mismatch = compare_total(
+        "修習學分", parsed_course_totals["completed_attempted_credits"], reported_total
+    )
+    earned_mismatch = compare_total(
+        "實得學分", parsed_course_totals["earned_credits"], reported_earned_total
+    )
+    has_both_totals = (
+        reported_total is not None
+        and reported_earned_total is not None
+        and not attempted_conflict
+        and not earned_conflict
+        and not transfer_unverified
+    )
+    total_reconciled = bool(has_both_totals and not attempted_mismatch and not earned_mismatch and not duplicate_rows)
+    if has_both_totals and total_reconciled:
+        reconciliation_status = "reconciled"
+    elif attempted_conflict or earned_conflict:
+        reconciliation_status = "conflict"
+    elif transfer_unverified:
+        reconciliation_status = "limited"
+    elif reported_total is None or reported_earned_total is None:
+        reconciliation_status = "not_available"
+        warning = "未找到完整的成績單全歷年修習／實得總額，未執行學分核對。"
+        diagnostic_warnings.append(warning)
+        reconciliation_issues.append(warning)
+    else:
+        reconciliation_status = "mismatch"
+
+    reconciliation = {
+        "available": bool(
+            reported_total is not None
+            and reported_earned_total is not None
+            and not attempted_conflict
+            and not earned_conflict
+            and not transfer_unverified
+        ),
+        "status": reconciliation_status,
+        "attempted": {
+            "reported": reported_total,
+            "parsed": parsed_course_totals["completed_attempted_credits"],
+            "difference": None if reported_total is None else round(parsed_course_totals["completed_attempted_credits"] - reported_total, 2),
+            "reconciled": attempted_mismatch is None and reported_total is not None and not attempted_conflict,
+        },
+        "earned": {
+            "reported": reported_earned_total,
+            "parsed": parsed_course_totals["earned_credits"],
+            "difference": None if reported_earned_total is None else round(parsed_course_totals["earned_credits"] - reported_earned_total, 2),
+            "reconciled": earned_mismatch is None and reported_earned_total is not None and not earned_conflict,
+        },
+        "duplicate_rows": duplicate_rows,
+        "issues": reconciliation_issues,
+    }
+    totals = {
+        **parsed_course_totals,
+        "all": parsed_course_totals["all_course_credits"],
+        "all_credits": parsed_course_totals["all_course_credits"],
+        "attempted": parsed_course_totals["completed_attempted_credits"],
+        "completed_attempted": parsed_course_totals["completed_attempted_credits"],
+        "completed": parsed_course_totals["completed_attempted_credits"],
+        "earned": parsed_course_totals["earned_credits"],
+        "in_progress": parsed_course_totals["in_progress_credits"],
+        "total": parsed_course_totals["all_course_credits"],
+    }
     student_info["parse_diagnostics"] = {
         # ``complete`` now means no fatal parser issue.  Keep all warnings in
         # the diagnostics for display, while course identity limitations are
@@ -500,14 +872,24 @@ def parse_transcript_pdf(pdf_path):
         "track": detected["track"],
         "detected_admission_cohort": detected_admission_cohort,
         "course_count": len(parsed_courses),
+        "duplicate_course_rows": duplicate_rows,
         "course_code_missing": course_code_missing,
         "offering_department_missing": department_metadata_missing,
         "reported_total": reported_total,
+        "reported_earned_total": reported_earned_total,
+        "reported_in_progress_total": reported_totals["reported_in_progress_total"],
+        "reported_total_candidates": reported_totals["attempted_candidates"],
+        "reported_earned_total_candidates": reported_totals["earned_candidates"],
+        "reported_in_progress_total_candidates": reported_totals["in_progress_candidates"],
         "parsed_total": parsed_total,
+        "parsed_all_total": parsed_course_totals["all_course_credits"],
+        "parsed_earned_total": parsed_course_totals["earned_credits"],
+        "parsed_in_progress_total": parsed_course_totals["in_progress_credits"],
+        "totals": totals,
+        "reconciliation": reconciliation,
         "total_reconciled": total_reconciled,
         "warnings": diagnostic_warnings,
     }
-    doc.close()
     if not parsed_courses:
         raise ValueError("未能從 PDF 辨識任何課程；請確認檔案為北市大歷年成績單。")
     return student_info, parsed_courses
@@ -531,8 +913,9 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
     c1 = parse_credit(s1_cred)
     c2 = parse_credit(s2_cred)
 
-    # Determine course status
-    # 0 = not completed, numeric score >= 60 = completed, P = passed, 未 = In Progress
+    # Determine course status.  A transferred row is deliberately not marked
+    # earned here because the PDF row has no verified posted-earned field.
+    # The adapter applies the same rule and will keep it unconfirmed.
     is_c1_completed = False
     is_c2_completed = False
     is_c1_ip = False
@@ -543,14 +926,16 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
             return (
                 False,
                 False,
-            )  # 0-credit physical training or guidance can be considered completed if score is numeric
+            )
         if not score or score == "--":
             # Blank/undefined score with credit likely indicates ongoing course enrollment
             return False, True if credit > 0 else (False, False)
         if score == "未":
             return False, True  # In Progress
-        if score == "P" or score == "抵" or score == "免":
+        if score == "P":
             return True, False  # Completed
+        if score == "抵" or score == "免":
+            return False, False
         if score == "F" or score == "停" or score == "W":
             return False, False  # Failed/Withdraw
         try:
@@ -587,9 +972,18 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
     # For 0-credit courses like 大學生活學習與輔導 and 體育 (網球, 桌球, 武術)
     is_zero_credit = total_credit == 0.0
     if is_zero_credit:
-        if s1_score and s1_score != "--" and s1_score != "未":
+        def zero_credit_passed(score):
+            token = str(score or "").strip().casefold()
+            if token in {"p", "pass", "passed", "免", "免修", "waived"}:
+                return True
+            try:
+                return float(token) >= 60
+            except (TypeError, ValueError):
+                return False
+
+        if zero_credit_passed(s1_score):
             is_c1_completed = True
-        if s2_score and s2_score != "--" and s2_score != "未":
+        if zero_credit_passed(s2_score):
             is_c2_completed = True
         if s1_score == "未" or s2_score == "未":
             is_ip = True

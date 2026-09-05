@@ -605,7 +605,7 @@ def render_tick_rows(
     svg: list[str] = [
         f'<svg class="lf-chart-svg lf-f5-svg" viewBox="0 0 760 {chart_height}" preserveAspectRatio="xMinYMin meet" role="img" aria-label="{aria}">',
         f"<title>{escaped_title}</title>",
-        "<desc>F5 Tick Rows：每列有二十個等距刻度，每個刻度代表該列門檻的百分之五。</desc>",
+        "<desc>每列有二十個等距刻度，每個刻度代表該列門檻的百分之五。</desc>",
     ]
     for row_index, row in enumerate(data):
         y = 46 + row_index * 40
@@ -669,11 +669,11 @@ def render_tick_rows(
     return (
         f'<section class="lf-f5-chart" data-row-count="{len(data)}" data-max-row-count="8" aria-label="{aria}"><style>{css}</style>'
         f'<h3 class="lf-chart-title">{escaped_title}</h3>'
-        '<p class="lf-chart-subtitle">F5 Tick Rows · 每格 5% · 讀取下方文字表可取得精確數字</p>'
+        '<p class="lf-chart-subtitle">各項要求的已完成學分、門檻與狀態</p>'
         f'{"".join(svg)}'
         f'<p class="lf-chart-source">資料來源：{_chart_source(source)}</p>'
-        '<details class="lf-details"><summary>查看 F5 精確數字</summary>'
-        '<table class="lf-data-table" aria-label="F5 畢業門檻進度明細">'
+        '<details class="lf-details" open><summary>畢業門檻進度明細</summary>'
+        '<table class="lf-data-table" aria-label="畢業門檻進度明細">'
         '<caption>畢業門檻進度明細</caption><thead><tr><th scope="col">項目</th><th scope="col">已完成</th>'
         '<th scope="col">門檻</th><th scope="col">單位</th><th scope="col">進度</th><th scope="col">狀態</th></tr></thead>'
         f'<tbody>{table_rows}</tbody></table></details></section>'
@@ -751,7 +751,7 @@ def render_rung_bars(
     svg: list[str] = [
         f'<svg class="lf-chart-svg lf-f1-svg" viewBox="0 0 760 {chart_height}" preserveAspectRatio="xMinYMin meet" role="img" aria-label="{aria}">',
         f"<title>{escaped_title}</title>",
-        f"<desc>F1 Rung Bars：每一格代表 {step.display} {unit} 的正式配置學分；共享影子與修習中學分不列入。</desc>",
+        f"<desc>每一格代表 {step.display} {unit} 的正式配置學分；共享影子與修習中學分不列入。</desc>",
     ]
     for index, (label_text, value, count, fraction) in enumerate(data):
         y = 42 + index * row_height
@@ -788,9 +788,9 @@ def render_rung_bars(
     return (
         f'<section class="lf-f1-chart" data-row-count="{len(data)}" data-max-row-count="8" aria-label="{aria}"><style>{css}</style>'
         f'<h3 class="lf-chart-title">{escaped_title}</h3>'
-        '<p class="lf-chart-subtitle">F1 Rung Bars · 僅計正式配置學分 · 每格代表一個可數學分單位</p>'
+        '<p class="lf-chart-subtitle">正式配置學分與分類明細</p>'
         f'{"".join(svg)}<p class="lf-chart-source">資料來源：{_chart_source(source)}</p>'
-        '<details class="lf-details"><summary>查看 Rung Bars 精確數字</summary>'
+        '<details class="lf-details" open><summary>正式配置學分明細</summary>'
         '<table class="lf-data-table" aria-label="正式配置學分明細"><caption>正式配置學分明細</caption>'
         '<thead><tr><th scope="col">分類</th><th scope="col">正式配置</th><th scope="col">刻度數</th><th scope="col">單位</th></tr></thead>'
         f'<tbody>{table_rows}</tbody></table></details></section>'
@@ -818,7 +818,7 @@ def render_tick_gauge(
     svg: list[str] = [
         f'<svg class="lf-chart-svg lf-f11-svg" viewBox="0 0 760 205" preserveAspectRatio="xMidYMid meet" role="img" aria-label="{aria}">',
         f"<title>{escaped_title}</title>",
-        "<desc>F11 Tick Gauge：半圓弧上共一百個刻度，每個刻度代表百分之一。</desc>",
+        "<desc>半圓弧上共一百個刻度，每個刻度代表百分之一。</desc>",
     ]
     for tick in range(100):
         theta = math.pi - (math.pi * tick / 99 if tick else 0)
@@ -856,9 +856,9 @@ def render_tick_gauge(
     return (
         f'<section class="lf-f11-chart" aria-label="{aria}"><style>{css}</style>'
         f'<h3 class="lf-chart-title">{escaped_title}</h3>'
-        '<p class="lf-chart-subtitle">F11 Tick Gauge · 每一格代表 1% · 圖形下方提供精確數字</p>'
+        '<p class="lf-chart-subtitle">總學分、畢業門檻與完成比例</p>'
         f'{"".join(svg)}<p class="lf-chart-source">資料來源：{_chart_source(source)}</p>'
-        f'<details class="lf-details"><summary>查看 Tick Gauge 精確數字</summary>{table}</details></section>'
+        f'<details class="lf-details" open><summary>總畢業學分完成度明細</summary>{table}</details></section>'
     )
 
 
@@ -1017,7 +1017,7 @@ def render_stacked_rungs(
         f'<p class="lf-chart-subtitle">F7 Stacked Rungs · 每列代表一個分類 · {"只統計判定閘門，不代表學分" if gate_mode else "舊版學分狀態，請勿作為正式總量"}</p>'
         f'<ul class="lf-legend" aria-label="圖例">{legend_markup}</ul>'
         f'{"".join(svg)}<p class="lf-chart-source">資料來源：{_chart_source(source)}</p>'
-        '<details class="lf-details"><summary>查看 Stacked Rungs 精確數字</summary>'
+        '<details class="lf-details" open><summary>分類學分狀態明細</summary>'
         '<table class="lf-data-table" aria-label="分類學分狀態明細"><caption>分類學分狀態明細</caption>'
         f'<thead><tr>{heading_markup}</tr></thead>'
         f'<tbody>{table_rows}</tbody></table></details></section>'

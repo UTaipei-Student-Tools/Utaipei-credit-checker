@@ -13,8 +13,9 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any
 
 PASS = "PASS"
@@ -22,10 +23,31 @@ FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 NOT_APPLICABLE = "NOT_APPLICABLE"
 
+# Feasibility is deliberately separate from the allocator's PASS/FAIL
+# headline.  A bounded search can retain a verified witness even when it
+# cannot establish global optimality, while a search with no witness must not
+# invent either a failure or a minimum.
+FEASIBLE = "FEASIBLE"
+INFEASIBLE = "INFEASIBLE"
+
 VERIFIED = "VERIFIED"
 CONFLICTED = "CONFLICTED"
 MISSING = "MISSING"
 MANUAL_REVIEW = "MANUAL_REVIEW"
+# A membership row may carry an explicit, server-owned negative assertion.
+# Absence of a row is intentionally different: it remains unresolved for
+# subset accounting until an adapter supplies this state with an auditable
+# negative source.
+NOT_MEMBER = "NOT_MEMBER"
+
+_TRUSTED_NEGATIVE_MEMBERSHIP_KINDS = frozenset(
+    {
+        "official_negative",
+        "public_catalog_negative",
+        "registry_negative",
+        "server_owned_negative",
+    }
+)
 
 COMPLETE = "COMPLETE"
 PARTIAL = "PARTIAL"
@@ -92,6 +114,20 @@ def _is_valid_nonnegative_decimal(value: Any) -> bool:
     return result.is_finite() and result >= _ZERO
 
 
+def _nonnegative_integer(value: Any) -> int | None:
+    """Parse a finite, non-negative integer without accepting booleans."""
+
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not result.is_finite() or result < _ZERO or result != result.to_integral_value():
+        return None
+    return int(result)
+
+
 def _text(value: Any) -> str:
     return str(value).strip() if isinstance(value, (str, int, float, bool)) else ""
 
@@ -121,7 +157,17 @@ def _norm_status(value: Any) -> str:
 
 def _norm_evidence_state(value: Any) -> str:
     text = _text(value).upper().replace("-", "_").replace(" ", "_")
-    return text if text in {VERIFIED, CONFLICTED, MISSING, MANUAL_REVIEW} else UNKNOWN
+    aliases = {
+        "NOT_IN_POOL": NOT_MEMBER,
+        "EXPLICIT_NOT_MEMBER": NOT_MEMBER,
+        "NON_MEMBER": NOT_MEMBER,
+    }
+    text = aliases.get(text, text)
+    return text if text in {VERIFIED, CONFLICTED, MISSING, MANUAL_REVIEW, NOT_MEMBER} else UNKNOWN
+
+
+def _norm_membership_kind(value: Any) -> str:
+    return _text(value).lower().replace("-", "_").replace(" ", "_") or "explicit"
 
 
 def _norm_coverage(value: Any) -> str:
@@ -225,6 +271,61 @@ def _tuple_text(values: Any, *, preserve_order: bool = False) -> tuple[str, ...]
     return tuple(item for item in (values if preserve_order else sorted(unique)) if _text(item) in unique) if preserve_order else tuple(sorted(unique))
 
 
+def _freeze_contract_value(value: Any) -> Any:
+    """Freeze a small JSON-shaped contract value at a value-object boundary."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_contract_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_contract_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted((_freeze_contract_value(item) for item in value), key=repr))
+    return value
+
+
+def _membership_evidence_records(value: Any) -> tuple[tuple[str, str, str, str], ...]:
+    """Normalize per-membership evidence without trusting caller mappings.
+
+    The fourth field distinguishes an explicitly produced policy membership
+    from the legacy global pool marker.  It is intentionally internal: the
+    public projection exposes the first three auditable fields only.
+    """
+
+    if isinstance(value, Mapping):
+        value = tuple(
+            {"pool_id": key, "evidence_state": item}
+            if not isinstance(item, Mapping)
+            else {"pool_id": key, **dict(item)}
+            for key, item in value.items()
+        )
+    if isinstance(value, str) or not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return ()
+    records: list[tuple[str, str, str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        pool_id = ""
+        state: Any = UNKNOWN
+        source = ""
+        kind = "explicit"
+        if isinstance(item, Mapping):
+            pool_id = _text(item.get("pool_id") or item.get("membership_id") or item.get("id"))
+            state = item.get("evidence_state", item.get("state", item.get("status", UNKNOWN)))
+            source = _text(item.get("source_reference") or item.get("evidence_reference"))
+            kind = _norm_membership_kind(item.get("membership_kind") or item.get("kind"))
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            values = tuple(item)
+            if values:
+                pool_id = _text(values[0])
+                state = values[1] if len(values) > 1 else UNKNOWN
+                source = _text(values[2]) if len(values) > 2 else ""
+                kind = _norm_membership_kind(values[3]) if len(values) > 3 else "explicit"
+        if not pool_id or pool_id in seen:
+            continue
+        seen.add(pool_id)
+        records.append((pool_id, _norm_evidence_state(state), source, kind or "explicit"))
+    return tuple(records)
+
+
 def _stable_digest(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
@@ -271,6 +372,22 @@ class CourseAttempt:
     # never trusted; it must carry VERIFIED selection evidence.
     effective_attempt: bool = False
     repeat_selection_evidence_state: str = UNKNOWN
+    # ``pool_ids`` is the registry-facing spelling.  ``pool_memberships`` is
+    # retained for existing allocator callers; both are normalized to the
+    # same immutable value.  The evidence marker prevents a raw transcript
+    # mapping from self-assigning an official course pool.
+    pool_ids: tuple[str, ...] = ()
+    pool_evidence_state: str = VERIFIED
+    # A policy can establish one membership while another (for example the
+    # science-college subset of free electives) remains unresolved.  Keep
+    # those states independent instead of collapsing them into one global
+    # marker.  Each normalized item is ``(pool_id, state, source, kind)``.
+    pool_membership_evidence: tuple[Any, ...] = ()
+    # Optional catalog scope used by official term/version-bound completion
+    # gates.  Ordinary transcript attempts may leave these empty.
+    curriculum_version: str = ""
+    program_slug: str = ""
+    track_slug: str = ""
 
     def __post_init__(self):
         course_name = _text(self.course_name) or _text(self.name) or _text(self.course_id)
@@ -295,7 +412,27 @@ class CourseAttempt:
         object.__setattr__(self, "repeat_group_id", repeat_group)
         object.__setattr__(self, "identity_status", _norm_evidence_state(self.identity_status))
         object.__setattr__(self, "course_kind", _norm_course_kind(self.course_kind))
-        object.__setattr__(self, "pool_memberships", _tuple_text(self.pool_memberships))
+        pool_memberships = self.pool_memberships or self.pool_ids
+        pool_memberships = _tuple_text(pool_memberships)
+        pool_evidence_state = _norm_evidence_state(self.pool_evidence_state)
+        records = list(_membership_evidence_records(self.pool_membership_evidence))
+        seen_records = {item[0] for item in records}
+        # Legacy typed attempts with one global state remain source
+        # compatible.  Explicit records take precedence for their own pool.
+        for pool_id in pool_memberships:
+            if pool_id not in seen_records:
+                records.append((pool_id, pool_evidence_state, "", "legacy"))
+        for pool_id, _state, _source, _kind in records:
+            if pool_id not in pool_memberships:
+                pool_memberships = (*pool_memberships, pool_id)
+        pool_memberships = _tuple_text(pool_memberships)
+        object.__setattr__(self, "pool_memberships", pool_memberships)
+        object.__setattr__(self, "pool_ids", pool_memberships)
+        object.__setattr__(self, "pool_evidence_state", pool_evidence_state)
+        object.__setattr__(self, "pool_membership_evidence", tuple(records))
+        object.__setattr__(self, "curriculum_version", _text(self.curriculum_version))
+        object.__setattr__(self, "program_slug", _text(self.program_slug))
+        object.__setattr__(self, "track_slug", _text(self.track_slug))
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "source_kind", _text(self.source_kind) or "TRANSCRIPT")
         object.__setattr__(self, "grade", _text(self.grade))
@@ -346,6 +483,15 @@ class RequirementSpec:
     role: str = ""
     curriculum_role: str = ""
     requirement_domain: str = ""
+    # Optional source scope carried by service-compiled requirements.  It is
+    # used to bind zero-credit subset-gate waivers to the exact curriculum
+    # revision without changing the ordinary allocator contract.
+    curriculum_version: str = ""
+    program_slug: str = ""
+    track_slug: str = ""
+    # Constraints over the same EXCLUSIVE portions assigned to this
+    # requirement.  They never create a second credit consumer.
+    subset_constraints: tuple[Mapping[str, Any], ...] = ()
     # Keep validation evidence after the numeric fields are normalized.  This
     # prevents invalid input such as ``-3`` or ``"unknown"`` from becoming a
     # zero-credit requirement that can accidentally pass.
@@ -396,6 +542,20 @@ class RequirementSpec:
         object.__setattr__(self, "curriculum_role", owner)
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "requirement_domain", domain)
+        object.__setattr__(self, "curriculum_version", _text(self.curriculum_version))
+        object.__setattr__(self, "program_slug", _text(self.program_slug))
+        object.__setattr__(self, "track_slug", _text(self.track_slug))
+        raw_constraints = self.subset_constraints
+        if isinstance(raw_constraints, Mapping):
+            raw_constraints = (raw_constraints,)
+        if not isinstance(raw_constraints, Sequence) or isinstance(raw_constraints, (str, bytes, bytearray)):
+            raw_constraints = ()
+        constraints = tuple(
+            _freeze_contract_value(item)
+            for item in raw_constraints
+            if isinstance(item, Mapping)
+        )
+        object.__setattr__(self, "subset_constraints", constraints)
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +644,13 @@ class WaiverDecision:
     authority: str = ""
     evidence_reference: str = ""
     decision: str = "PENDING"
+    # Subset-gate waivers are subject/version-bound.  These additive fields
+    # remain empty for the legacy generic waiver contract.
+    subject_ref: str = ""
+    curriculum_version: str = ""
+    requirement_version: str = ""
+    program_slug: str = ""
+    track_slug: str = ""
 
     def __post_init__(self):
         decision_id = _text(self.decision_id)
@@ -496,6 +663,11 @@ class WaiverDecision:
         object.__setattr__(self, "authority", _text(self.authority))
         object.__setattr__(self, "evidence_reference", _text(self.evidence_reference))
         object.__setattr__(self, "decision", _text(self.decision).upper() or "PENDING")
+        object.__setattr__(self, "subject_ref", _text(self.subject_ref))
+        object.__setattr__(self, "curriculum_version", _text(self.curriculum_version))
+        object.__setattr__(self, "requirement_version", _text(self.requirement_version))
+        object.__setattr__(self, "program_slug", _text(self.program_slug))
+        object.__setattr__(self, "track_slug", _text(self.track_slug))
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,6 +782,18 @@ class AllocationResult:
     # the branch meaningfully different.
     alternative_allocations: tuple[tuple[Any, ...], ...] = ()
     allocation_ambiguous: bool = False
+    # Independent search/decision metadata.  These fields are additive and
+    # let consumers display a feasible witness without claiming uniqueness or
+    # global optimality.
+    feasibility: str = ""
+    search_complete: bool | None = None
+    optimality: str = ""
+    route_ambiguity: bool = False
+    decision_ambiguity: bool = False
+    feasible_witness: bool | None = None
+    # Observational policy-subset outcomes.  These rows share the parent
+    # requirement's exclusive portions and never alter the credit ledger.
+    subset_results: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self):
         status = _text(self.status) or UNKNOWN
@@ -621,6 +805,10 @@ class AllocationResult:
         search_exhausted_is_bool = self.search_exhausted is True or self.search_exhausted is False
         pass_eligible_is_bool = self.pass_eligible is True or self.pass_eligible is False
         allocation_ambiguous_is_bool = self.allocation_ambiguous is True or self.allocation_ambiguous is False
+        route_ambiguity_is_bool = self.route_ambiguity is True or self.route_ambiguity is False
+        decision_ambiguity_is_bool = self.decision_ambiguity is True or self.decision_ambiguity is False
+        search_complete_is_bool = self.search_complete is None or self.search_complete is True or self.search_complete is False
+        feasible_witness_is_bool = self.feasible_witness is None or self.feasible_witness is True or self.feasible_witness is False
         allocations = tuple(self.allocations)
         source_earned_credits = _nonnegative_decimal(self.source_earned_credits)
         recognized_credits = _nonnegative_decimal(self.recognized_credits)
@@ -673,12 +861,37 @@ class AllocationResult:
                 search_exhausted_is_bool,
                 pass_eligible_is_bool,
                 allocation_ambiguous_is_bool,
+                route_ambiguity_is_bool,
+                decision_ambiguity_is_bool,
+                search_complete_is_bool,
+                feasible_witness_is_bool,
             )
         )
+        search_complete = self.search_complete is not False and not search_exhausted
+        if self.search_complete is not None and self.search_complete is not True:
+            search_complete = False
+        feasible_witness = (
+            self.feasible_witness
+            if self.feasible_witness is True or self.feasible_witness is False
+            else status == PASS
+            and credit_conservation
+            and not search_exhausted
+            and (self.search_complete is None or self.search_complete is True)
+        )
+        feasibility = _text(self.feasibility).upper()
+        if feasibility not in {FEASIBLE, INFEASIBLE, UNKNOWN}:
+            feasibility = FEASIBLE if feasible_witness else UNKNOWN if not search_complete else INFEASIBLE if status == FAIL else UNKNOWN
+        if feasible_witness:
+            feasibility = FEASIBLE
+        optimality = _text(self.optimality).upper()
+        if optimality not in {"OPTIMAL", "NON_UNIQUE", "BOUNDED_NOT_COMPLETE", "UNKNOWN"}:
+            optimality = "BOUNDED_NOT_COMPLETE" if not search_complete else "NON_UNIQUE" if allocation_ambiguous else "OPTIMAL"
+        if not search_complete and optimality == "OPTIMAL":
+            optimality = "BOUNDED_NOT_COMPLETE"
         if status == PASS and (
             not credit_conservation
-            or search_exhausted
-            or allocation_ambiguous
+            or (search_exhausted and not feasible_witness)
+            or (not feasible_witness and feasibility != FEASIBLE)
             or metadata_invalid
         ):
             status = UNKNOWN
@@ -704,14 +917,21 @@ class AllocationResult:
         object.__setattr__(self, "credit_conservation", credit_conservation)
         object.__setattr__(self, "search_exhausted", search_exhausted)
         object.__setattr__(self, "allocation_ambiguous", allocation_ambiguous)
+        object.__setattr__(self, "search_complete", search_complete)
+        object.__setattr__(self, "feasible_witness", bool(feasible_witness) if feasible_witness_is_bool else False)
+        object.__setattr__(self, "feasibility", feasibility)
+        object.__setattr__(self, "optimality", optimality)
+        object.__setattr__(self, "route_ambiguity", self.route_ambiguity is True)
+        object.__setattr__(self, "decision_ambiguity", self.decision_ambiguity is True)
+        object.__setattr__(self, "subset_results", tuple(_freeze_contract_value(item) for item in self.subset_results if isinstance(item, Mapping)))
         object.__setattr__(
             self,
             "pass_eligible",
             self.pass_eligible is True
             and self.status == PASS
             and self.credit_conservation is True
-            and self.search_exhausted is False
-            and self.allocation_ambiguous is False,
+            and (self.search_exhausted is False or self.feasible_witness is True)
+            and self.feasible_witness is True,
         )
 
     @property
@@ -771,6 +991,18 @@ def _as_attempt(value: Any) -> CourseAttempt | None:
             "repeat_selection_evidence_state",
             value.get("effective_attempt_evidence_state", value.get("repeat_selection_state", UNKNOWN)),
         ),
+        pool_ids=value.get("pool_ids", ()),
+        # A caller-owned mapping cannot establish registry ownership merely
+        # by naming a pool.  Service-produced attempts set this explicitly
+        # after a unique official catalog match.
+        pool_evidence_state=value.get("pool_evidence_state", value.get("pool_evidence", UNKNOWN)),
+        pool_membership_evidence=value.get(
+            "pool_membership_evidence",
+            value.get("membership_evidence", value.get("pool_evidence_by_id", ())),
+        ),
+        curriculum_version=value.get("curriculum_version", value.get("version", "")),
+        program_slug=value.get("program_slug", value.get("program", "")),
+        track_slug=value.get("track_slug", value.get("track", "")),
     )
 
 
@@ -803,6 +1035,10 @@ def _as_requirement(value: Any) -> RequirementSpec | None:
         kind=value.get("kind", ""),
         owner=value.get("owner", value.get("role", value.get("curriculum_role", ""))),
         domain=value.get("domain", value.get("requirement_domain", "")),
+        curriculum_version=value.get("curriculum_version", value.get("version", "")),
+        program_slug=value.get("program_slug", value.get("program", "")),
+        track_slug=value.get("track_slug", value.get("track", "")),
+        subset_constraints=value.get("subset_constraints", value.get("subsets", ())),
     )
 
 
@@ -936,6 +1172,88 @@ def _normalize_requirements(
     return (normalized, tuple(sorted(set(issues)))) if with_issues else normalized
 
 
+def _route_owner(requirement: RequirementSpec) -> str:
+    """Return the explicit owner used to constrain overflow routes."""
+
+    return _text(requirement.owner or requirement.role or requirement.curriculum_role).upper().replace("-", "_").replace(" ", "_")
+
+
+def canonicalize_overflow_routes(
+    requirements: Sequence[RequirementSpec],
+) -> tuple[tuple[RequirementSpec, ...], tuple[str, ...]]:
+    """Resolve same-owner overflow suffixes and report malformed routes.
+
+    Registry rows may use either the full requirement ID or a suffix such as
+    ``elective``.  A suffix is accepted only when it resolves to one target;
+    missing, cross-owner, self-referential, and cyclic routes remain explicit
+    rule errors.  The returned specs contain canonical full IDs so every
+    consumer displays the same route candidate.
+    """
+
+    normalized = tuple(requirements)
+    by_id = {item.requirement_id: item for item in normalized}
+    resolved: dict[str, list[str]] = {}
+    issues: list[str] = []
+    for requirement in normalized:
+        routes: list[str] = []
+        for raw_route in requirement.overflow_routes:
+            route = _text(raw_route)
+            if not route:
+                continue
+            target = by_id.get(route)
+            if target is None:
+                suffix_matches = [
+                    candidate
+                    for candidate in normalized
+                    if candidate.requirement_id.endswith(f":{route}")
+                ]
+                if len(suffix_matches) == 1:
+                    target = suffix_matches[0]
+                elif len(suffix_matches) > 1:
+                    issues.append(f"OVERFLOW_ROUTE_AMBIGUOUS:{requirement.requirement_id}:{route}")
+                else:
+                    issues.append(f"OVERFLOW_ROUTE_MISSING:{requirement.requirement_id}:{route}")
+            if target is None:
+                continue
+            if target.requirement_id == requirement.requirement_id:
+                issues.append(f"OVERFLOW_ROUTE_SELF:{requirement.requirement_id}")
+                continue
+            source_owner = _route_owner(requirement)
+            target_owner = _route_owner(target)
+            if source_owner and target_owner and source_owner != target_owner:
+                issues.append(f"OVERFLOW_ROUTE_CROSS_OWNER:{requirement.requirement_id}:{target.requirement_id}")
+                continue
+            routes.append(target.requirement_id)
+        resolved[requirement.requirement_id] = list(dict.fromkeys(routes))
+
+    graph = {key: tuple(value) for key, value in resolved.items()}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    cycle_nodes: set[str] = set()
+
+    def visit(node: str, stack: tuple[str, ...] = ()) -> None:
+        if node in visiting:
+            cycle_nodes.update(stack[stack.index(node) :] if node in stack else (node,))
+            return
+        if node in visited:
+            return
+        visiting.add(node)
+        for child in graph.get(node, ()):
+            visit(child, (*stack, node))
+        visiting.discard(node)
+        visited.add(node)
+
+    for node in graph:
+        visit(node)
+    issues.extend(f"OVERFLOW_ROUTE_CYCLE:{node}" for node in sorted(cycle_nodes))
+    issue_set = tuple(sorted(set(issues)))
+    result = tuple(
+        replace(requirement, overflow_routes=tuple(resolved.get(requirement.requirement_id, ())))
+        for requirement in normalized
+    )
+    return result, issue_set
+
+
 def _normalize_bindings(
     values: Any,
     *,
@@ -973,6 +1291,11 @@ def _as_waiver_decision(value: Any) -> WaiverDecision | None:
         authority=value.get("authority", ""),
         evidence_reference=value.get("evidence_reference", value.get("source_reference", value.get("evidence_id", ""))),
         decision=value.get("decision", "PENDING"),
+        subject_ref=value.get("subject_ref", value.get("subject_id", "")),
+        curriculum_version=value.get("curriculum_version", value.get("version", "")),
+        requirement_version=value.get("requirement_version", value.get("required_version", "")),
+        program_slug=value.get("program_slug", value.get("program", "")),
+        track_slug=value.get("track_slug", value.get("track", "")),
     )
 
 
@@ -995,6 +1318,13 @@ def _normalize_waiver_decisions(
         unique[decision_id] = min(candidates, key=lambda pair: pair[1])[0]
     normalized = tuple(sorted(unique.values(), key=lambda item: item.decision_id))
     return (normalized, tuple(sorted(set(issues)))) if with_issues else normalized
+
+
+def _is_subset_gate_requirement(requirement: RequirementSpec | None) -> bool:
+    if requirement is None:
+        return False
+    kind = _text(requirement.kind).upper().replace("-", "_").replace(" ", "_")
+    return kind in {"CREDIT_SUBSET_GATE", "CREDIT_SUBSET_REQUIREMENT"}
 
 
 def _validate_waiver_decisions(
@@ -1028,6 +1358,24 @@ def _validate_waiver_decisions(
         elif len(target_decisions.get(decision.target_requirement_id, ())) > 1:
             valid = False
             reason = "multiple waiver decisions target the same requirement"
+        elif _is_subset_gate_requirement(requirement):
+            actual_version = decision.requirement_version or decision.curriculum_version
+            expected_version = requirement.curriculum_version
+            if not decision.subject_ref:
+                valid = False
+                reason = "subset-gate waiver subject binding is missing"
+            elif expected_version and actual_version != expected_version:
+                valid = False
+                reason = "subset-gate waiver curriculum version does not match"
+            elif not actual_version:
+                valid = False
+                reason = "subset-gate waiver curriculum version is missing"
+            elif requirement.program_slug and decision.program_slug and decision.program_slug != requirement.program_slug:
+                valid = False
+                reason = "subset-gate waiver program does not match"
+            elif requirement.track_slug and decision.track_slug and decision.track_slug != requirement.track_slug:
+                valid = False
+                reason = "subset-gate waiver track does not match"
         if valid:
             approved_targets.add(decision.target_requirement_id)
             assessments.append(WaiverAssessment(decision.decision_id, decision.target_requirement_id, PASS, "verified approved waiver decision"))
@@ -1053,21 +1401,105 @@ def _course_kind_allowed(attempt: CourseAttempt, requirement: RequirementSpec) -
     return True
 
 
+def _pool_membership_record(attempt: CourseAttempt, membership_id: str) -> tuple[str, str, str] | None:
+    """Return ``(state, source_reference, kind)`` for one pool membership."""
+
+    wanted = _text(membership_id)
+    if not wanted:
+        return None
+    for pool_id, state, source_reference, kind in attempt.pool_membership_evidence:
+        if pool_id == wanted:
+            return state, source_reference, kind
+    if wanted in attempt.pool_memberships:
+        return attempt.pool_evidence_state, "", "legacy"
+    return None
+
+
+def _is_trusted_negative_membership(record: tuple[str, str, str] | None) -> bool:
+    """Return whether a membership record is an auditable negative assertion.
+
+    A missing target row, or a legacy/global pool marker, cannot establish
+    that a course is outside a capped pool.  Only the explicit negative
+    record kinds emitted by a server-owned catalog/registry adapter may do so.
+    """
+
+    if record is None:
+        return False
+    state, source_reference, kind = record
+    return (
+        state == NOT_MEMBER
+        and bool(_text(source_reference))
+        and _norm_membership_kind(kind) in _TRUSTED_NEGATIVE_MEMBERSHIP_KINDS
+    )
+
+
+def _is_trusted_verified_membership(record: tuple[str, str, str] | None) -> bool:
+    """Return whether a positive membership has auditable source evidence."""
+
+    if record is None:
+        return False
+    state, source_reference, kind = record
+    return (
+        state == VERIFIED
+        and bool(_text(source_reference))
+        and _norm_membership_kind(kind) != "legacy"
+    )
+
+
+def _membership_record_is_uncertain(record: tuple[str, str, str] | None) -> bool:
+    """Return whether an existing membership record remains unresolved."""
+
+    if record is None:
+        return False
+    state = record[0]
+    return state not in {VERIFIED, CONFLICTED, NOT_MEMBER} or (
+        state == NOT_MEMBER and not _is_trusted_negative_membership(record)
+    )
+
+
 def _direct_match(attempt: CourseAttempt, requirement: RequirementSpec) -> bool | None:
+    pool_records = tuple(
+        record
+        for pool_id in requirement.eligible_pool_ids
+        if (record := _pool_membership_record(attempt, pool_id)) is not None
+    )
+    # Public offering evidence can prove an aggregate pool independently of
+    # named handbook identity.  It never promotes a named-course match.
+    public_pool_quota = _text(requirement.kind).upper() in {"AGGREGATE", "COURSE_POOL", "QUOTA"}
+    authoritative_pool = any(
+        state == VERIFIED and bool(_text(source)) and (
+            record_kind == "policy" or (record_kind == "public_catalog" and public_pool_quota)
+        )
+        for state, source, record_kind in pool_records
+    )
+    pool_match = any(
+        state == VERIFIED and attempt.identity_status == VERIFIED
+        for state, _source, _kind in pool_records
+    ) or authoritative_pool
     kind = _course_kind_allowed(attempt, requirement)
+    # Official open/category policies are scoped predicates, not named
+    # lecture/lab requirements.  They may accept a confirmed transcript row
+    # whose component is absent (as in the official AG102 export), provided
+    # the policy membership itself is VERIFIED.  Named routes retain the
+    # strict component identity check.
     if kind is False:
         return False
-    if kind is None:
+    if kind is None and not authoritative_pool:
         return None
-    formal_exact = (
-        attempt.course_id in requirement.eligible_course_ids
-        or bool(set(attempt.pool_memberships).intersection(requirement.eligible_pool_ids))
-        or requirement.accept_any
-    )
+    pool_unknown = any(_membership_record_is_uncertain(record) for record in pool_records)
+    formal_exact = attempt.course_id in requirement.eligible_course_ids or pool_match or requirement.accept_any
     # Keep same-name rows visible as planning candidates, but never let title
     # equality establish a formal identity or consume graduation credit.
     if not formal_exact:
-        return None if attempt.course_name in requirement.eligible_course_names else False
+        if pool_unknown:
+            return None
+        if attempt.course_name in requirement.eligible_course_names:
+            # Exact title equality is usable only after the service/adapter
+            # has already established a formal, uniquely matched identity.
+            return True if attempt.identity_status == VERIFIED and attempt.pool_evidence_state == VERIFIED else None
+        return False
+    if pool_match:
+        return True
     if attempt.identity_status != VERIFIED:
         return None
     return True
@@ -1182,12 +1614,125 @@ def _repeat_filter(attempts: tuple[CourseAttempt, ...], requirements: tuple[Requ
     return tuple(sorted(attempts, key=lambda item: (item.attempt_id, item.course_id, item.academic_term)))
 
 
+def _maximum_subset_capacity(
+    attempt: CourseAttempt,
+    requirement: RequirementSpec,
+    requirements_by_id: Mapping[str, RequirementSpec],
+    amounts: Mapping[str, Decimal],
+    *,
+    selected_allocations: Sequence[AttemptAllocation] = (),
+    attempts_by_id: Mapping[str, CourseAttempt] | None = None,
+) -> Decimal | None:
+    """Return a safe per-option cap imposed by a verified subset maximum.
+
+    Maximum subset rules are evaluated over the selected exclusive ledger, so
+    the allocator must expose a partial option when a course would otherwise
+    overshoot a cap.  Only a verified target membership is capped here.  An
+    unknown membership remains observable as UNKNOWN in the subset evaluator;
+    treating it as internal at search time would silently turn evidence
+    uncertainty into a pass.
+    """
+
+    del amounts  # The cap is based on selected membership evidence, not totals.
+    capacities: list[Decimal] = []
+    selected = tuple(selected_allocations or ())
+    attempt_lookup = attempts_by_id or {}
+
+    def values(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            value = (value,)
+        if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+            return ()
+        return tuple(dict.fromkeys(_text(item) for item in value if _text(item)))
+
+    for owner in requirements_by_id.values():
+        for constraint in owner.subset_constraints:
+            membership_id = _text(constraint.get("membership_id") or constraint.get("pool_id"))
+            if not membership_id:
+                continue
+            amount_semantics = _text(constraint.get("amount_semantics")).upper().replace("-", "_").replace(" ", "_")
+            maximum_value = next(
+                (
+                    constraint.get(key)
+                    for key in ("maximum_credits", "max_credits", "maximum", "credit_cap")
+                    if constraint.get(key) not in (None, "")
+                ),
+                None,
+            )
+            if amount_semantics == "MAXIMUM" and maximum_value in (None, ""):
+                maximum_value = next(
+                    (
+                        constraint.get(key)
+                        for key in ("minimum_credits", "required_credits", "minimum")
+                        if constraint.get(key) not in (None, "")
+                    ),
+                    None,
+                )
+            if maximum_value in (None, "") or not _is_valid_nonnegative_decimal(maximum_value):
+                continue
+            observed_ids = values(
+                constraint.get("observed_requirement_ids", constraint.get("observed_requirements", ()))
+            ) or (owner.requirement_id,)
+            if requirement.requirement_id not in observed_ids:
+                continue
+            record = _pool_membership_record(attempt, membership_id)
+            if record is None or record[0] != VERIFIED:
+                continue
+            excluded_ids = values(
+                constraint.get(
+                    "excluded_membership_ids",
+                    constraint.get("excluded_membership_id", constraint.get("excluded_membership", ())),
+                )
+            )
+            if any(
+                (exemption := _pool_membership_record(attempt, excluded_id)) is not None
+                and exemption[0] == VERIFIED
+                for excluded_id in excluded_ids
+            ):
+                continue
+            # ``amounts`` is a requirement ledger and cannot distinguish an
+            # external course from an internal one.  Count only already
+            # selected EXCLUSIVE portions whose source carries VERIFIED
+            # membership in this constraint; each observed requirement is
+            # therefore measured once, with exemptions removed per attempt.
+            observed_amount = _ZERO
+            for allocation in selected:
+                source_attempt = attempt_lookup.get(allocation.attempt_id)
+                if source_attempt is None:
+                    continue
+                source_record = _pool_membership_record(source_attempt, membership_id)
+                if source_record is None or source_record[0] != VERIFIED:
+                    continue
+                if any(
+                    (exemption := _pool_membership_record(source_attempt, excluded_id)) is not None
+                    and exemption[0] == VERIFIED
+                    for excluded_id in excluded_ids
+                ):
+                    continue
+                observed_amount += sum(
+                    (
+                        portion.credits
+                        for portion in allocation.portions
+                        if portion.allocation_kind == EXCLUSIVE
+                        and portion.credits > _ZERO
+                        and portion.requirement_id in observed_ids
+                    ),
+                    _ZERO,
+                )
+            capacities.append(max(_ZERO, _nonnegative_decimal(maximum_value) - observed_amount))
+    return min(capacities) if capacities else None
+
+
 def _option_portions(
     attempt: CourseAttempt,
     requirement: RequirementSpec,
     requirements_by_id: Mapping[str, RequirementSpec],
     amounts: Mapping[str, Decimal],
     binding: EquivalencyBinding | None = None,
+    *,
+    respect_subset_maximum: bool = True,
+    selected_allocations: Sequence[AttemptAllocation] = (),
+    attempts_by_id: Mapping[str, CourseAttempt] | None = None,
 ) -> tuple[tuple[CreditPortion, ...], Decimal] | None:
     available = attempt.available_credits
     if attempt.status == WAIVER:
@@ -1196,6 +1741,17 @@ def _option_portions(
         return None
     current = amounts.get(requirement.requirement_id, _ZERO)
     capacity = max(_ZERO, requirement.max_credits - current)
+    if respect_subset_maximum:
+        subset_capacity = _maximum_subset_capacity(
+            attempt,
+            requirement,
+            requirements_by_id,
+            amounts,
+            selected_allocations=selected_allocations,
+            attempts_by_id=attempts_by_id,
+        )
+        if subset_capacity is not None:
+            capacity = min(capacity, subset_capacity)
     if capacity <= _ZERO:
         return None
     binding_cap = binding.approved_credits if binding is not None else available
@@ -1219,7 +1775,28 @@ def _option_portions(
                 continue
             if _course_kind_allowed(attempt, route) is not True:
                 continue
-            route_capacity = max(_ZERO, route.max_credits - amounts.get(route.requirement_id, _ZERO) - sum((item.credits for item in portions if item.requirement_id == route.requirement_id), _ZERO))
+            route_amounts = _apply_portions(amounts, portions)
+            route_capacity = max(
+                _ZERO,
+                route.max_credits - route_amounts.get(route.requirement_id, _ZERO),
+            )
+            if respect_subset_maximum:
+                pending = AttemptAllocation(
+                    attempt.attempt_id,
+                    attempt.available_credits,
+                    tuple(portions),
+                    _ZERO,
+                )
+                route_subset_capacity = _maximum_subset_capacity(
+                    attempt,
+                    route,
+                    requirements_by_id,
+                    route_amounts,
+                    selected_allocations=(*selected_allocations, pending),
+                    attempts_by_id=attempts_by_id,
+                )
+                if route_subset_capacity is not None:
+                    route_capacity = min(route_capacity, route_subset_capacity)
             if route_capacity <= _ZERO:
                 continue
             route_amount = min(residual, route_capacity)
@@ -1608,17 +2185,381 @@ def _shared_projection(
     return tuple(sorted(shadows, key=lambda item: (item.direction, item.binding_id, item.requirement_id))), ledgers_result, tuple(assessments), unknown_requirements, warnings
 
 
+def _subset_constraint_evaluations(
+    requirements: tuple[RequirementSpec, ...],
+    attempts: Sequence[CourseAttempt] | None,
+    exclusive_allocations: Sequence[AttemptAllocation] | None,
+) -> tuple[tuple[Mapping[str, Any], ...], dict[str, str], dict[str, tuple[str, ...]]]:
+    """Evaluate constraints over already selected EXCLUSIVE portions.
+
+    A subset is observational: it never adds a credit portion or changes the
+    source ledger.  Unknown membership evidence is retained per constraint so
+    a verified free-total route can remain visible while its science subset
+    is still unresolved.
+    """
+
+    if attempts is None or exclusive_allocations is None:
+        return (), {}, {}
+    attempts_by_id = {item.attempt_id: item for item in attempts}
+    requirement_ids = {item.requirement_id for item in requirements}
+    results: list[Mapping[str, Any]] = []
+    statuses: dict[str, str] = {}
+    blockers_by_requirement: dict[str, tuple[str, ...]] = {}
+
+    def values(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            value = (value,)
+        if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+            return ()
+        return tuple(dict.fromkeys(_text(item) for item in value if _text(item)))
+
+    def first_value(constraint: Mapping[str, Any], keys: Sequence[str]) -> tuple[Any, bool]:
+        for key in keys:
+            if key in constraint and constraint.get(key) not in (None, ""):
+                return constraint.get(key), True
+        return None, False
+
+    for requirement in requirements:
+        constraints = requirement.subset_constraints
+        if not constraints:
+            continue
+        if not requirement.required:
+            for index, constraint in enumerate(constraints):
+                constraint_id = _text(constraint.get("constraint_id") or constraint.get("id")) or f"subset:{index + 1}"
+                membership_id = _text(constraint.get("membership_id") or constraint.get("pool_id"))
+                observed_ids = values(
+                    constraint.get("observed_requirement_ids", constraint.get("observed_requirements", ()))
+                )
+                observed_scope = tuple(sorted(observed_ids or (requirement.requirement_id,)))
+                source_reference = _text(
+                    constraint.get("source_reference")
+                    or constraint.get("evidence_reference")
+                    or constraint.get("policy_source_reference")
+                )
+                results.append(
+                    {
+                        "requirement_id": requirement.requirement_id,
+                        "constraint_id": constraint_id,
+                        "membership_id": membership_id,
+                        "required_credits": _ZERO,
+                        "minimum_credits": _ZERO,
+                        "maximum_credits": None,
+                        "minimum_course_count": None,
+                        "maximum_course_count": None,
+                        "verified_course_count": 0,
+                        "unknown_candidate_course_count": 0,
+                        "amount_semantics": "NOT_APPLICABLE",
+                        "observed_requirement_ids": observed_scope,
+                        "excluded_membership_ids": (),
+                        "excluded_membership_id": "",
+                        "verified_credits": _ZERO,
+                        "unknown_candidate_credits": _ZERO,
+                        "exempted_credits": _ZERO,
+                        "status": NOT_APPLICABLE,
+                        "matched_attempt_ids": (),
+                        "source_reference": source_reference,
+                    }
+                )
+            statuses[requirement.requirement_id] = NOT_APPLICABLE
+            continue
+        requirement_statuses: list[str] = []
+        requirement_blockers: list[str] = []
+        for index, constraint in enumerate(constraints):
+            constraint_id = _text(constraint.get("constraint_id") or constraint.get("id")) or f"subset:{index + 1}"
+            membership_id = _text(constraint.get("membership_id") or constraint.get("pool_id"))
+            minimum_value, minimum_present = first_value(
+                constraint,
+                ("minimum_credits", "required_credits", "minimum"),
+            )
+            maximum_value, maximum_present = first_value(
+                constraint,
+                ("maximum_credits", "max_credits", "maximum", "credit_cap"),
+            )
+            count_value, count_present = first_value(
+                constraint,
+                ("minimum_course_count",),
+            )
+            maximum_count_value, maximum_count_present = first_value(
+                constraint,
+                ("maximum_course_count", "max_course_count", "course_count_cap"),
+            )
+            amount_semantics = _text(constraint.get("amount_semantics")).upper().replace("-", "_").replace(" ", "_")
+            # A maximum-only constraint is a valid observational cap.  A
+            # legacy ``required_credits`` field remains a minimum unless the
+            # source explicitly labels the constraint as MAXIMUM.
+            if amount_semantics == "MAXIMUM" and not maximum_present and minimum_present:
+                maximum_value, maximum_present = minimum_value, True
+                minimum_value, minimum_present = None, False
+            minimum_valid = not minimum_present or _is_valid_nonnegative_decimal(minimum_value)
+            maximum_valid = not maximum_present or _is_valid_nonnegative_decimal(maximum_value)
+            minimum_course_count = _nonnegative_integer(count_value) if count_present else None
+            maximum_course_count = _nonnegative_integer(maximum_count_value) if maximum_count_present else None
+            count_valid = (
+                (not count_present or minimum_course_count is not None)
+                and (not maximum_count_present or maximum_course_count is not None)
+            )
+            minimum = _nonnegative_decimal(minimum_value) if minimum_present else _ZERO
+            maximum = _nonnegative_decimal(maximum_value) if maximum_present else None
+            if maximum is not None and minimum > maximum:
+                maximum_valid = False
+            observed_ids = values(
+                constraint.get("observed_requirement_ids", constraint.get("observed_requirements", ()))
+            )
+            observed_scope = frozenset(observed_ids or (requirement.requirement_id,))
+            unknown_observed_ids = tuple(sorted(set(observed_scope).difference(requirement_ids)))
+            excluded_ids = values(
+                constraint.get(
+                    "excluded_membership_ids",
+                    constraint.get("excluded_membership_id", constraint.get("excluded_membership", ())),
+                )
+            )
+            valid_shape = (
+                bool(membership_id)
+                and (minimum_present or maximum_present or count_present or maximum_count_present)
+                and minimum_valid
+                and maximum_valid
+                and count_valid
+            )
+            matched_ids: list[str] = []
+            verified_amount = _ZERO
+            unknown_amount = _ZERO
+            exempted_amount = _ZERO
+            verified_course_count = 0
+            unknown_course_count = 0
+            relevant_portions: list[tuple[CourseAttempt, CreditPortion]] = []
+            seen_portions: set[tuple[Any, ...]] = set()
+            for allocation in exclusive_allocations:
+                attempt = attempts_by_id.get(allocation.attempt_id)
+                if attempt is None:
+                    continue
+                for portion_index, portion in enumerate(allocation.portions):
+                    if portion.allocation_kind != EXCLUSIVE or portion.credits <= _ZERO or portion.requirement_id not in observed_scope:
+                        continue
+                    # The same EXCLUSIVE portion is observed once even when a
+                    # source registry accidentally repeats an observed ID.
+                    portion_key = (
+                        allocation.attempt_id,
+                        portion_index,
+                        portion.requirement_id,
+                        str(portion.credits),
+                        portion.binding_id,
+                    )
+                    if portion_key in seen_portions:
+                        continue
+                    seen_portions.add(portion_key)
+                    relevant_portions.append((attempt, portion))
+
+            counted_attempt_ids: set[str] = set()
+            for attempt, portion in relevant_portions:
+                record = _pool_membership_record(attempt, membership_id)
+                exemption_records = tuple(
+                    _pool_membership_record(attempt, excluded_id)
+                    for excluded_id in excluded_ids
+                )
+                exemption_verified = any(item is not None and item[0] == VERIFIED for item in exemption_records)
+                exemption_unknown = any(
+                    _membership_record_is_uncertain(item)
+                    for item in exemption_records
+                )
+                if (
+                    (count_present or maximum_count_present)
+                    and attempt.attempt_id not in counted_attempt_ids
+                    and attempt.status == PASS
+                    and attempt.available_credits > _ZERO
+                ):
+                    counted_attempt_ids.add(attempt.attempt_id)
+                    if _is_trusted_verified_membership(record):
+                        verified_course_count += 1
+                        matched_ids.append(attempt.attempt_id)
+                    elif not _is_trusted_negative_membership(record):
+                        # Missing, unresolved, conflicted, or unverifiable
+                        # membership evidence cannot prove a course count.
+                        unknown_course_count += 1
+                        matched_ids.append(attempt.attempt_id)
+                if maximum_present:
+                    if exemption_verified:
+                        exempted_amount += portion.credits
+                    elif record is not None and record[0] == VERIFIED and not exemption_unknown:
+                        verified_amount += portion.credits
+                        matched_ids.append(attempt.attempt_id)
+                    elif _is_trusted_negative_membership(record) and not exemption_unknown:
+                        # An explicit server-owned negative is known to be
+                        # outside the capped pool and contributes no amount.
+                        pass
+                    else:
+                        # Missing membership is unresolved.  A different
+                        # VERIFIED pool, identity, or legacy global marker is
+                        # not a negative assertion for this target pool.
+                        unknown_amount += portion.credits
+                        matched_ids.append(attempt.attempt_id)
+                if minimum_present:
+                    if record is not None and record[0] == VERIFIED:
+                        # The minimum and maximum observe the same portion;
+                        # this amount is intentionally not added twice.
+                        if not maximum_present:
+                            verified_amount += portion.credits
+                        matched_ids.append(attempt.attempt_id)
+                    elif _is_trusted_negative_membership(record):
+                        # A known non-member does not contribute to a minimum.
+                        pass
+                    elif record is None:
+                        # Absence of a classification is unresolved for a
+                        # minimum subset whenever the source carried an
+                        # official pool or the constraint observes another
+                        # requirement.  It is never proof of non-membership.
+                        if membership_id in requirement.eligible_pool_ids or attempt.pool_memberships or observed_ids:
+                            unknown_amount += portion.credits
+                            matched_ids.append(attempt.attempt_id)
+                    elif record[0] not in {CONFLICTED}:
+                        unknown_amount += portion.credits
+                        matched_ids.append(attempt.attempt_id)
+
+            # If both bounds are present, ``verified_amount`` was computed by
+            # the maximum branch and is also the verified minimum amount.
+            # Recompute the minimum view only when the constraint is minimum
+            # only, keeping one observed ledger amount for the result.
+            if minimum_present and maximum_present:
+                verified_minimum = _ZERO
+                unknown_minimum = _ZERO
+                for attempt, portion in relevant_portions:
+                    record = _pool_membership_record(attempt, membership_id)
+                    if record is not None and record[0] == VERIFIED:
+                        verified_minimum += portion.credits
+                    elif _is_trusted_negative_membership(record):
+                        pass
+                    elif record is None:
+                        if membership_id in requirement.eligible_pool_ids or attempt.pool_memberships or observed_ids:
+                            unknown_minimum += portion.credits
+                    elif record[0] not in {CONFLICTED}:
+                        unknown_minimum += portion.credits
+                minimum_verified_amount = verified_minimum
+                minimum_unknown_amount = unknown_minimum
+            else:
+                minimum_verified_amount = verified_amount
+                minimum_unknown_amount = unknown_amount
+
+            if not valid_shape or unknown_observed_ids:
+                state = UNKNOWN
+                requirement_blockers.append(f"SUBSET_CONSTRAINT_INVALID:{requirement.requirement_id}:{constraint_id}")
+            else:
+                minimum_state = PASS
+                if minimum_present:
+                    if minimum_verified_amount >= minimum:
+                        minimum_state = PASS
+                    elif minimum_verified_amount + minimum_unknown_amount >= minimum or minimum_unknown_amount > _ZERO:
+                        minimum_state = UNKNOWN
+                    else:
+                        minimum_state = FAIL
+                        requirement_blockers.append(f"SUBSET_CONSTRAINT_DEFICIT:{requirement.requirement_id}:{constraint_id}")
+                maximum_state = PASS
+                if maximum_present:
+                    if verified_amount > (maximum or _ZERO):
+                        maximum_state = FAIL if unknown_amount <= _ZERO else UNKNOWN
+                    elif verified_amount + unknown_amount > (maximum or _ZERO):
+                        maximum_state = UNKNOWN
+                    else:
+                        maximum_state = PASS
+                    if maximum_state == FAIL:
+                        requirement_blockers.append(f"SUBSET_CONSTRAINT_EXCESS:{requirement.requirement_id}:{constraint_id}")
+                    elif maximum_state == UNKNOWN:
+                        requirement_blockers.append(f"SUBSET_CONSTRAINT_EVIDENCE_UNKNOWN:{requirement.requirement_id}:{constraint_id}")
+                count_state = PASS
+                if count_present:
+                    if verified_course_count >= (minimum_course_count or 0):
+                        count_state = PASS
+                    elif verified_course_count + unknown_course_count >= (minimum_course_count or 0):
+                        count_state = UNKNOWN
+                    else:
+                        count_state = FAIL
+                        requirement_blockers.append(
+                            f"SUBSET_CONSTRAINT_COUNT_DEFICIT:{requirement.requirement_id}:{constraint_id}"
+                        )
+                maximum_count_state = PASS
+                if maximum_count_present:
+                    maximum_count = maximum_course_count or 0
+                    if verified_course_count > maximum_count:
+                        maximum_count_state = FAIL
+                        requirement_blockers.append(
+                            f"SUBSET_CONSTRAINT_COUNT_EXCESS:{requirement.requirement_id}:{constraint_id}"
+                        )
+                    elif verified_course_count + unknown_course_count > maximum_count:
+                        maximum_count_state = UNKNOWN
+                        requirement_blockers.append(
+                            f"SUBSET_CONSTRAINT_COUNT_EVIDENCE_UNKNOWN:{requirement.requirement_id}:{constraint_id}"
+                        )
+                if FAIL in {minimum_state, maximum_state, count_state, maximum_count_state}:
+                    state = FAIL
+                elif UNKNOWN in {minimum_state, maximum_state, count_state, maximum_count_state}:
+                    state = UNKNOWN
+                else:
+                    state = PASS
+                if state == UNKNOWN and not any(
+                    blocker.endswith(f":{constraint_id}")
+                    for blocker in requirement_blockers
+                ):
+                    requirement_blockers.append(f"SUBSET_CONSTRAINT_EVIDENCE_UNKNOWN:{requirement.requirement_id}:{constraint_id}")
+            requirement_statuses.append(state)
+            source_reference = _text(
+                constraint.get("source_reference")
+                or constraint.get("evidence_reference")
+                or constraint.get("policy_source_reference")
+            )
+            results.append(
+                {
+                    "requirement_id": requirement.requirement_id,
+                    "constraint_id": constraint_id,
+                    "membership_id": membership_id,
+                    "required_credits": minimum,
+                    "minimum_credits": minimum if minimum_present else None,
+                    "maximum_credits": maximum,
+                    "minimum_course_count": minimum_course_count,
+                    "maximum_course_count": maximum_course_count,
+                    "verified_course_count": verified_course_count,
+                    "unknown_candidate_course_count": unknown_course_count,
+                    "amount_semantics": amount_semantics or ("MAXIMUM" if maximum_present and not minimum_present else "MINIMUM"),
+                    "observed_requirement_ids": tuple(sorted(observed_scope)),
+                    "excluded_membership_ids": excluded_ids,
+                    "excluded_membership_id": excluded_ids[0] if len(excluded_ids) == 1 else "",
+                    "verified_credits": verified_amount,
+                    "unknown_candidate_credits": unknown_amount,
+                    "exempted_credits": exempted_amount,
+                    "status": state,
+                    "matched_attempt_ids": tuple(sorted(set(matched_ids))),
+                    "source_reference": source_reference,
+                }
+            )
+        if FAIL in requirement_statuses:
+            statuses[requirement.requirement_id] = FAIL
+        elif UNKNOWN in requirement_statuses:
+            statuses[requirement.requirement_id] = UNKNOWN
+        else:
+            statuses[requirement.requirement_id] = PASS
+        if requirement_blockers:
+            blockers_by_requirement[requirement.requirement_id] = tuple(dict.fromkeys(requirement_blockers))
+    return tuple(results), statuses, blockers_by_requirement
+
+
 def _evaluate_requirements(
     requirements: tuple[RequirementSpec, ...],
     exclusive_amounts: Mapping[str, Decimal],
     shadows: Sequence[CreditPortion],
     unknown_requirements: set[str],
     waived_requirements: set[str] | None = None,
+    *,
+    potential_unknown_requirements: set[str] | None = None,
+    attempts: Sequence[CourseAttempt] | None = None,
+    exclusive_allocations: Sequence[AttemptAllocation] | None = None,
 ) -> tuple[tuple[RequirementResult, ...], str, list[str]]:
     waived_requirements = waived_requirements or set()
+    requirements_by_id = {item.requirement_id: item for item in requirements}
     shared_amounts: dict[str, Decimal] = {}
     for portion in shadows:
         shared_amounts[portion.requirement_id] = shared_amounts.get(portion.requirement_id, _ZERO) + portion.credits
+    _subset_results, subset_statuses, subset_blockers_by_requirement = _subset_constraint_evaluations(
+        requirements,
+        attempts,
+        exclusive_allocations,
+    )
     results: list[RequirementResult] = []
     blockers: list[str] = []
     for requirement in requirements:
@@ -1635,10 +2576,33 @@ def _evaluate_requirements(
             # satisfy the requirement only when the requirement evidence is
             # itself complete and verified.
             deficit = _ZERO
-        requirement_blockers: list[str] = []
+        requirement_blockers: list[str] = list(subset_blockers_by_requirement.get(requirement.requirement_id, ()))
         waiver_unresolved = requirement.waiver and requirement.requirement_id in unknown_requirements and not waived
+        subset_status = subset_statuses.get(requirement.requirement_id)
+        if waived and _is_subset_gate_requirement(requirement):
+            requirement_blockers = []
         if not requirement.required:
             status = NOT_APPLICABLE
+        elif _is_subset_gate_requirement(requirement) and waived:
+            # A formal, subject/version-bound waiver satisfies this gate only;
+            # it never creates an earned-credit portion for the observed GE
+            # requirements.
+            status = PASS
+            deficit = _ZERO
+        elif _is_subset_gate_requirement(requirement) and subset_status == FAIL:
+            status = FAIL
+            deficit = _ZERO
+        elif _is_subset_gate_requirement(requirement) and subset_status == UNKNOWN:
+            status = UNKNOWN
+            deficit = _ZERO
+        elif _is_subset_gate_requirement(requirement) and subset_status == PASS:
+            if requirement.coverage_state == COMPLETE and requirement.evidence_state == VERIFIED:
+                status = PASS
+                deficit = _ZERO
+            else:
+                status = UNKNOWN
+                deficit = _ZERO
+                requirement_blockers.append(f"REQUIREMENT_COVERAGE_UNKNOWN:{requirement.requirement_id}")
         elif requirement.credits_required == _ZERO and not waived:
             status = UNKNOWN
             requirement_blockers.append(
@@ -1657,7 +2621,7 @@ def _evaluate_requirements(
             else:
                 status = UNKNOWN
                 requirement_blockers.append(f"REQUIREMENT_COVERAGE_UNKNOWN:{requirement.requirement_id}")
-        elif requirement.requirement_id in unknown_requirements:
+        elif requirement.requirement_id in unknown_requirements or requirement.requirement_id in (potential_unknown_requirements or ()):
             status = UNKNOWN
             requirement_blockers.append(
                 f"WAIVER_DECISION_REQUIRED:{requirement.requirement_id}"
@@ -1684,6 +2648,15 @@ def _evaluate_requirements(
             )
         )
     statuses = [item.status for item in results if item.status != NOT_APPLICABLE]
+    statuses.extend(
+        status
+        for requirement_id, status in subset_statuses.items()
+        if status != NOT_APPLICABLE
+        and not (
+            requirement_id in waived_requirements
+            and _is_subset_gate_requirement(requirements_by_id.get(requirement_id))
+        )
+    )
     status = FAIL if FAIL in statuses else UNKNOWN if UNKNOWN in statuses else PASS
     return tuple(results), status, blockers
 
@@ -1698,13 +2671,14 @@ def allocate_credits(
 ) -> AllocationResult:
     """Allocate immutable transcript attempts to exact requirements.
 
-    The search is deterministic and bounded.  If the bound is exhausted the
-    best known allocation is retained for inspection, but the result is forced
-    to ``UNKNOWN`` and marked with a blocker so it can never become a
-    speculative PASS.
+    The search is deterministic and bounded.  Exhaustion without a complete
+    verified witness remains UNKNOWN; a validated witness proves feasibility
+    even when optimization has not visited every alternative.
     """
 
     normalized_requirements, requirement_issues = _normalize_requirements(requirements, with_issues=True)
+    normalized_requirements, route_issues = canonicalize_overflow_routes(normalized_requirements)
+    requirement_issues = tuple(sorted(set((*requirement_issues, *route_issues))))
     normalized_attempts, attempt_issues = _normalize_attempts(attempts, with_issues=True)
     normalized_attempts = _repeat_filter(normalized_attempts, normalized_requirements)
     normalized_bindings, binding_issues = _normalize_bindings(bindings, with_issues=True)
@@ -1756,6 +2730,7 @@ def allocate_credits(
 
     candidate_requirements: dict[str, set[str]] = {}
     unknown_candidates: set[str] = set(pending_binding_requirements)
+    potential_candidate_unknown: set[str] = set()
     unknown_candidates.update(
         item.requirement_id for item in normalized_requirements if not item.credits_required_valid
     )
@@ -1788,8 +2763,24 @@ def allocate_credits(
                     unknown_candidates.add(requirement.requirement_id)
                 candidate_requirements[attempt.attempt_id].add(requirement.requirement_id)
             elif direct is None:
-                unknown_candidates.add(requirement.requirement_id)
+                # This unselected route cannot invalidate sufficient verified
+                # credits, but prevents declaring a remaining deficit final.
+                potential_candidate_unknown.add(requirement.requirement_id)
 
+    # Explore constrained courses first, then useful allocations before skips.
+    # Bounds still distinguish an actual complete witness from no-witness
+    # search exhaustion; changing order does not create evidence or credits.
+    search_attempts = tuple(sorted(
+        normalized_attempts,
+        key=lambda item: (len(candidate_requirements.get(item.attempt_id, ())), item.attempt_id),
+    ))
+    candidate_counts = {
+        requirement.requirement_id: sum(
+            requirement.requirement_id in candidate_requirements.get(item.attempt_id, ())
+            for item in normalized_attempts
+        )
+        for requirement in normalized_requirements
+    }
     limit = max(1, int(search_limit)) if isinstance(search_limit, (int, float, Decimal)) else 10000
     nodes = 0
     exhausted = False
@@ -1798,6 +2789,9 @@ def allocate_credits(
     best_score: tuple[Any, ...] | None = None
     best_signature: tuple[Any, ...] | None = None
     best_signatures: set[tuple[Any, ...]] = set()
+    witness_choices: tuple[AttemptAllocation, ...] | None = None
+    witness_amounts: dict[str, Decimal] | None = None
+    witness_signature: tuple[Any, ...] | None = None
     # Prefer the deterministic best grade/credit attempt when a fixed repeat
     # group has more than one numerically viable route.  Equal-quality
     # attempts intentionally retain their tie so the caller can decide if
@@ -1836,6 +2830,9 @@ def allocate_credits(
             shadows,
             unknown | waiver_unknown,
             waived_requirements,
+            potential_unknown_requirements=potential_candidate_unknown,
+            attempts=normalized_attempts,
+            exclusive_allocations=legalized,
         )
         pass_count = sum(item.status == PASS for item in results)
         unknown_count = sum(item.status == UNKNOWN for item in results)
@@ -1854,6 +2851,55 @@ def allocate_credits(
         # once the numeric gate is met.
         return (primary_status, pass_count, -deficit, -unknown_count, repeat_quality, recognized), _signature(legalized)
 
+    def complete_witness(
+        choices: Sequence[AttemptAllocation],
+        amounts: Mapping[str, Decimal],
+    ) -> tuple[bool, tuple[AttemptAllocation, ...]]:
+        """Check whether a branch is a complete, conservative PASS witness."""
+
+        legalized = _legalize_choices(
+            normalized_attempts,
+            choices,
+            requirements_by_id,
+            repeat_selection_winners=repeat_selection_winners,
+            repeat_selection_unknown_groups=repeat_selection_unknown_groups,
+        )
+        shadows, _ledgers, _assessments, shared_unknown, _warnings = _shared_projection(
+            normalized_attempts,
+            normalized_requirements,
+            normalized_bindings,
+            amounts,
+            legalized,
+        )
+        unknown = set(unknown_candidates) | shared_unknown
+        unknown |= _repeat_evidence_unknown(normalized_attempts, legalized, requirements_by_id)
+        results, branch_status, _blockers = _evaluate_requirements(
+            normalized_requirements,
+            amounts,
+            shadows,
+            unknown | waiver_unknown,
+            waived_requirements,
+            potential_unknown_requirements=potential_candidate_unknown,
+            attempts=normalized_attempts,
+            exclusive_allocations=legalized,
+        )
+        if branch_status != PASS or input_issues:
+            return False, legalized
+        active_ids = _active_attempt_ids(
+            normalized_attempts,
+            legalized,
+            requirements_by_id,
+            repeat_selection_winners=repeat_selection_winners,
+            repeat_selection_unknown_groups=repeat_selection_unknown_groups,
+        )
+        source = sum((item.available_credits for item in normalized_attempts if item.attempt_id in active_ids), _ZERO)
+        recognized = sum(
+            (portion.credits for item in legalized for portion in item.portions if portion.allocation_kind == EXCLUSIVE),
+            _ZERO,
+        )
+        unallocated = sum((item.unallocated_credits for item in legalized), _ZERO)
+        return bool(results) and recognized + unallocated == source, legalized
+
     def visit(
         index: int,
         amounts: dict[str, Decimal],
@@ -1861,12 +2907,20 @@ def allocate_credits(
         repeat_states: dict[str, tuple[str, str | None]],
     ):
         nonlocal nodes, exhausted, best_choices, best_amounts, best_score, best_signature, best_signatures
+        nonlocal witness_choices, witness_amounts, witness_signature
         if nodes >= limit:
             exhausted = True
             return
         nodes += 1
-        if index >= len(normalized_attempts):
+        if index >= len(search_attempts):
             current_score, current_signature = score(choices, amounts)
+            is_witness, legalized_witness = complete_witness(choices, amounts)
+            if is_witness and (
+                witness_signature is None or current_signature < witness_signature
+            ):
+                witness_signature = current_signature
+                witness_choices = legalized_witness
+                witness_amounts = dict(amounts)
             if best_score is None or current_score > best_score:
                 best_score = current_score
                 best_signature = current_signature
@@ -1880,9 +2934,16 @@ def allocate_credits(
                     best_choices = list(choices)
                     best_amounts = dict(amounts)
             return
-        attempt = normalized_attempts[index]
+        attempt = search_attempts[index]
         options: list[tuple[tuple[CreditPortion, ...], Decimal]] = [((), attempt.available_credits)]
-        for requirement_id in sorted(candidate_requirements.get(attempt.attempt_id, ())):
+        for requirement_id in sorted(
+            candidate_requirements.get(attempt.attempt_id, ()),
+            key=lambda rid: (
+                _text(requirements_by_id[rid].kind).upper() == "AGGREGATE",
+                candidate_counts.get(rid, 0),
+                rid,
+            ),
+        ):
             requirement = requirements_by_id.get(requirement_id)
             if requirement is None:
                 continue
@@ -1895,14 +2956,49 @@ def allocate_credits(
                 for binding in valid_exclusive_bindings.get(attempt.attempt_id, ())
             ):
                 continue
-            option = _option_portions(attempt, requirement, requirements_by_id, amounts)
+            option = _option_portions(
+                attempt,
+                requirement,
+                requirements_by_id,
+                amounts,
+                selected_allocations=choices,
+                attempts_by_id=attempts_by_id,
+            )
             if option is not None:
                 options.append(option)
+                # Keep an explicit full-credit branch for diagnostics.  A
+                # capped branch may be the feasible witness when replacement
+                # courses exist, while the uncapped branch still exposes a
+                # verified maximum excess when no complete replacement is
+                # possible.
+                uncapped = _option_portions(
+                    attempt,
+                    requirement,
+                    requirements_by_id,
+                    amounts,
+                    respect_subset_maximum=False,
+                    selected_allocations=choices,
+                    attempts_by_id=attempts_by_id,
+                )
+                if uncapped is not None and uncapped != option:
+                    options.append(uncapped)
         # Explicit exact bindings are candidates even when the transcript
         # identity itself is not otherwise known.
         for binding in sorted(valid_exclusive_bindings.get(attempt.attempt_id, ()), key=lambda item: item.binding_id):
             requirement = requirements_by_id.get(binding.target_requirement_id)
-            option = _option_portions(attempt, requirement, requirements_by_id, amounts, binding) if requirement else None
+            option = (
+                _option_portions(
+                    attempt,
+                    requirement,
+                    requirements_by_id,
+                    amounts,
+                    binding,
+                    selected_allocations=choices,
+                    attempts_by_id=attempts_by_id,
+                )
+                if requirement
+                else None
+            )
             if option is not None and option not in options:
                 options.append(option)
         # A waiver is an explicit, auditable requirement decision.  Keep its
@@ -1910,6 +3006,8 @@ def allocate_credits(
         # has the same numeric score.
         if attempt.status == WAIVER and len(options) > 1:
             options = options[1:]
+        elif len(options) > 1:
+            options = options[1:] + options[:1]
         for portions, residual in options:
             if not _repeat_option_allowed(
                 attempt,
@@ -1932,11 +3030,92 @@ def allocate_credits(
             if group_id and repeat_mode is not None and previous_state is None:
                 repeat_states.pop(group_id, None)
 
+    # Large transcripts have many interchangeable pool routes.  First build
+    # one demand-aware candidate so static DFS ordering cannot hide an easy
+    # feasible allocation behind thousands of less useful pool combinations.
+    # This is only a seed: it uses the normal option/repeat guards and must
+    # pass the complete witness validator, including all subset constraints.
+    if len(search_attempts) > 24 and not input_issues:
+        seed_amounts: dict[str, Decimal] = {}
+        seed_choices: list[AttemptAllocation] = []
+        seed_repeat_states: dict[str, tuple[str, str | None]] = {}
+        remaining = {item.attempt_id: item for item in search_attempts}
+        while remaining:
+            unmet = {
+                item.requirement_id: item
+                for item in normalized_requirements
+                if seed_amounts.get(item.requirement_id, _ZERO) < item.credits_required
+                and item.requirement_id not in waived_requirements
+            }
+            ranked_routes = []
+            for rid, requirement in unmet.items():
+                eligible = []
+                for aid, item in remaining.items():
+                    if rid not in candidate_requirements.get(aid, ()):
+                        continue
+                    bindings_for_pair = [
+                        binding for binding in valid_exclusive_bindings.get(aid, ())
+                        if binding.target_requirement_id == rid
+                    ]
+                    for binding in bindings_for_pair or [None]:
+                        option = _option_portions(
+                            item, requirement, requirements_by_id, seed_amounts, binding,
+                            selected_allocations=seed_choices, attempts_by_id=attempts_by_id,
+                        )
+                        if option is None or not _repeat_option_allowed(
+                            item, option[0], requirements_by_id, seed_repeat_states,
+                            repeat_selection_winners=repeat_selection_winners,
+                            repeat_selection_unknown_groups=repeat_selection_unknown_groups,
+                        ):
+                            continue
+                        contribution = sum((p.credits for p in option[0] if p.requirement_id == rid), _ZERO)
+                        if contribution > _ZERO:
+                            alternatives = len(candidate_requirements.get(aid, set()) & unmet.keys())
+                            eligible.append((alternatives, aid, option, contribution))
+                            break
+                if not eligible:
+                    continue
+                deficit = requirement.credits_required - seed_amounts.get(rid, _ZERO)
+                slack = sum((entry[3] for entry in eligible), _ZERO) - deficit
+                is_pool = _text(requirement.kind).upper() in {"AGGREGATE", "COURSE_POOL", "QUOTA"}
+                ranked_routes.append((is_pool, slack, rid, eligible))
+            if not ranked_routes:
+                break
+            _, _, _, eligible = min(ranked_routes, key=lambda entry: entry[:3])
+            # A seed visits each attempt once.  Prefer an exact fit (or a
+            # legal overflow route) before consuming a larger course whose
+            # residual would be stranded outside another needed pool.
+            _, aid, (portions, residual), _ = min(eligible, key=lambda entry: (entry[2][1], *entry[:2]))
+            item = remaining.pop(aid)
+            seed_choices.append(AttemptAllocation(aid, item.available_credits, portions, residual))
+            seed_amounts = _apply_portions(seed_amounts, portions)
+            repeat_mode = _repeat_mode_for_portions(portions, requirements_by_id)
+            if item.repeat_group_id and repeat_mode is not None and item.repeat_group_id not in seed_repeat_states:
+                seed_repeat_states[item.repeat_group_id] = (
+                    repeat_mode, aid if repeat_mode == BEST_ATTEMPT_ONLY else None,
+                )
+        seed_choices.extend(
+            AttemptAllocation(item.attempt_id, item.available_credits, (), item.available_credits)
+            for item in remaining.values()
+        )
+        is_witness, legalized_seed = complete_witness(seed_choices, seed_amounts)
+        if is_witness:
+            witness_choices = legalized_seed
+            witness_amounts = dict(seed_amounts)
+            witness_signature = _signature(legalized_seed)
+
     visit(0, {}, [], {})
     if best_choices is None:
         best_choices = [AttemptAllocation(item.attempt_id, item.available_credits, (), item.available_credits) for item in normalized_attempts]
         best_amounts = {}
         best_score = (0, 0, 0, _ZERO, 0, _ZERO)
+
+    # A feasible witness is the useful result even when a bounded search has
+    # not exhausted every alternative.  It proves feasibility while leaving
+    # optimality explicitly bounded below.
+    if witness_choices is not None and witness_amounts is not None:
+        best_choices = list(witness_choices)
+        best_amounts = dict(witness_amounts)
 
     assert best_amounts is not None
     legalized_choices = _legalize_choices(
@@ -1961,6 +3140,14 @@ def allocate_credits(
         shadows,
         requirement_unknown | waiver_unknown,
         waived_requirements,
+        potential_unknown_requirements=potential_candidate_unknown,
+        attempts=normalized_attempts,
+        exclusive_allocations=legalized_choices,
+    )
+    subset_results, _subset_statuses, _subset_blockers = _subset_constraint_evaluations(
+        normalized_requirements,
+        normalized_attempts,
+        legalized_choices,
     )
     all_binding_assessments = tuple(binding_assessments_seed) + tuple(binding_assessments)
     warnings = list(waiver_warnings) + list(shared_warnings)
@@ -1972,18 +3159,21 @@ def allocate_credits(
     if input_issues or not normalized_requirements or not normalized_attempts and not normalized_requirements:
         status = UNKNOWN
     if exhausted:
-        status = UNKNOWN
-        blockers.append("SEARCH_EXHAUSTED")
+        if witness_choices is None:
+            status = UNKNOWN
+            blockers.append("SEARCH_EXHAUSTED")
+        else:
+            warnings.append("SEARCH_EXHAUSTED_AFTER_FEASIBLE_WITNESS")
     if any(item.status == UNKNOWN for item in all_binding_assessments):
         warnings.extend(f"UNVERIFIED_EQUIVALENCY:{item.binding_id}" for item in all_binding_assessments if item.status == UNKNOWN)
     alternatives = tuple(sorted(best_signatures, key=repr))
     allocation_ambiguous = len(alternatives) > 1
     if allocation_ambiguous:
-        # Any unresolved route choice is unsafe, including a branch that is
-        # currently numerically deficient.  A later manual correction could
-        # change which requirement receives the course.
-        status = UNKNOWN
-        blockers.append("ALLOCATION_AMBIGUOUS")
+        # Multiple complete assignments are legal evidence of feasibility;
+        # ambiguity is retained as metadata and never becomes a false failure.
+        if witness_choices is None:
+            status = UNKNOWN
+            blockers.append("ALLOCATION_AMBIGUOUS")
         warnings.append(f"ALLOCATION_ALTERNATIVES:{len(alternatives)}")
     elif shared_unknown and status == FAIL:
         # A verified-looking shared route with no usable source allocation is
@@ -2003,6 +3193,22 @@ def allocate_credits(
     if not conservation:
         blockers.append("CREDIT_CONSERVATION_FAILED")
         status = UNKNOWN
+    feasible_witness = witness_choices is not None and conservation and not input_issues
+    search_complete = not exhausted
+    feasibility = FEASIBLE if feasible_witness else INFEASIBLE if search_complete and status == FAIL else UNKNOWN
+    route_targets = {
+        route_id
+        for requirement in normalized_requirements
+        for route_id in requirement.overflow_routes
+    }
+    route_ambiguity = allocation_ambiguous and any(
+        portion[0] in route_targets
+        for signature in alternatives
+        for choice in signature
+        if isinstance(choice, tuple) and len(choice) > 1
+        for portion in choice[1]
+        if isinstance(portion, tuple) and portion
+    )
     return AllocationResult(
         status=status,
         allocations=legalized_choices,
@@ -2018,11 +3224,18 @@ def allocate_credits(
         blockers=tuple(blockers),
         warnings=tuple(warnings),
         search_exhausted=exhausted,
-        pass_eligible=status == PASS and not exhausted,
+        pass_eligible=status == PASS and feasible_witness,
         nodes_searched=nodes,
         objective=best_score or (),
         alternative_allocations=alternatives,
         allocation_ambiguous=allocation_ambiguous,
+        feasibility=feasibility,
+        search_complete=search_complete,
+        optimality="BOUNDED_NOT_COMPLETE" if exhausted else "NON_UNIQUE" if allocation_ambiguous else "OPTIMAL",
+        route_ambiguity=route_ambiguity,
+        decision_ambiguity=False,
+        feasible_witness=feasible_witness,
+        subset_results=subset_results,
     )
 
 
@@ -2038,12 +3251,15 @@ __all__ = [
     "CourseAttempt",
     "EquivalencyBinding",
     "EXCLUSIVE",
+    "FEASIBLE",
     "FAIL",
+    "INFEASIBLE",
     "LAB",
     "LECTURE",
     "MANUAL_REVIEW",
     "MISSING",
     "NONE",
+    "NOT_MEMBER",
     "NOT_APPLICABLE",
     "PARTIAL",
     "PASS",
@@ -2062,5 +3278,6 @@ __all__ = [
     "WaiverAssessment",
     "WaiverDecision",
     "allocate_credits",
+    "canonicalize_overflow_routes",
     "normalize_course_kind",
 ]
