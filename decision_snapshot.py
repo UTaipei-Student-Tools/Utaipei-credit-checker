@@ -49,6 +49,8 @@ _SAFE_REQUEST_KEYS = {
     "program_type",
     "secondary_kind",
     "application_status",
+    "submitted_at",
+    "application_event_evidence_id",
     "school_approval_status",
     "formal_qualification_status",
     "formal_award_status",
@@ -70,6 +72,7 @@ _EVIDENCE_ID_KEYS = {
     "registrar_registration_evidence_id",
     "formal_qualification_evidence_id",
     "formal_award_evidence_id",
+    "application_event_evidence_id",
 }
 _SAFE_RECORD_KEYS = {
     "id",
@@ -98,6 +101,10 @@ _SAFE_RECORD_KEYS = {
     "reason",
     "course_catalog_coverage",
     "requirement_ids",
+    "curriculum_revision",
+    "effective_term",
+    "effective_start",
+    "effective_end",
 }
 
 _CONFIRMATION_MARKERS = {"FORMAL_RELEASE", "FORMAL_RELEASED", "CONFIRMED_TRANSCRIPT"}
@@ -157,6 +164,26 @@ def _jsonable(value: Any) -> Any:
 def _digest(value: Any) -> str:
     payload = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def statistics_digest(statistics: Mapping[str, Any]) -> str:
+    """Hash the public statistics body with stable decimal representation."""
+
+    def plain(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): plain(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [plain(item) for item in value]
+        if isinstance(value, Decimal):
+            if not value.is_finite():
+                return "0"
+            if value == value.to_integral():
+                return str(value.quantize(Decimal("1")))
+            return format(value.normalize(), "f").rstrip("0").rstrip(".") or "0"
+        return value
+
+    body = {str(key): plain(value) for key, value in statistics.items() if str(key) != "statistics_digest"}
+    return f"sha256:{_digest(body)}"
 
 
 _PUBLIC_EVIDENCE_ID_KEYS = frozenset(
@@ -578,6 +605,12 @@ def _attempt(value: Any) -> CourseAttempt | None:
             "repeat_selection_evidence_state",
             value.get("effective_attempt_evidence_state", value.get("repeat_selection_state", UNKNOWN)),
         ),
+        pool_ids=value.get("pool_ids", ()),
+        pool_evidence_state=value.get("pool_evidence_state", value.get("pool_evidence", UNKNOWN)),
+        pool_membership_evidence=value.get(
+            "pool_membership_evidence",
+            value.get("membership_evidence", value.get("pool_evidence_by_id", ())),
+        ),
     )
 
 
@@ -609,6 +642,7 @@ def _requirement(value: Any) -> RequirementSpec | None:
         kind=value.get("kind", ""),
         owner=value.get("owner", value.get("role", value.get("curriculum_role", ""))),
         domain=value.get("domain", value.get("requirement_domain", "")),
+        subset_constraints=value.get("subset_constraints", value.get("subsets", ())),
     )
 
 
@@ -806,6 +840,16 @@ def _attempt_plain(item: CourseAttempt) -> dict[str, Any]:
         "identity_status": item.identity_status,
         "course_kind": item.course_kind,
         "pool_memberships": item.pool_memberships,
+        "pool_ids": item.pool_ids,
+        "pool_evidence_state": item.pool_evidence_state,
+        "pool_membership_evidence": tuple(
+            {
+                "pool_id": record[0],
+                "evidence_state": record[1],
+                "source_reference": record[2],
+            }
+            for record in item.pool_membership_evidence
+        ),
         "status": item.status,
         "source_kind": item.source_kind,
         "grade": item.grade,
@@ -836,6 +880,7 @@ def _requirement_plain(item: RequirementSpec) -> dict[str, Any]:
         "bucket": item.bucket,
         "owner": item.owner,
         "domain": item.domain,
+        "subset_constraints": item.subset_constraints,
     }
 
 
@@ -979,11 +1024,18 @@ def _allocation_plain(allocation: AllocationResult) -> dict[str, Any]:
         "blockers": tuple(_safe_diagnostic(item) for item in allocation.blockers),
         "warnings": tuple(_safe_diagnostic(item) for item in allocation.warnings),
         "search_exhausted": bool(allocation.search_exhausted),
+        "search_complete": bool(allocation.search_complete),
+        "feasibility": allocation.feasibility,
+        "feasible_witness": bool(allocation.feasible_witness),
+        "optimality": allocation.optimality,
+        "route_ambiguity": bool(allocation.route_ambiguity),
+        "decision_ambiguity": bool(allocation.decision_ambiguity),
         "pass_eligible": bool(allocation.pass_eligible),
         "nodes_searched": int(allocation.nodes_searched),
         "objective": tuple(str(item) if isinstance(item, Decimal) else item for item in allocation.objective),
         "allocation_ambiguous": bool(allocation.allocation_ambiguous),
         "alternative_allocations": tuple(_alternative_plain(item) for item in allocation.alternative_allocations),
+        "subset_results": tuple(_thaw(item) for item in allocation.subset_results),
     }
 
 
@@ -1048,6 +1100,12 @@ def _force_unknown_allocation(allocation: AllocationResult) -> AllocationResult:
         objective=(),
         alternative_allocations=(),
         allocation_ambiguous=False,
+        feasibility=UNKNOWN,
+        search_complete=False,
+        optimality="UNKNOWN",
+        route_ambiguity=False,
+        decision_ambiguity=False,
+        feasible_witness=False,
         blockers=tuple(dict.fromkeys((*allocation.blockers, "INPUT_UNCONFIRMED"))),
         pass_eligible=False,
     )
@@ -1082,10 +1140,19 @@ class DecisionSnapshot:
     search_complete: bool | None = None
     optimality: str = ""
     allocation_ambiguous: bool | None = None
+    feasibility: str = ""
+    feasible_witness: bool | None = None
+    route_ambiguity: bool | None = None
+    decision_ambiguity: bool | None = None
     alternatives: tuple[Any, ...] = ()
     statistics: Mapping[str, Any] = field(default_factory=dict)
     remediation_suggestions: tuple[str, ...] = ()
     waiver_decisions: tuple[Mapping[str, Any], ...] = ()
+    # Administrative/non-credit gates and policy subsets are observational
+    # outputs.  They are carried separately from the credit ledger so a
+    # renderer cannot accidentally add either category to recognized credits.
+    non_credit_results: tuple[Mapping[str, Any], ...] = ()
+    subset_results: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self):
         evaluated_at = _text(self.evaluated_at)
@@ -1098,13 +1165,6 @@ class DecisionSnapshot:
             attempt_count=len(self.attempts),
         )
         allocation = self.allocation if confirmation_valid else _force_unknown_allocation(self.allocation)
-        if allocation.allocation_ambiguous and allocation.status != UNKNOWN:
-            allocation = replace(
-                allocation,
-                status=UNKNOWN,
-                pass_eligible=False,
-                blockers=tuple(dict.fromkeys((*allocation.blockers, "ALLOCATION_AMBIGUOUS"))),
-            )
         # Internal allocation uses the resolver's opaque binding/waiver IDs so
         # caps and source matching remain exact.  Public snapshot consumers
         # receive stable hashes only; this is done before storing the object
@@ -1135,12 +1195,42 @@ class DecisionSnapshot:
             else self.allocation_ambiguous is not False
         )
         metadata_blockers = []
-        if not search_complete:
+        if self.feasible_witness is None:
+            # An explicit snapshot override of ``search_complete=False``
+            # cannot inherit the implicit witness that AllocationResult
+            # derives for a fully searched legacy fixture.  A bounded
+            # allocator result carries its own ``search_complete=False`` and
+            # explicit ``feasible_witness=True``, so that verified witness is
+            # still preserved here.
+            feasible_witness = allocation.feasible_witness is True and not (
+                self.search_complete is False and allocation.search_complete is True
+            )
+        else:
+            feasible_witness = self.feasible_witness is True
+        metadata_invalid = any(
+            getattr(self, key) is not None
+            and getattr(self, key) is not True
+            and getattr(self, key) is not False
+            for key in (
+                "search_complete",
+                "allocation_ambiguous",
+                "feasible_witness",
+                "route_ambiguity",
+                "decision_ambiguity",
+            )
+        )
+        feasibility = _text(self.feasibility).upper() or allocation.feasibility
+        if feasibility not in {"FEASIBLE", "INFEASIBLE", UNKNOWN}:
+            feasibility = UNKNOWN
+            metadata_invalid = True
+        route_ambiguity = allocation.route_ambiguity if self.route_ambiguity is None else self.route_ambiguity is True
+        decision_ambiguity = allocation.decision_ambiguity if self.decision_ambiguity is None else self.decision_ambiguity is True
+        if not search_complete and not feasible_witness:
             metadata_blockers.append("SEARCH_INCOMPLETE")
-        if allocation_ambiguous:
-            metadata_blockers.append("ALLOCATION_AMBIGUOUS")
-        if _optimality_is_uncertain(optimality):
+        if _optimality_is_uncertain(optimality) and not feasible_witness:
             metadata_blockers.append("OPTIMALITY_UNCERTAIN")
+        if metadata_invalid:
+            metadata_blockers.append("ALLOCATION_METADATA_INVALID")
         attempts = tuple(self.attempts) if confirmation_valid else ()
         object.__setattr__(self, "attempts", attempts)
         object.__setattr__(self, "requirements", tuple(self.requirements))
@@ -1170,9 +1260,6 @@ class DecisionSnapshot:
         if not confirmation_valid:
             verdict = "UNKNOWN"
             blockers = tuple(dict.fromkeys((*blockers, "INPUT_UNCONFIRMED")))
-        if allocation.allocation_ambiguous:
-            verdict = UNKNOWN
-            blockers = tuple(dict.fromkeys((*blockers, "ALLOCATION_AMBIGUOUS")))
         if verdict == "PASS" and (
             blockers
             or allocation.blockers
@@ -1216,14 +1303,34 @@ class DecisionSnapshot:
         object.__setattr__(self, "search_complete", search_complete)
         object.__setattr__(self, "optimality", optimality)
         object.__setattr__(self, "allocation_ambiguous", bool(allocation_ambiguous))
+        object.__setattr__(self, "feasibility", feasibility)
+        object.__setattr__(self, "feasible_witness", bool(feasible_witness))
+        object.__setattr__(self, "route_ambiguity", bool(route_ambiguity))
+        object.__setattr__(self, "decision_ambiguity", bool(decision_ambiguity))
         alternatives = () if not confirmation_valid else (self.alternatives or allocation.alternative_allocations)
         object.__setattr__(
             self,
             "alternatives",
             tuple(_freeze(_publicize_mapping(item)) for item in alternatives),
         )
-        object.__setattr__(self, "statistics", _freeze(_publicize_mapping(self.statistics)))
+        statistics = _thaw(_publicize_mapping(self.statistics))
+        # Public evidence references change the body. Rehash only a body whose
+        # incoming digest was valid; preserve corrupt input for fail-closed
+        # projection validation instead of accidentally repairing its checksum.
+        if isinstance(self.statistics, Mapping) and self.statistics.get("statistics_digest") == statistics_digest(self.statistics):
+            statistics = {**statistics, "statistics_digest": statistics_digest(statistics)}
+        object.__setattr__(self, "statistics", _freeze(statistics))
         object.__setattr__(self, "remediation_suggestions", tuple(_text(item) for item in self.remediation_suggestions if _text(item)))
+        object.__setattr__(
+            self,
+            "non_credit_results",
+            tuple(_freeze(_publicize_mapping(item)) for item in self.non_credit_results if isinstance(item, Mapping)),
+        )
+        object.__setattr__(
+            self,
+            "subset_results",
+            tuple(_freeze(_publicize_mapping(item)) for item in self.subset_results if isinstance(item, Mapping)),
+        )
 
     @property
     def graduation_verdict(self) -> str:
@@ -1266,9 +1373,15 @@ class DecisionSnapshot:
                 "search_complete": self.search_complete,
                 "optimality": self.optimality,
                 "allocation_ambiguous": self.allocation_ambiguous,
+                "feasibility": self.feasibility,
+                "feasible_witness": self.feasible_witness,
+                "route_ambiguity": self.route_ambiguity,
+                "decision_ambiguity": self.decision_ambiguity,
                 "alternatives": _thaw(self.alternatives),
                 "statistics": _thaw(self.statistics),
                 "remediation_suggestions": self.remediation_suggestions,
+                "non_credit_results": _thaw(self.non_credit_results),
+                "subset_results": _thaw(self.subset_results),
                 "allocation": _allocation_plain(self.allocation),
                 # Keep the old scalar alias for existing adapters while the
                 # nested allocation object becomes the canonical payload.
@@ -1339,6 +1452,10 @@ def build_decision_snapshot(
         search_complete=source.get("search_complete") if isinstance(source.get("search_complete"), bool) else None,
         optimality=_text(source.get("optimality")),
         allocation_ambiguous=source.get("allocation_ambiguous") if isinstance(source.get("allocation_ambiguous"), bool) else None,
+        feasibility=_text(source.get("feasibility")),
+        feasible_witness=source.get("feasible_witness") if isinstance(source.get("feasible_witness"), bool) else None,
+        route_ambiguity=source.get("route_ambiguity") if isinstance(source.get("route_ambiguity"), bool) else None,
+        decision_ambiguity=source.get("decision_ambiguity") if isinstance(source.get("decision_ambiguity"), bool) else None,
         waiver_decisions=tuple(_waiver_plain(item) for item in waiver_decisions),
     )
     # Construct the content address from the exact frozen projection so the

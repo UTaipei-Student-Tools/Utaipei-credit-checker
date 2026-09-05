@@ -10,6 +10,7 @@ from neighbouring terms.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import date, datetime, time
 from types import MappingProxyType
@@ -25,6 +26,7 @@ CONFLICTED = "CONFLICTED"
 MISSING = "MISSING"
 
 RULE_VERSION_UNKNOWN = "RULE_VERSION_UNKNOWN"
+APPLICATION_EVENT_UNKNOWN = "APPLICATION_EVENT_UNKNOWN"
 NOTICE_WINDOW_UNKNOWN = "NOTICE_WINDOW_UNKNOWN"
 DEPARTMENT_DECISION_UNKNOWN = "DEPARTMENT_DECISION_UNKNOWN"
 REGISTRATION_UNKNOWN = "REGISTRATION_UNKNOWN"
@@ -32,6 +34,7 @@ EFFECTIVE_TERM_UNKNOWN = "EFFECTIVE_TERM_UNKNOWN"
 SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
 FORMAL_AWARD_RECORD = "FORMAL_AWARD_RECORD"
 FORMAL_QUALIFICATION_RECORD = "FORMAL_QUALIFICATION_RECORD"
+APPLICATION_EVENT_RECORD = "APPLICATION_EVENT_RECORD"
 GRANTED = "GRANTED"
 ACTIVE = "ACTIVE"
 
@@ -570,6 +573,10 @@ def _safe_self_report(self_reported: Any) -> dict[str, Any]:
         "subject_id",
         "subject_ref",
         "submitted_at",
+        "application_event_evidence_id",
+        "target_curriculum_id",
+        "target_curriculum_version",
+        "curriculum_revision",
         "admission_cohort",
         "current_year_level",
         "transfer_student",
@@ -719,12 +726,121 @@ def _resolve_submission(notice: dict[str, Any], submitted_at: Any) -> dict[str, 
     return _gate(PASS, value=submitted_at, reason="submitted_at 位於適用的已核實官方申請窗口內。")
 
 
+def _term_ordinal(value: Any) -> int | None:
+    term = _normalize_term(value)
+    if not term:
+        return None
+    year, semester = term.split("-", 1)
+    return int(year) * 2 + int(semester)
+
+
+def _record_curriculum_revision(record: Mapping[str, Any]) -> str:
+    value = _record_value(
+        record,
+        "curriculum_revision",
+        "curriculum_revision_id",
+        "curriculum_version_id",
+        "target_curriculum_version_id",
+        "curriculum_version",
+        "target_curriculum_version",
+        "curriculum_id",
+    )
+    return _safe_text(value)
+
+
+def _effective_interval_matches(record: Mapping[str, Any], term: str | None, submitted_at: Any = None) -> bool:
+    """Validate an explicit effective interval without inferring dates."""
+
+    interval = record.get("effective_interval")
+    if not isinstance(interval, dict):
+        interval = {}
+    start = _record_value(interval, "start", "from", "effective_start", "start_term", "from_term")
+    end = _record_value(interval, "end", "to", "effective_end", "end_term", "to_term")
+    if start in (None, ""):
+        start = _record_value(record, "effective_start", "effective_from", "effective_from_term", "valid_from")
+    if end in (None, ""):
+        end = _record_value(record, "effective_end", "effective_to", "effective_to_term", "valid_to")
+    start_term = _term_ordinal(start)
+    end_term = _term_ordinal(end)
+    target_term = _term_ordinal(term)
+    if start_term is not None or end_term is not None:
+        if start_term is None or end_term is None or target_term is None or start_term > end_term:
+            return False
+        return start_term <= target_term <= end_term
+    effective_term = _normalize_term(_record_value(record, "effective_term", "applicable_term"))
+    if effective_term:
+        return bool(term and effective_term == term)
+    # Date intervals need an explicit submitted_at to establish a date-level
+    # claim.  A meeting/decision date by itself is never used as effective.
+    if start in (None, "") or end in (None, ""):
+        return False
+    start_instant = _parse_instant(start)
+    end_instant = _parse_instant(end, end_of_day=True)
+    if not start_instant or not end_instant or start_instant > end_instant:
+        return False
+    if submitted_at in (None, ""):
+        return True
+    return _window_contains({"start": start, "end": end}, submitted_at) is True
+
+
+def _resolve_application_event(
+    evidence_id: Any,
+    *,
+    term: str | None,
+    program: str | None,
+    track: str | None,
+    subject_ref: str | None,
+    student_id: str | None,
+    curriculum_revision: Any = None,
+    submitted_at: Any = None,
+    evidence_resolver: Any,
+) -> dict[str, Any]:
+    if not term or not program or not (subject_ref or student_id):
+        return _gate(UNKNOWN, code=APPLICATION_EVENT_UNKNOWN, reason="缺少申請事件的 subject、學期或目標系所 binding。")
+    record = _resolve_server_record(
+        evidence_id,
+        evidence_resolver,
+        record_types={
+            APPLICATION_EVENT_RECORD,
+            "DOUBLE_MAJOR_APPLICATION_RECORD",
+            "DOUBLE_MAJOR_APPLICATION_EVENT",
+            "APPLICATION_RECORD",
+        },
+        term=term,
+        program=program,
+        track=track,
+        student_id=student_id if not subject_ref else None,
+        subject_ref=subject_ref,
+        require_subject=True,
+        require_application_term=True,
+        require_program=True,
+    )
+    if record is None:
+        return _gate(UNKNOWN, code=APPLICATION_EVENT_UNKNOWN, reason="缺少與目前 subject、申請學期、系所及組別相符的正式申請紀錄。")
+    revision = _record_curriculum_revision(record)
+    expected_revision = _safe_text(curriculum_revision)
+    if not revision:
+        return _gate(UNKNOWN, code=APPLICATION_EVENT_UNKNOWN, reason="正式申請紀錄缺少 curriculum revision；rule_version 顯示字串不能補足適用性。")
+    if expected_revision and expected_revision not in {revision, _normalize_term(revision)}:
+        return _gate(UNKNOWN, code=APPLICATION_EVENT_UNKNOWN, value=revision, reason="正式申請紀錄的 curriculum revision 與目前請求不一致。")
+    if not _effective_interval_matches(record, term, submitted_at):
+        return _gate(UNKNOWN, code=APPLICATION_EVENT_UNKNOWN, value=revision, reason="正式申請紀錄缺少或不符合明示的 effective interval。")
+    result = _gate(PASS, code="APPLICATION_EVENT_VERIFIED", value=revision, record=record, scope="application_event", reason="正式申請紀錄已核實 subject、學期、系所、修訂及生效區間。")
+    result.update({"curriculum_revision": revision, "record_type": _record_type(record)})
+    if isinstance(record.get("effective_interval"), dict):
+        result["effective_interval"] = _safe_window(record.get("effective_interval"))
+    return result
+
+
 def _resolve_rule_version(
     evidence_id: Any,
     term: str | None,
     program: str | None,
     track: str | None,
     evidence_resolver: Any,
+    *,
+    curriculum_revision: Any = None,
+    submitted_at: Any = None,
 ) -> dict[str, Any]:
     if not term or not program:
         return _gate(UNKNOWN, code=RULE_VERSION_UNKNOWN, reason="缺少申請學期或目標系所；不能核對 rule version applicability 的適用範圍。")
@@ -742,7 +858,17 @@ def _resolve_rule_version(
     rule_version = _record_value(record, "rule_version", "version")
     if not isinstance(rule_version, (str, int, float, bool)) or not str(rule_version or "").strip():
         return _gate(UNKNOWN, code=RULE_VERSION_UNKNOWN, reason="官方 rule applicability record 缺少 rule_version。")
-    return _gate(PASS, value=rule_version, record=record, scope="rule_applicability")
+    revision = _record_curriculum_revision(record)
+    if not revision:
+        return _gate(UNKNOWN, code=RULE_VERSION_UNKNOWN, value=rule_version, reason="rule_version 顯示字串不能單獨證明 curriculum applicability；缺少 revision。")
+    expected_revision = _safe_text(curriculum_revision)
+    if expected_revision and expected_revision not in {revision, _normalize_term(revision)}:
+        return _gate(UNKNOWN, code=RULE_VERSION_UNKNOWN, value=rule_version, reason="官方 rule applicability 的 curriculum revision 與請求不一致。")
+    if not _effective_interval_matches(record, term, submitted_at):
+        return _gate(UNKNOWN, code=RULE_VERSION_UNKNOWN, value=rule_version, reason="官方 rule applicability 缺少或不符合明示的 effective interval。")
+    result = _gate(PASS, value=rule_version, record=record, scope="rule_applicability")
+    result.update({"curriculum_revision": revision})
+    return result
 
 
 def _resolve_department_decision(
@@ -832,6 +958,9 @@ def resolve_application_case(
     department_decision: Any = None,
     registrar_registration: Any = None,
     formal_qualification: Any = None,
+    submitted_at: Any = None,
+    application_event_evidence_id: Any = None,
+    curriculum_revision: Any = None,
     subject_ref: Any = None,
     as_of: Any = None,
     evidence_resolver: Any = None,
@@ -855,9 +984,40 @@ def resolve_application_case(
     student_id = _record_value(self_reported, "student_id", "subject_id")
     student_id = str(student_id).strip() if student_id not in (None, "") else None
     resolved_subject_ref = _safe_text(subject_ref) or _safe_text(self_reported.get("subject_ref")) or None
+    resolved_submitted_at = submitted_at if submitted_at not in (None, "") else self_reported.get("submitted_at")
+    resolved_event_id = application_event_evidence_id if application_event_evidence_id not in (None, "") else self_reported.get("application_event_evidence_id")
+    resolved_revision = curriculum_revision if curriculum_revision not in (None, "") else _record_value(
+        self_reported,
+        "curriculum_revision",
+        "target_curriculum_version",
+        "target_curriculum_id",
+    )
     notice = _notice_resolution(term, target_program, notice_records, evidence_resolver)
-    submission = _resolve_submission(notice, self_reported.get("submitted_at"))
-    rule_gate = _resolve_rule_version(rule_applicability, term, target_program, target_track, evidence_resolver)
+    submission = _resolve_submission(notice, resolved_submitted_at)
+    rule_gate = _resolve_rule_version(
+        rule_applicability,
+        term,
+        target_program,
+        target_track,
+        evidence_resolver,
+        curriculum_revision=resolved_revision,
+        submitted_at=resolved_submitted_at,
+    )
+    application_event = (
+        _resolve_application_event(
+            resolved_event_id,
+            term=term,
+            program=target_program,
+            track=target_track,
+            subject_ref=resolved_subject_ref,
+            student_id=student_id,
+            curriculum_revision=resolved_revision,
+            submitted_at=resolved_submitted_at,
+            evidence_resolver=evidence_resolver,
+        )
+        if resolved_event_id
+        else _gate(NOT_APPLICABLE, reason="未提供獨立 application event evidence；不以 rule_version 字串代替。")
+    )
     department_gate = _resolve_department_decision(
         department_decision,
         term,
@@ -896,6 +1056,8 @@ def resolve_application_case(
         registration.get("status", UNKNOWN),
         activity.get("status", UNKNOWN),
     ]
+    if resolved_event_id:
+        required_gates.append(application_event.get("status", UNKNOWN))
     overall = _aggregate_status(required_gates)
     blockers = []
     for name, gate in (
@@ -907,6 +1069,7 @@ def resolve_application_case(
         ("department_decision", department_gate),
         ("registration", registration),
         ("activity", activity),
+        ("application_event", application_event),
         ("formal_qualification", qualification_gate),
     ):
         if gate.get("status") in {FAIL, UNKNOWN}:
@@ -920,6 +1083,7 @@ def resolve_application_case(
         department_gate.get("provenance", []),
         registration.get("provenance", []),
         activity.get("provenance", []),
+        application_event.get("provenance", []),
         qualification_gate.get("provenance", []),
     ):
         for record in item:
@@ -943,6 +1107,9 @@ def resolve_application_case(
         "university_window": notice.get("university_window"),
         "department_window": notice.get("department_window"),
         "submission": submission,
+        "submitted_at": resolved_submitted_at if isinstance(resolved_submitted_at, (str, int, float, bool, type(None))) else None,
+        "application_event": application_event,
+        "application_event_evidence_id": _safe_text(resolved_event_id) or None,
         "rule_version": rule_gate,
         "rule_applicability": rule_gate,
         "department_decision": department_gate,
@@ -961,6 +1128,7 @@ def resolve_application_case(
             "department_decision": department_gate.get("status", UNKNOWN),
             "registration": registration.get("status", UNKNOWN),
             "activity": activity.get("status", UNKNOWN),
+            "application_event": application_event.get("status", NOT_APPLICABLE),
             "formal_qualification": qualification_gate.get("status", UNKNOWN),
         },
         "blockers": blockers,
@@ -994,7 +1162,7 @@ def resolve_formal_qualification(
     track = _normalize_track(target_track, program) if target_track is not None else None
     ref = _safe_text(subject_ref) or None
     legacy_student = _safe_text(student_id) or None
-    if not requested_id or not term or not program or not (ref or legacy_student):
+    if not requested_id or not program or not (ref or legacy_student):
         return _gate(
             UNKNOWN,
             code="FORMAL_QUALIFICATION_UNKNOWN",
@@ -1010,7 +1178,11 @@ def resolve_formal_qualification(
         student_id=legacy_student if not ref else None,
         subject_ref=ref,
         require_subject=True,
-        require_application_term=True,
+        # A trusted subject-bound current qualification may be the only
+        # surviving evidence after an already-approved application.  When a
+        # request supplies a term, still require exact event binding; when it
+        # does not, do not manufacture a historical submission date.
+        require_application_term=bool(term),
         require_program=True,
     )
     if record is None:
@@ -1020,7 +1192,7 @@ def resolve_formal_qualification(
             reason="沒有與目前學期、目標系所及 subject binding 相符的官方資格紀錄。",
         ) | {"qualification_state": UNKNOWN, "is_official": False}
     state = str(_record_value(record, "qualification_status", "qualification_state", "status", "decision") or "").strip().upper()
-    if state in {"QUALIFIED", "APPROVED", "GRANTED", "ELIGIBLE", "REGISTERED"}:
+    if state in {"ACTIVE", "QUALIFIED", "APPROVED", "GRANTED", "ELIGIBLE", "REGISTERED"}:
         result = _gate(
             PASS,
             code="FORMAL_QUALIFICATION_VERIFIED",
@@ -1353,6 +1525,8 @@ def resolve_minor_award(
 
 
 __all__ = [
+    "APPLICATION_EVENT_RECORD",
+    "APPLICATION_EVENT_UNKNOWN",
     "ACTIVE",
     "CONFLICTED",
     "DEPARTMENT_DECISION_UNKNOWN",

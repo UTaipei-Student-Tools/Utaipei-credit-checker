@@ -7,7 +7,6 @@ values are read from an already-produced :class:`DecisionSnapshot`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -23,7 +22,7 @@ from allocation_engine import (
     SHARED_SHADOW,
     UNKNOWN,
 )
-from decision_snapshot import DecisionSnapshot
+from decision_snapshot import DecisionSnapshot, statistics_digest
 
 STATISTICS_SCHEMA_VERSION = "decision-statistics.v2"
 CHART_DATASET_SCHEMA_VERSION = "lieflat-datasets.v2"
@@ -76,11 +75,7 @@ def _canonical_json(value: Any) -> str:
 
 
 def _statistics_digest(statistics: Mapping[str, Any]) -> str:
-    body = {str(key): _plain(value) for key, value in statistics.items() if str(key) != "statistics_digest"}
-    # Keep the compact 96-bit display token used by existing exports, while
-    # making the hash algorithm explicit for audit consumers and HTML data
-    # attributes.  Every screen/chart/export path receives this exact value.
-    return f"sha256:{hashlib.sha256(_canonical_json(body).encode('utf-8')).hexdigest()[:24]}"
+    return statistics_digest(statistics)
 
 
 def _safe_status(value: Any) -> str:
@@ -865,6 +860,73 @@ def _validated_requirement_metric_rows(
     return tuple(validated)
 
 
+def _registry_total_gate(
+    decision: Mapping[str, Any],
+    primary_ids: tuple[str, ...],
+    metric_rows: Sequence[Mapping[str, Any]],
+    ledger: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    descriptor = decision.get("total_credit_requirement")
+    if not isinstance(descriptor, Mapping):
+        return None
+    unavailable = {
+        "available": False, "status": "UNAVAILABLE",
+        "reason_code": AGGREGATE_GATE_UNAVAILABLE,
+        "detail_code": "PRIMARY_REGISTRY_TOTAL_UNVERIFIED",
+        "reason": "主修總學分門檻或採計範圍尚未核實，請先確認適用手冊及課程歸屬。",
+    }
+    required = _strict_nonnegative(descriptor.get("required_credits"))
+    if (
+        descriptor.get("authority") != "PRIMARY_CURRICULUM_REGISTRY"
+        or descriptor.get("non_consuming") is not True
+        or not _text(descriptor.get("curriculum_id"))
+        or not _text(descriptor.get("source_reference"))
+        or descriptor.get("evidence_state") != "VERIFIED"
+        or descriptor.get("coverage_state") not in {"COMPLETE", "RESOLVED"}
+        or required is None or required <= 0
+        or not isinstance(ledger, Mapping)
+    ):
+        return unavailable
+    conservation = ledger.get("conservation", {})
+    if (
+        not isinstance(conservation, Mapping)
+        or _flag(conservation.get("ok")) is not True
+        or conservation.get("status") != PASS
+        or _strict_nonnegative(ledger.get("unclassified_exclusive_credits")) != 0
+        or len(set(primary_ids)) != len(primary_ids)
+    ):
+        return unavailable
+    by_requirement = ledger.get("exclusive_by_requirement")
+    if not isinstance(by_requirement, Mapping):
+        return unavailable
+    completed = Decimal("0")
+    for requirement_id in primary_ids:
+        matches = [row for row in metric_rows if row.get("requirement_id") == requirement_id]
+        if len(matches) != 1:
+            return unavailable
+        row = matches[0]
+        amount = _strict_nonnegative(by_requirement.get(requirement_id, "0"))
+        if (
+            row.get("owner_present") is not True or row.get("owner") != "PRIMARY"
+            or row.get("exclusive_credits_present") is not True
+            or amount is None or _strict_nonnegative(row.get("exclusive_credits")) != amount
+        ):
+            return unavailable
+        completed += amount
+    return {
+        "available": True, "status": "AVAILABLE", "reason_code": "", "detail_code": "",
+        "gate_status": PASS if completed >= required else FAIL,
+        "reason": "依適用學生手冊總門檻，僅加總已正式配置於主修的學分。",
+        "curriculum_id": descriptor["curriculum_id"],
+        "source_reference": descriptor["source_reference"],
+        "required_credits": _decimal_text(required),
+        "completed_credits": _decimal_text(completed),
+        "missing_credits": _decimal_text(max(Decimal("0"), required - completed)),
+        "numerator_source": "primary_requirement_scope.exclusive_credits",
+        "shadow_excluded": True,
+    }
+
+
 def _aggregate_gate(
     metric_rows: Sequence[Mapping[str, Any]],
     ledger: Mapping[str, Any] | None = None,
@@ -886,6 +948,9 @@ def _aggregate_gate(
             "reason": "主修判定沒有明確的 requirement_ids，不能安全指定總畢業學分閘門。",
         }
 
+    registry_total = _registry_total_gate(decision, primary_ids, metric_rows, ledger)
+    if registry_total is not None:
+        return registry_total
     explicit = [
         row
         for row in metric_rows
@@ -1071,6 +1136,19 @@ def build_statistics_v2(
         f"{item['name']} 尚缺 {item['deficit']} 學分；請依官方課表補修或人工確認。"
         for item in sorted(deficits, key=lambda entry: (entry.get("status") != FAIL, str(entry.get("requirement_id"))))
     )
+    non_credit_results = decisions.get("non_credit_results", {}) if isinstance(decisions, Mapping) else {}
+    subset_results = decisions.get("subset_results", ()) if isinstance(decisions, Mapping) else ()
+    if not isinstance(non_credit_results, Mapping):
+        non_credit_results = {}
+    if not isinstance(subset_results, (list, tuple)):
+        subset_results = ()
+    non_credit_status_counts: defaultdict[str, int] = defaultdict(int)
+    for scoped_rows in non_credit_results.values():
+        if not isinstance(scoped_rows, (list, tuple)):
+            continue
+        for row in scoped_rows:
+            if isinstance(row, Mapping):
+                non_credit_status_counts[_safe_status(row.get("status"))] += 1
     statistics: dict[str, Any] = {
         "schema_version": STATISTICS_SCHEMA_VERSION,
         "statistics_schema": STATISTICS_SCHEMA_VERSION,
@@ -1101,6 +1179,22 @@ def build_statistics_v2(
         # inflate a graduation numerator.
         "effective_recognized_credits": ledger["exclusive_allocated_credits"],
         "credit_conservation": bool(ledger["conservation"]["ok"]),
+        # These fields are copied from the allocator result so projections
+        # can distinguish a feasible witness from search/route ambiguity
+        # without recalculating or downgrading the decision.
+        "feasibility": _safe_status(_field(allocation, "feasibility", UNKNOWN)),
+        "feasible_witness": _flag(_field(allocation, "feasible_witness", False)) is True,
+        "search_complete": _flag(_field(allocation, "search_complete", None)),
+        "optimality": _text(_field(allocation, "optimality", ""), "UNKNOWN"),
+        "allocation_ambiguous": _flag(_field(allocation, "allocation_ambiguous", False)) is True,
+        "route_ambiguity": _flag(_field(allocation, "route_ambiguity", False)) is True,
+        "decision_ambiguity": _flag(_field(allocation, "decision_ambiguity", False)) is True,
+        "non_credit_results": non_credit_results,
+        "non_credit_status_counts": {
+            key: int(non_credit_status_counts.get(key, 0))
+            for key in (PASS, FAIL, UNKNOWN)
+        },
+        "subset_results": tuple(subset_results),
         "by_bucket": ledger["exclusive_by_bucket"],
         "by_owner": ledger["exclusive_by_owner"],
         "minor_credits": ledger["exclusive_by_owner"].get("MINOR", "0"),
@@ -1231,7 +1325,10 @@ def build_chart_datasets(statistics: Mapping[str, Any], *, snapshot_id: str = ""
     }
     aggregate = stats.get("program_progress", {}).get("primary", {}).get("aggregate_credit_progress", {}) if isinstance(stats.get("program_progress"), Mapping) and isinstance(stats.get("program_progress", {}).get("primary", {}), Mapping) else {}
     numerator_proven = (
-        _text(aggregate.get("numerator_source")) == "primary_aggregate_requirement.exclusive_credits"
+        _text(aggregate.get("numerator_source")) in {
+            "primary_aggregate_requirement.exclusive_credits",
+            "primary_requirement_scope.exclusive_credits",
+        }
         and bool(aggregate.get("shadow_excluded"))
     )
     f11_available = bool(aggregate.get("available")) and conservation_ok and numerator_proven and _decimal(aggregate.get("required_credits")) > 0

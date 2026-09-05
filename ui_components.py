@@ -895,33 +895,36 @@ def inject_theme_css():
 
             /* ----- shared surfaces ------------------------------------------------ */
             .header-card {
-                margin: 0 0 1.75rem;
-                padding: clamp(1.35rem, 3vw, 2.4rem);
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: .35rem 1.25rem;
+                margin: 0 0 .75rem;
+                padding: .7rem clamp(.85rem, 2vw, 1.25rem);
                 border: 1px solid var(--ui-border);
-                border-radius: var(--ui-radius-lg);
+                border-radius: var(--ui-radius-md);
                 background: var(--ui-surface-raised);
-                box-shadow: var(--ui-shadow-soft);
+                box-shadow: none;
                 text-align: left;
             }
             .header-title {
                 position: relative;
                 z-index: 1;
-                max-width: 28ch;
+                max-width: none;
                 color: var(--ui-text) !important;
-                font-size: clamp(1.55rem, 3vw, 2.5rem);
+                font-size: clamp(1.25rem, 2.4vw, 1.6rem);
                 font-weight: 800;
-                letter-spacing: -.045em;
+                letter-spacing: -.025em;
                 line-height: 1.18;
-                text-wrap: balance;
             }
             .header-subtitle {
                 position: relative;
                 z-index: 1;
                 max-width: 70ch;
-                margin-top: .55rem;
+                margin-top: 0;
                 color: var(--ui-text-muted) !important;
-                font-size: 1rem;
-                line-height: 1.65;
+                font-size: .86rem;
+                line-height: 1.4;
             }
             .hero-callout,
             .info-card,
@@ -935,12 +938,16 @@ def inject_theme_css():
                 box-shadow: none;
             }
             .hero-callout {
-                margin: 0 0 1.5rem;
-                padding: 1rem 1.15rem;
-                border-left: 4px solid var(--ui-accent) !important;
+                display: flex;
+                align-items: baseline;
+                flex-wrap: wrap;
+                gap: .2rem .7rem;
+                margin: 0 0 .85rem;
+                padding: .55rem .75rem;
+                border-left: 3px solid var(--ui-accent) !important;
                 border-radius: var(--ui-radius-md);
                 background: var(--ui-accent-soft) !important;
-                line-height: 1.7;
+                line-height: 1.45;
             }
             .hero-callout b, .hero-callout strong { color: var(--ui-text) !important; }
             .info-flex {
@@ -1269,8 +1276,9 @@ def inject_theme_css():
             button[kind="primary"], .stButton > button[kind="primary"] {
                 border-color: var(--ui-accent-strong) !important;
                 background: var(--ui-accent-strong) !important;
-                color: #fff !important;
+                color: var(--ui-canvas) !important;
             }
+            button[kind="primary"] * { color: inherit !important; }
             button[kind="primary"]:hover, .stButton > button[kind="primary"]:hover { background: var(--ui-accent) !important; }
             :where(button, a, input, textarea, select, [role="button"], [tabindex]):focus-visible {
                 outline: 3px solid var(--ui-focus) !important;
@@ -1442,9 +1450,9 @@ def inject_theme_css():
                 .progress-label-row { flex-direction: column; align-items: flex-start; gap: .2rem; }
                 .progress-label-row .progress-number { text-align: left; }
                 .stButton > button, .stDownloadButton > button { width: 100%; }
-                .header-card { margin-bottom: 1rem; padding: 1.05rem; border-radius: var(--ui-radius-md); }
-                .header-title { font-size: clamp(1.45rem, 7vw, 2rem); }
-                .header-subtitle { font-size: .9rem; }
+                .header-card { align-items: flex-start; flex-direction: column; gap: .15rem; margin-bottom: .6rem; padding: .65rem .8rem; border-radius: var(--ui-radius-md); }
+                .header-title { font-size: clamp(1.25rem, 7vw, 1.65rem); white-space: normal; }
+                .header-subtitle { font-size: .84rem; }
                 .card-panel { margin-block: .7rem; border-radius: var(--ui-radius-md); }
                 .hero-callout { margin-bottom: .9rem; padding: .8rem .9rem; line-height: 1.55; }
                 [data-testid="stExpander"] summary { min-height: var(--ui-control-height); }
@@ -1566,9 +1574,8 @@ def render_landing_message():
     render_html(
         """
         <section class="hero-callout" aria-label="開始方式">
-            <b>開始畢業盤點</b><br>
-            先選入學年度與主修，再上傳成績單或登入校務系統。資料只在本次工作階段分析。<br>
-            <small>結果供自我檢查；正式畢業資格仍以校方審核為準。</small>
+            <b>先選入學年度與主修</b>
+            <span>再匯入成績單，確認課程後查看學分進度。</span>
         </section>
         """,
     )

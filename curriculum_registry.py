@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -82,21 +82,398 @@ _TRACKS = {
     "life_science": {"生命科學", "生命科學系", "地生（生命科學）", "地生-生命科學"},
     "physics": {"物理組", "電子物理", "電子物理組", "物化系物理組", "物化（電子物理）", "物化-電子物理"},
     "chemistry": {"化學組", "應用化學", "應用化學組", "物化系化學組", "物化（應用化學）", "物化-應用化學"},
+    "math_scientific_computing": {"數學與科學計算", "數學與科學計算領域", "math_scientific_computing"},
+    "data_science": {"數據科學", "數據科學領域", "data_science"},
+    "math_education": {"數學教育", "數學教育領域", "math_education"},
 }
 _TRACK_DISPLAY = {
     "earth_environment": "地球環境",
     "life_science": "生命科學",
     "physics": "電子物理",
     "chemistry": "應用化學",
+    "math_scientific_computing": "數學與科學計算",
+    "data_science": "數據科學",
+    "math_education": "數學教育",
 }
 _PROGRAM_SLUGS = frozenset({"earth", "apc", "cs", "math"})
-_TRACK_SLUGS = frozenset({"earth_environment", "life_science", "physics", "chemistry"})
+_MATH_PRIMARY_TRACKS = {
+    "111": (),
+    "112": (),
+    "113": ("math_scientific_computing", "data_science", "math_education"),
+    "114": ("math_scientific_computing", "data_science", "math_education"),
+    "115": ("math_scientific_computing", "data_science"),
+}
+_TRACK_SLUGS = frozenset(
+    {
+        "earth_environment",
+        "life_science",
+        "physics",
+        "chemistry",
+        "math_scientific_computing",
+        "data_science",
+        "math_education",
+    }
+)
 _TRACK_PROGRAMS = {
     "earth_environment": "earth",
     "life_science": "earth",
     "physics": "apc",
     "chemistry": "apc",
+    "math_scientific_computing": "math",
+    "data_science": "math",
+    "math_education": "math",
 }
+
+# Course-pool identifiers deliberately include the handbook cohort and the
+# selected role.  A transcript row from one handbook therefore cannot satisfy
+# a similarly named course in another handbook merely because the title is the
+# same.  The registrar export used by this project does not contain course
+# codes or opening departments, so the identity contract carried by each pool
+# is explicit about the fields that are actually available.
+_POOL_ID_SCHEMA = "pool:v1"
+_POOL_IDENTITY_FIELDS = (
+    "curriculum_version",
+    "program_slug",
+    "track_slug",
+    "raw_title",
+    "credits",
+    "lecture_or_lab",
+)
+
+
+def _scope_slug(kind: str) -> str:
+    if kind == "primary":
+        return "primary"
+    if kind in {_MINOR_TARGET_ROLE, "minor", "minor_target"}:
+        return "minor"
+    return "double_major"
+
+
+def _pool_token(value: Any) -> str:
+    text = _normalize_text(value)
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", text).strip("_").lower()
+    return text or "department"
+
+
+def _pool_id(kind: str, cohort: str, program: str, track: str | None, bucket: str) -> str:
+    """Return a stable, year-scoped course-pool identifier."""
+
+    return ":".join(
+        (
+            "pool",
+            _scope_slug(kind),
+            str(cohort),
+            str(program),
+            _pool_token(track or "department"),
+            _pool_token(bucket),
+        )
+    )
+
+
+def _pool_source(source: Mapping[str, Any], pool_id: str) -> dict[str, Any]:
+    """Copy source metadata while giving the pool its own auditable ref."""
+
+    source_reference = f"{source.get('source_reference', 'handbook')}:pool:{pool_id.rsplit(':', 1)[-1]}"
+    return {
+        "source_type": "official_handbook",
+        "research_file": source.get("research_file", ""),
+        "source_pdf_sha256": source.get("source_pdf_sha256", ""),
+        "source_catalog_file": source.get("source_catalog_file", ""),
+        "source_url": source.get("source_url", ""),
+        "source_file": source.get("source_file", ""),
+        "pdf_page": source.get("pdf_page", "未標示"),
+        "printed_page": source.get("printed_page", "未標示"),
+        "pages": source.get("pages", "未標示"),
+        "table_location": source.get("table_location", "官方課程表"),
+        "source_reference": source_reference,
+        "original_clause": source.get("original_clause", ""),
+    }
+
+
+def _pool_course_entry(
+    cohort: str,
+    program: str,
+    track: str | None,
+    pool_id: str,
+    name: str,
+    credits: int | float,
+    source: Mapping[str, Any],
+    *,
+    evidence_state: str = VERIFIED,
+    course_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a candidate entry; candidates never become requirements alone."""
+
+    raw_title = str(name)
+    slug = _pool_token(raw_title)
+    component = "lab" if "實驗" in raw_title else "lecture"
+    pool_source = _pool_source(source, pool_id)
+    metadata = deepcopy(dict(course_metadata)) if isinstance(course_metadata, Mapping) else {}
+    # A source-backed catalog may pin each candidate to a distinct printed
+    # row.  Keep that row citation when present; the pool-level fallback is
+    # retained for legacy candidate maps that only provide pool provenance.
+    resolved_source = deepcopy(pool_source)
+    for key in (
+        "research_file",
+        "source_pdf_sha256",
+        "source_catalog_file",
+        "source_url",
+        "source_file",
+        "pdf_page",
+        "printed_page",
+        "pages",
+        "table_location",
+        "source_reference",
+        "original_clause",
+    ):
+        if metadata.get(key) not in (None, ""):
+            resolved_source[key] = deepcopy(metadata[key])
+    row_reference = str(
+        resolved_source.get("source_reference")
+        or f"{pool_source['source_reference']}:course:{slug}"
+    )
+    original_clause = str(
+        resolved_source.get("original_clause")
+        or f"{raw_title} {float(credits):g} 學分；列於官方課程池。"
+    )
+    entry = {
+        "name": raw_title,
+        "raw_title": raw_title,
+        "credits": float(credits),
+        "component": component,
+        "component_type": component,
+        "lecture_or_lab": component,
+        "is_lab": component == "lab",
+        "curriculum_version": cohort,
+        "program_slug": program,
+        "track_slug": track or "department",
+        "official_course_identity": f"{cohort}:{program}:{track or 'department'}:{slug}",
+        "pool_ids": (pool_id,),
+        "candidate_only": True,
+        "requirement_type": "candidate_course",
+        "evidence_state": evidence_state,
+        "verification_status": evidence_state,
+        "source_reference": row_reference,
+        "source_url": resolved_source["source_url"],
+        "source_file": resolved_source["source_file"],
+        "source_pdf_sha256": resolved_source.get("source_pdf_sha256", ""),
+        "source_catalog_file": resolved_source.get("source_catalog_file", ""),
+        "research_file": resolved_source["research_file"],
+        "pdf_page": resolved_source["pdf_page"],
+        "printed_page": resolved_source["printed_page"],
+        "pages": resolved_source["pages"],
+        "table_location": resolved_source["table_location"],
+        "original_clause": original_clause,
+        "source": {**resolved_source, "source_reference": row_reference, "raw_title": raw_title},
+    }
+    if metadata:
+        entry["course_metadata"] = metadata
+        entry["source"]["course_metadata"] = deepcopy(metadata)
+        # Preserve server-owned subset/evidence claims at the candidate
+        # boundary.  These fields describe the printed pool membership; they
+        # never turn a candidate into a required course or accept a student
+        # supplied department assertion.
+        for key in (
+            "canonical_name",
+            "course_alias_of",
+            "official_course_identity",
+            "source_track_slug",
+            "source_track",
+            "source_program_slug",
+            "requires_server_owned_offering",
+            "secondary_course_key",
+            "course_key",
+            "math_secondary_composite_required",
+            "subset_ids",
+            "membership_ids",
+            "membership_assertions",
+            "pool_membership_evidence",
+            "observed_requirement_ids",
+            "source_domains",
+            "source_row",
+            "source_table",
+            "original_note",
+            "membership_source_reference",
+        ):
+            if key in metadata:
+                entry[key] = deepcopy(metadata[key])
+    # Only verified, department-scoped candidates from the official 理學院
+    # handbook can assert the college membership.  Keep the assertion tied to
+    # the same handbook pool provenance; university GE/PE pools, free-choice
+    # pools, and unresolved candidates deliberately remain unlabelled.
+    pool_bucket = pool_id.rsplit(":", 1)[-1]
+    science_department_buckets = {
+        "earth": {
+            "common_compulsory",
+            "domain_required",
+            "common_elective",
+            "domain_elective",
+            "department_professional",
+            "common_alternative_1",
+            "common_alternative_2",
+            "common_alternative_3",
+        },
+        "apc": {
+            "apc_common_compulsory",
+            "apc_cross_track_lab_candidates",
+            "apc_track_compulsory",
+            "apc_track_elective",
+        },
+        "cs": {
+            "cs_department_required",
+            "cs_department_elective",
+            "cs_elective_alpha",
+            "cs_elective_beta",
+        },
+        "math": {
+            "math_common_compulsory",
+            "math_domain_required",
+            "math_department_elective",
+        },
+    }
+    official_college_handbook = (
+        str(pool_source.get("source_file") or "").startswith("3-理學院")
+        and pool_source["source_type"] == "official_handbook"
+    )
+    if (
+        program in science_department_buckets
+        and evidence_state == VERIFIED
+        and pool_bucket in science_department_buckets[program]
+        and official_college_handbook
+    ):
+        existing_memberships = tuple(entry.get("membership_ids", ()))
+        membership_ids = tuple(
+            dict.fromkeys(("science_college", *existing_memberships))
+        )
+        entry.update(
+            {
+                "college": "理學院",
+                "membership_ids": membership_ids,
+            }
+        )
+        entry["source"].update(
+            {
+                "college": "理學院",
+                "membership_ids": membership_ids,
+            }
+        )
+    return entry
+
+
+def _pool_record(
+    *,
+    kind: str,
+    cohort: str,
+    program: str,
+    track: str | None,
+    bucket: str,
+    label: str,
+    source: Mapping[str, Any],
+    candidates: Mapping[str, int | float] | None = None,
+    candidate_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+    required_credits: int | float | None = None,
+    evidence_state: str = VERIFIED,
+    coverage_state: str = COMPLETE,
+    selection_rule: str = "exact_title_credit_component",
+    policy: Mapping[str, Any] | None = None,
+    overflow_routes: tuple[str, ...] = (),
+    manual_reason: str = "",
+) -> dict[str, Any]:
+    """Create one auditable pool policy and its non-required candidates."""
+
+    pool_id = _pool_id(kind, cohort, program, track, bucket)
+    course_entries = tuple(
+        _pool_course_entry(
+            cohort,
+            program,
+            track,
+            pool_id,
+            name,
+            credits,
+            source,
+            evidence_state=evidence_state,
+            course_metadata=(candidate_metadata or {}).get(name),
+        )
+        for name, credits in (candidates or {}).items()
+    )
+    pool_source = _pool_source(source, pool_id)
+    policy_data = deepcopy(dict(policy or {}))
+    # Policy-only pools are compiled by the core policy gate.  Keep the
+    # policy identity and its scope beside the ordinary pool provenance so a
+    # policy cannot silently apply to another cohort, programme, role, or
+    # track.  Exact named-course pools may omit these fields.
+    policy_source = policy_data.get("policy_source")
+    policy_source = deepcopy(policy_source) if isinstance(policy_source, Mapping) else None
+    policy_id = policy_data.get("policy_id")
+    policy_revision = policy_data.get("revision")
+    applies_to = policy_data.get("applies_to")
+    predicate = policy_data.get("predicate")
+    policy_evidence_state = policy_data.get("evidence_state", evidence_state)
+    policy_coverage_state = policy_data.get("coverage_state", coverage_state)
+    policy_automatic_decision = policy_data.get("automatic_decision")
+    if policy_automatic_decision is None:
+        policy_automatic_decision = (
+            policy_evidence_state == VERIFIED
+            and policy_coverage_state == COMPLETE
+            and not manual_reason
+        )
+    requirement_minimum_credits = policy_data.get("requirement_minimum_credits")
+    if requirement_minimum_credits is None and required_credits is not None:
+        requirement_minimum_credits = float(required_credits)
+    subset_maxima = policy_data.get("subset_maxima")
+    subset_maxima = deepcopy(dict(subset_maxima)) if isinstance(subset_maxima, Mapping) else {}
+    return {
+        "id": pool_id,
+        "pool_id": pool_id,
+        "schema": _POOL_ID_SCHEMA,
+        "scope": _scope_slug(kind),
+        "kind": kind,
+        "curriculum_version": cohort,
+        "cohort": cohort,
+        "program_slug": program,
+        "track_slug": track or "department",
+        "label": label,
+        "bucket": bucket,
+        "required_credits": float(required_credits) if required_credits is not None else None,
+        "requirement_minimum_credits": (
+            float(requirement_minimum_credits)
+            if requirement_minimum_credits is not None
+            else None
+        ),
+        "subset_maxima": subset_maxima,
+        "candidate_only": True,
+        "eligible_pool_ids": (pool_id,),
+        "overflow_routes": tuple(overflow_routes),
+        "selection_rule": selection_rule,
+        "identity_fields": _POOL_IDENTITY_FIELDS,
+        "allow_user_claimed_department": False,
+        "allowed_components": ("lecture", "lab"),
+        "evidence_state": evidence_state,
+        "verification_status": evidence_state,
+        "coverage_state": coverage_state,
+        "automation_sufficiency": "COMPLETE" if coverage_state == COMPLETE and evidence_state == VERIFIED else "PARTIAL",
+        "manual_reason": manual_reason,
+        "source_reference": pool_source["source_reference"],
+        "source_url": pool_source["source_url"],
+        "source_file": pool_source["source_file"],
+        "research_file": pool_source["research_file"],
+        "pdf_page": pool_source["pdf_page"],
+        "printed_page": pool_source["printed_page"],
+        "pages": pool_source["pages"],
+        "table_location": pool_source["table_location"],
+        "original_clause": pool_source["original_clause"] or f"{label}課程池。",
+        "policy": policy_data,
+        "policy_id": policy_id,
+        "policy_revision": policy_revision,
+        "applies_to": deepcopy(applies_to),
+        "predicate": deepcopy(predicate),
+        "policy_evidence_state": policy_evidence_state,
+        "policy_coverage_state": policy_coverage_state,
+        "policy_automatic_decision": bool(policy_automatic_decision),
+        "policy_source": policy_source,
+        "candidate_courses": course_entries,
+        "courses": course_entries,
+    }
 
 # ``minor`` is a distinct target role.  It deliberately does not reuse the
 # double-major catalogue or its shared-credit semantics.  These are the only
@@ -158,7 +535,15 @@ def _table_cell_clause(name: str, credits: int | float) -> str:
 
 
 def _minor_source(year: str, program: str, track: str | None) -> dict[str, Any]:
-    pdf_page, printed_page, section = _MINOR_SOURCE_PAGES[(year, program, track)]
+    try:
+        pdf_page, printed_page, section = _MINOR_SOURCE_PAGES[(year, program, track)]
+    except KeyError:
+        # Earth secondary tables are department-scoped even when the
+        # historical double-major id keeps the selected Earth track.  Use
+        # only the same cohort/program department source in that case.
+        if program != "earth":
+            raise
+        pdf_page, printed_page, section = _MINOR_SOURCE_PAGES[(year, program, None)]
     course_pdf_page = pdf_page
     if program == "earth":
         course_pdf_page = {"111": 32, "112": 32, "113": 38, "114": 40, "115": 48}[year]
@@ -247,7 +632,15 @@ def _minor_row(
     coverage_state: str = COMPLETE,
     original_clause: str = "",
     manual_reason: str = "",
+    pool_ids: tuple[str, ...] = (),
+    eligible_pool_ids: tuple[str, ...] = (),
+    overflow_routes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    if requirement_type == "credit_quota":
+        # A quota describes an amount consumed from a candidate pool.  Its
+        # candidates may be lectures or labs, so the row itself must not be
+        # mistaken for either course component.
+        component = "quota"
     source = _minor_source(year, program, track)
     row_pdf_page = source.get("course_pdf_page", source["pdf_page"])
     row_printed_page = source.get("course_printed_page", source["printed_page"])
@@ -256,6 +649,28 @@ def _minor_row(
     row_id = f"minor.{year}.{program}.{track or 'department'}.{slug}"
     source_reference = f"{source['source_reference']}:row:{slug}"
     names = eligible_names if eligible_names is not None else (name,)
+    # Keep fixed named rows and explicit choice/quota rows in different
+    # pools.  A named row's pool is identity evidence for that exact row; it
+    # is never an eligibility route for a separate credit quota.  Choice
+    # groups also get independent pools so (for example) a software choice
+    # cannot consume the same candidate as the remaining elective quota.
+    default_pool_id = _pool_id("minor", year, program, track, "required")
+    if requirement_type in {"choice", "course_pool", "credit_quota"}:
+        if requirement_type == "choice":
+            pool_bucket = f"choice_{choice_group or slug}"
+        elif requirement_type == "course_pool":
+            pool_bucket = "elective"
+        else:
+            pool_bucket = "quota"
+        default_pool_id = _pool_id("minor", year, program, track, pool_bucket)
+        resolved_pool_ids = tuple(pool_ids)
+        resolved_eligible_pool_ids = tuple(eligible_pool_ids) or (default_pool_id,)
+    elif requirement_type in {"missing_named_course", "conflict_candidate"}:
+        resolved_pool_ids = tuple(pool_ids)
+        resolved_eligible_pool_ids = tuple(eligible_pool_ids)
+    else:
+        resolved_pool_ids = tuple(pool_ids) or (default_pool_id,)
+        resolved_eligible_pool_ids = tuple(eligible_pool_ids)
     automatic = evidence_state == VERIFIED and coverage_state == COMPLETE and not manual_reason
     result = {
         "id": row_id,
@@ -275,6 +690,16 @@ def _minor_row(
             for option_name, option_credits in (eligible_options or ())
         ),
         "accept_any": accept_any,
+        # ``pool_ids`` identify where this exact named course may be counted;
+        # ``eligible_pool_ids`` belong only to an explicit choice/quota row.
+        "pool_ids": resolved_pool_ids,
+        "eligible_pool_ids": resolved_eligible_pool_ids,
+        "overflow_routes": tuple(overflow_routes),
+        "candidate_only": False,
+        "pool_requirement": requirement_type in {"choice", "course_pool", "credit_quota"},
+        "required_credits": float(credits)
+        if requirement_type in {"choice", "course_pool", "credit_quota"}
+        else None,
         "waiver": waiver,
         "waiver_generates_credits": False,
         "component": component,
@@ -341,6 +766,1083 @@ def _minor_row(
     }
     return result
 
+
+def _secondary_catalog(
+    cohort: str,
+    program: str,
+    role: str,
+    track: str | None = None,
+) -> dict[str, Any]:
+    """Return the year-scoped secondary catalogue contract.
+
+    Secondary tables are kept under their owning handbook section in
+    ``rules_config.json``.  This accessor deliberately fails closed when a
+    section is absent; it must never borrow a neighbouring cohort's rows.
+    """
+
+    section_key = {
+        "earth": "earth_life_major",
+        "apc": "apc_rules",
+        "cs": "cs_rules",
+        "math": "math_rules",
+    }[program]
+    handbook = _RULES.get("handbooks", {}).get(str(cohort), {})
+    section = handbook.get(section_key, {}) if isinstance(handbook, Mapping) else {}
+    catalog = section.get("secondary_catalog", {}) if isinstance(section, Mapping) else {}
+    if program == "apc":
+        if track:
+            catalog = catalog.get(str(track), {}) if isinstance(catalog, Mapping) else {}
+        source = catalog.get("source", {}) if isinstance(catalog, Mapping) else {}
+        selected = catalog.get(str(role), {}) if isinstance(catalog, Mapping) else {}
+    else:
+        catalog = catalog if isinstance(catalog, Mapping) else {}
+        source = catalog.get("source", {}) if isinstance(catalog, Mapping) else {}
+        selected = catalog.get(str(role), {}) if isinstance(catalog, Mapping) else {}
+    if not isinstance(selected, Mapping):
+        return {}
+    result = deepcopy(dict(selected))
+    if isinstance(source, Mapping):
+        result.setdefault("source", deepcopy(dict(source)))
+        for key, value in source.items():
+            result.setdefault(key, deepcopy(value))
+    return result
+
+
+def _secondary_source(
+    cohort: str,
+    program: str,
+    track: str | None,
+    role: str,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build one source contract for a secondary table and its pool."""
+
+    source = contract.get("source", {}) if isinstance(contract, Mapping) else {}
+    source = deepcopy(dict(source)) if isinstance(source, Mapping) else {}
+    try:
+        fallback = _minor_source(cohort, program, track)
+    except KeyError:
+        # Earth double-major targets are exposed through the historical
+        # ``earth_environment`` target id, while the secondary source table
+        # is department-scoped.  Fall back only to the same cohort/program;
+        # never borrow a neighbouring cohort or a different programme.
+        fallback = _minor_source(cohort, program, None)
+    for key, fallback_key in (
+        ("source_file", "source_file"),
+        ("source_url", "source_url"),
+        ("research_file", "research_file"),
+        ("pdf_page", "pdf_page"),
+        ("printed_page", "printed_page"),
+        ("pages", "pages"),
+        ("table_location", "section"),
+        ("source_reference", "source_reference"),
+    ):
+        if source.get(key) in (None, ""):
+            source[key] = fallback.get(fallback_key, "")
+    source.setdefault("source_type", "official_handbook")
+    source.setdefault("curriculum_version", cohort)
+    source.setdefault("program_slug", program)
+    source.setdefault("track_slug", track or "department")
+    source.setdefault("original_clause", "")
+    source.setdefault("source_pdf_sha256", contract.get("source_pdf_sha256", ""))
+    source.setdefault("source_catalog_file", contract.get("source_catalog_file", ""))
+    source["role"] = role
+    source["source_type"] = "official_handbook"
+    # Keep the aliases consumed by older source/export code in sync.
+    source["url"] = source.get("source_url", "")
+    source["file"] = source.get("source_file", "")
+    return source
+
+
+def _secondary_item_source(
+    source: Mapping[str, Any],
+    item: Mapping[str, Any],
+    *,
+    name: str,
+    credits: int | float,
+) -> dict[str, Any]:
+    """Overlay an exact source-table row on a secondary source contract."""
+
+    result = deepcopy(dict(source))
+    for key in (
+        "source_reference",
+        "pdf_page",
+        "printed_page",
+        "pages",
+        "table_location",
+        "original_clause",
+        "source_pdf_sha256",
+        "source_catalog_file",
+    ):
+        if item.get(key) not in (None, ""):
+            result[key] = deepcopy(item[key])
+    if item.get("source_table") not in (None, ""):
+        result["table_location"] = deepcopy(item["source_table"])
+    result["source_reference"] = str(
+        result.get("source_reference")
+        or f"{source.get('source_reference', 'handbook')}:row:{_pool_token(name)}"
+    )
+    result["original_clause"] = str(
+        result.get("original_clause")
+        or item.get("original_clause")
+        or f"{name} {float(credits):g} 學分；列於官方次修課程表。"
+    )
+    result["url"] = result.get("source_url", "")
+    result["file"] = result.get("source_file", "")
+    return result
+
+
+def _apply_secondary_item(
+    row: dict[str, Any],
+    item: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    role: str,
+    program: str,
+    cohort: str,
+    track: str | None,
+    candidate_names: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Attach source-row, membership and composite-catalog metadata to a row."""
+
+    name = str(item.get("name") or row.get("name") or "").strip()
+    credits = float(item.get("credits", row.get("credits", 0)) or 0)
+    row_source = _secondary_item_source(source, item, name=name, credits=credits)
+    row_reference = row_source["source_reference"]
+    slug = _pool_token(name)
+    membership_ids = item.get("membership_ids", ())
+    if isinstance(membership_ids, str):
+        membership_ids = (membership_ids,)
+    elif not isinstance(membership_ids, Sequence):
+        membership_ids = ()
+    membership_ids = tuple(str(value) for value in membership_ids if str(value).strip())
+    if program == "math":
+        # Core resolves Math secondary rows through the stable, normalized
+        # course key; the eligibility membership is the non-consuming union
+        # observed by the total gate.  Keep source row keys separately.
+        membership_ids = (
+            f"math-secondary:{cohort}:{_pool_token(name)}",
+            f"math-secondary:{cohort}:eligible-target-credit",
+        )
+    if not membership_ids:
+        membership_ids = (f"{program}-secondary:{cohort}:{role}:{slug}",)
+    item_metadata = {
+        key: deepcopy(value)
+        for key, value in item.items()
+        if key not in {"name", "credits", "options"}
+    }
+    item_metadata.setdefault("membership_ids", membership_ids)
+    item_metadata.setdefault("membership_source_reference", row_reference)
+    if item.get("membership_assertions") is not None:
+        item_metadata["membership_assertions"] = deepcopy(item["membership_assertions"])
+    if item.get("pool_membership_evidence") is not None:
+        item_metadata["pool_membership_evidence"] = deepcopy(item["pool_membership_evidence"])
+    item_metadata.setdefault("observed_requirement_ids", (row.get("requirement_id") or row.get("id"),))
+    row["source_reference"] = row_reference
+    row["source_url"] = row_source.get("source_url", "")
+    row["source_file"] = row_source.get("source_file", "")
+    row["research_file"] = row_source.get("research_file", "")
+    row["pdf_page"] = row_source.get("pdf_page", "未標示")
+    row["printed_page"] = row_source.get("printed_page", "未標示")
+    row["page"] = row["pdf_page"]
+    row["pages"] = row_source.get("pages", "未標示")
+    row["table_location"] = row_source.get("table_location", "官方次修課程表")
+    row["original_clause"] = row_source.get("original_clause", "")
+    row["original_text"] = row["original_clause"]
+    row["source_pdf_sha256"] = row_source.get("source_pdf_sha256", "")
+    row["source_catalog_file"] = row_source.get("source_catalog_file", "")
+    row["source"] = {
+        **deepcopy(dict(row.get("source") or {})),
+        **row_source,
+        "source_reference": row_reference,
+        "raw_title": name,
+    }
+    provenance = dict(row.get("provenance") or {})
+    provenance.update(
+        {
+            "source_type": "official_handbook",
+            "source_reference": row_reference,
+            "source_pdf_sha256": row_source.get("source_pdf_sha256", ""),
+            "source_catalog_file": row_source.get("source_catalog_file", ""),
+            "raw_title": name,
+            "original_clause": row["original_clause"],
+            "membership_ids": membership_ids,
+            "membership_source_reference": row_reference,
+            "evidence_state": row.get("evidence_state", VERIFIED),
+            "verification_status": row.get("verification_status", VERIFIED),
+            "coverage_state": row.get("coverage_state", COMPLETE),
+        }
+    )
+    for key in (
+        "source_row",
+        "source_table",
+        "source_track",
+        "source_track_slug",
+        "source_category",
+        "original_course_name",
+        "revision_evidence",
+        "membership_assertions",
+        "pool_membership_evidence",
+        "observed_requirement_ids",
+        "requires_server_owned_offering",
+        "math_secondary_composite_required",
+        "secondary_course_key",
+    ):
+        if key in item_metadata:
+            row[key] = deepcopy(item_metadata[key])
+            provenance[key] = deepcopy(item_metadata[key])
+    row["membership_ids"] = membership_ids
+    row["membership_source_reference"] = row_reference
+    row["provenance"] = provenance
+    # Candidate pools are projected from the requirement rows.  Preserve
+    # per-course metadata here so an Earth union or Math composite candidate
+    # cannot lose its source track or official-membership contract.
+    names = tuple(dict.fromkeys(str(value) for value in candidate_names if str(value).strip()))
+    if not names:
+        options = item.get("options", ())
+        if isinstance(options, Mapping):
+            names = tuple(str(value) for value in options if str(value).strip())
+        elif isinstance(options, Sequence) and not isinstance(options, (str, bytes, bytearray)):
+            names = tuple(
+                str(option.get("name"))
+                for option in options
+                if isinstance(option, Mapping) and option.get("name")
+            )
+        if not names and row.get("requirement_type") in {"course_pool", "credit_quota"}:
+            names = tuple(str(value) for value in row.get("eligible_course_names", ()) if str(value).strip())
+    candidate_metadata: dict[str, dict[str, Any]] = {}
+    for candidate_name in names:
+        candidate_metadata[candidate_name] = deepcopy(item_metadata)
+        candidate_metadata[candidate_name]["membership_ids"] = membership_ids
+        candidate_metadata[candidate_name]["membership_source_reference"] = row_reference
+    if candidate_metadata:
+        row["candidate_metadata"] = candidate_metadata
+    return row
+
+
+def _secondary_target_row(
+    cohort: str,
+    program: str,
+    track: str | None,
+    item: Mapping[str, Any],
+    *,
+    role: str = "double_major",
+    bucket: str,
+    pool_ids: tuple[str, ...] = (),
+    eligible_pool_ids: tuple[str, ...] = (),
+    requirement_type: str = "named_course",
+    choice_group: str | None = None,
+    choice_rule: str = "exact_course_or_approved_equivalency",
+    candidate_names: Sequence[str] = (),
+    candidate_options: Sequence[tuple[str, int | float]] = (),
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a target named/quota row without reusing a primary requirement ID."""
+
+    name = str(item.get("name") or "").strip()
+    credits = float(item.get("credits", 0) or 0)
+    slug = str(item.get("slug") or _pool_token(name))
+    row = _minor_row(
+        cohort,
+        program,
+        track,
+        slug,
+        name,
+        credits,
+        component=str(item.get("component") or ("lab" if "實驗" in name else "lecture")),
+        eligible_names=tuple(candidate_names) if candidate_names else ((name,) if requirement_type == "named_course" else ()),
+        eligible_options=tuple(candidate_options) if candidate_options else None,
+        requirement_type=requirement_type,
+        choice_group=choice_group,
+        choice_rule=choice_rule,
+        pool_ids=pool_ids,
+        eligible_pool_ids=eligible_pool_ids,
+        coverage_state=COMPLETE,
+        evidence_state=VERIFIED,
+        original_clause=str(item.get("original_clause") or f"{name} {credits:g} 學分。"),
+    )
+    target_track = track or "department"
+    row_id = f"{program}.dm.{cohort}.{target_track}.{slug}"
+    row.update(
+        {
+            "id": row_id,
+            "requirement_id": row_id,
+            "source_assertion_id": row_id,
+            "assertion_id": row_id,
+            "kind": "course" if requirement_type == "named_course" else "quota" if requirement_type == "credit_quota" else "choice",
+            "bucket": bucket,
+            "track_slug": target_track,
+            "track": track,
+            "program_slug": program,
+            "cohort": cohort,
+            "curriculum_version": cohort,
+            "pool_requirement": requirement_type in {"choice", "course_pool", "credit_quota"},
+            "required_credits": credits if requirement_type in {"choice", "course_pool", "credit_quota"} else None,
+            "official_course_identity": f"{cohort}:{program}:{target_track}:{slug}",
+            "manual_reason": "",
+            "manual_review_reason": "",
+            "automation_sufficiency": "COMPLETE",
+            "automatic_decision": True,
+            "verification_status": VERIFIED,
+            "coverage_state": COMPLETE,
+        }
+    )
+    if isinstance(row.get("provenance"), dict):
+        row["provenance"]["assertion_id"] = row_id
+    return _apply_secondary_item(
+        row,
+        item,
+        source,
+        role=role,
+        program=program,
+        cohort=cohort,
+        track=track,
+        candidate_names=candidate_names or ((name,) if requirement_type == "named_course" else ()),
+    )
+
+
+def _secondary_items(contract: Mapping[str, Any], key: str) -> tuple[dict[str, Any], ...]:
+    """Return source rows from one role without coercing aggregate values."""
+
+    values = contract.get(key, ()) if isinstance(contract, Mapping) else ()
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return ()
+    return tuple(
+        deepcopy(dict(item))
+        for item in values
+        if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+    )
+
+
+def _secondary_item_pairs(items: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, float], ...]:
+    """Build stable name/credit options while retaining the first source row."""
+
+    pairs: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        try:
+            credits = float(item.get("credits", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if credits <= 0:
+            continue
+        seen.add(name)
+        pairs.append((name, credits))
+    return tuple(pairs)
+
+
+def _secondary_candidate_metadata(
+    cohort: str,
+    program: str,
+    role: str,
+    track: str | None,
+    source: Mapping[str, Any],
+    items: Sequence[Mapping[str, Any]],
+    *,
+    membership_id: str | None = None,
+    membership_assertion: str | None = None,
+    source_category: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Normalize per-candidate metadata for a source-backed secondary pool."""
+
+    result: dict[str, dict[str, Any]] = {}
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        metadata = deepcopy(dict(item))
+        row_source = _secondary_item_source(
+            source,
+            item,
+            name=name,
+            credits=float(item.get("credits", 0) or 0),
+        )
+        metadata.setdefault("source_reference", row_source["source_reference"])
+        metadata.setdefault("source_pdf_sha256", row_source.get("source_pdf_sha256", ""))
+        metadata.setdefault("source_catalog_file", row_source.get("source_catalog_file", ""))
+        metadata.setdefault("membership_source_reference", row_source["source_reference"])
+        if membership_id:
+            metadata.setdefault("membership_ids", (membership_id,))
+        elif not metadata.get("membership_ids"):
+            metadata["membership_ids"] = (
+                f"{program}-secondary:{cohort}:{role}:{_pool_token(name)}",
+            )
+        if program == "math":
+            metadata["membership_ids"] = (
+                f"math-secondary:{cohort}:{_pool_token(name)}",
+                f"math-secondary:{cohort}:eligible-target-credit",
+            )
+        if membership_assertion:
+            metadata.setdefault("membership_assertions", (membership_assertion,))
+        if source_category:
+            metadata.setdefault("source_category", source_category)
+        metadata.setdefault("source_program_slug", program)
+        metadata.setdefault("source_track_slug", track or "department")
+        metadata.setdefault("observed_requirement_ids", ())
+        result[name] = metadata
+    return result
+
+
+def _secondary_pool_row(
+    row: dict[str, Any],
+    items: Sequence[Mapping[str, Any]],
+    *,
+    cohort: str,
+    program: str,
+    role: str,
+    track: str | None,
+    source: Mapping[str, Any],
+    membership_id: str | None = None,
+    membership_assertion: str | None = None,
+    source_category: str | None = None,
+) -> dict[str, Any]:
+    """Attach exact source candidates to an already-built quota/choice row."""
+
+    pairs = _secondary_item_pairs(items)
+    row["eligible_course_names"] = tuple(name for name, _credits in pairs)
+    row["eligible_course_options"] = tuple(
+        {"name": name, "credits": credits} for name, credits in pairs
+    )
+    row["candidate_metadata"] = _secondary_candidate_metadata(
+        cohort,
+        program,
+        role,
+        track,
+        source,
+        items,
+        membership_id=membership_id,
+        membership_assertion=membership_assertion,
+        source_category=source_category,
+    )
+    row["candidate_only"] = False
+    row["pool_requirement"] = True
+    row["coverage_state"] = COMPLETE
+    row["evidence_state"] = VERIFIED
+    row["verification_status"] = VERIFIED
+    row["automation_sufficiency"] = "COMPLETE"
+    row["automatic_decision"] = True
+    row["manual_reason"] = ""
+    row["manual_review_reason"] = ""
+    return row
+
+
+def _secondary_aggregate_item(
+    name: str,
+    credits: int | float,
+    *,
+    source_reference: str,
+    original_clause: str,
+    source_table: str,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "credits": float(credits),
+        "component": "quota",
+        "source_reference": source_reference,
+        "original_clause": original_clause,
+        "source_table": source_table,
+    }
+
+
+def _math_secondary_catalog_rows(
+    cohort: str,
+    role: str,
+    track: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build Math secondary rows from the exact year-scoped source contract."""
+
+    contract = _secondary_catalog(cohort, "math", role)
+    source = _secondary_source(cohort, "math", None, role, contract)
+    rows: list[dict[str, Any]] = []
+    required_items = _secondary_items(contract, "required")
+    for item in required_items:
+        name = str(item["name"])
+        credits = float(item.get("credits", 0) or 0)
+        if role == "double_major":
+            row = _secondary_target_row(
+                cohort,
+                "math",
+                None,
+                item,
+                bucket="required",
+                pool_ids=(_pool_id("double_major_target", cohort, "math", None, "required"),),
+                requirement_type="named_course",
+                source=source,
+            )
+        else:
+            row = _minor_row(
+                cohort,
+                "math",
+                None,
+                str(item.get("slug") or _pool_token(name)),
+                name,
+                credits,
+                requirement_type="named_course",
+                waiver=bool(item.get("waiver_allowed", False)),
+                coverage_state=COMPLETE,
+                original_clause=str(item.get("original_clause") or f"{name} {credits:g} 學分。"),
+            )
+            _apply_secondary_item(
+                row,
+                item,
+                source,
+                role=role,
+                program="math",
+                cohort=cohort,
+                track=None,
+                candidate_names=(name,),
+            )
+        rows.append(row)
+
+    elective_items = _secondary_items(contract, "electives")
+    software = contract.get("software_choice", {})
+    software_names = {
+        str(value).strip()
+        for value in (software.get("members", ()) if isinstance(software, Mapping) else ())
+        if str(value).strip()
+    }
+    min_key = "elective_minimum"
+    max_key = "elective_maximum"
+    elective_minimum = float(contract.get(min_key, 0) or 0)
+    elective_maximum = float(contract.get(max_key, 0) or 0)
+    if role == "double_major":
+        pool_id = _pool_id("double_major_target", cohort, "math", None, "elective")
+        aggregate_item = _secondary_aggregate_item(
+            "數學表列選修",
+            elective_minimum,
+            source_reference=f"{source.get('source_reference', 'handbook')}:row:elective_pool",
+            original_clause=f"表列選修至少 {elective_minimum:g} 學分，最多 {elective_maximum:g} 學分。",
+            source_table="double_major_elective",
+        )
+        row = _secondary_target_row(
+            cohort,
+            "math",
+            None,
+            aggregate_item,
+            bucket="elective",
+            eligible_pool_ids=(pool_id,),
+            requirement_type="credit_quota",
+            choice_rule="official_math_secondary_elective_pool",
+            candidate_names=tuple(name for name, _credits in _secondary_item_pairs(elective_items)),
+            candidate_options=_secondary_item_pairs(elective_items),
+            source=source,
+        )
+    else:
+        pool_id = _pool_id("minor_target", cohort, "math", None, "elective")
+        aggregate_item = _secondary_aggregate_item(
+            "數學表列選修",
+            elective_minimum,
+            source_reference=f"{source.get('source_reference', 'handbook')}:row:elective_pool",
+            original_clause=f"表列選修至少 {elective_minimum:g} 學分，最多 {elective_maximum:g} 學分。",
+            source_table="minor_elective",
+        )
+        row = _minor_row(
+            cohort,
+            "math",
+            None,
+            "elective_pool",
+            "數學表列選修",
+            elective_minimum,
+            requirement_type="credit_quota",
+            eligible_pool_ids=(pool_id,),
+            choice_rule="official_math_secondary_elective_pool",
+            eligible_names=tuple(name for name, _credits in _secondary_item_pairs(elective_items)),
+            eligible_options=_secondary_item_pairs(elective_items),
+            coverage_state=COMPLETE,
+            original_clause=aggregate_item["original_clause"],
+        )
+        _apply_secondary_item(
+            row,
+            aggregate_item,
+            source,
+            role=role,
+            program="math",
+            cohort=cohort,
+            track=None,
+            candidate_names=tuple(name for name, _credits in _secondary_item_pairs(elective_items)),
+        )
+    # Required rows consume their own named pool; the elective quota is the
+    # sole credit consumer for the elective candidate set.  Software choices
+    # remain metadata on the same pool, so they cannot double-consume credits.
+    row["required_credits"] = float(row.get("credits", 0) or 0)
+    row["requirement_minimum_credits"] = elective_minimum
+    row["max_credits"] = elective_maximum
+    row["subset_maxima"] = {
+        "math_software": {
+            "max_courses": int(software.get("max_courses", 1)) if isinstance(software, Mapping) else 1,
+            "max_credits": float(software.get("max_credits", 3) or 3) if isinstance(software, Mapping) else 3.0,
+            "members": tuple(sorted(software_names)),
+        }
+    }
+    row["choice_group"] = "math_secondary_elective"
+    row["choice_rule"] = "official_math_secondary_elective_pool; software_choice_max_3"
+    # The software courses are part of the same official elective pool.  The
+    # one-course/three-credit software limit is a subset constraint on this
+    # pool; dropping those rows here would make the documented choice
+    # impossible and would silently shrink the candidate catalogue.
+    all_candidate_items = elective_items
+    _secondary_pool_row(
+        row,
+        all_candidate_items,
+        cohort=cohort,
+        program="math",
+        role=role,
+        track=None,
+        source=source,
+        source_category="math_secondary_elective",
+    )
+
+    # Keep the two source-backed subset observations on this one elective
+    # quota.  They observe already allocated EXCLUSIVE portions and never
+    # create another credit consumer.  The service adapter may canonicalize
+    # the raw requirement IDs; retain the registry IDs here so the evidence
+    # remains auditable at the source boundary.
+    elective_requirement_id = str(row.get("requirement_id") or row.get("id"))
+    observed_requirement_ids = tuple(
+        str(item.get("requirement_id") or item.get("id"))
+        for item in (*rows, row)
+        if str(item.get("requirement_id") or item.get("id"))
+    )
+    source_reference = str(source.get("source_reference") or f"handbook:{cohort}:math:secondary")
+    software_membership_id = f"math-secondary:{cohort}:software"
+    total_minimum = 20.0 if role == "minor" else 40.0
+    row["subset_constraints"] = (
+        {
+            "constraint_id": f"math-secondary:{cohort}:{role}:software-max",
+            "membership_id": software_membership_id,
+            "amount_semantics": "MAXIMUM",
+            "maximum_credits": float(
+                software.get("max_credits", 3) if isinstance(software, Mapping) else 3
+            ),
+            "maximum_course_count": int(
+                software.get("max_courses", 1) if isinstance(software, Mapping) else 1
+            ),
+            "observed_requirement_ids": (elective_requirement_id,),
+            "source_reference": f"{source_reference}:row:software_choice",
+        },
+        {
+            "constraint_id": f"math-secondary:{cohort}:{role}:total",
+            "membership_id": f"math-secondary:{cohort}:eligible-target-credit",
+            "amount_semantics": "MINIMUM",
+            "minimum_credits": total_minimum,
+            "observed_requirement_ids": observed_requirement_ids,
+            "source_reference": f"{source_reference}:row:total{int(total_minimum)}",
+        },
+    )
+
+    # The printed secondary table establishes the software subset, while the
+    # official offering evidence establishes each candidate's target credit
+    # membership.  Record an explicit positive/negative assertion for every
+    # observed candidate so two software courses cannot be treated as one
+    # course, and an ordinary elective cannot silently count toward the cap.
+    candidate_metadata = row.get("candidate_metadata")
+    if isinstance(candidate_metadata, Mapping):
+        for candidate_name, metadata in candidate_metadata.items():
+            if not isinstance(metadata, dict):
+                continue
+            candidate_source = str(metadata.get("source_reference") or source_reference)
+            is_software = str(candidate_name) in software_names
+            software_assertion = {
+                "membership_id": software_membership_id,
+                "state": VERIFIED if is_software else "NOT_MEMBER",
+                "kind": "official_handbook_membership" if is_software else "registry_negative",
+                "source_reference": f"{candidate_source}:software_subset",
+                "observed_requirement_ids": (elective_requirement_id,),
+            }
+            prior_assertions = metadata.get("membership_assertions", ())
+            if isinstance(prior_assertions, (str, bytes, bytearray)):
+                prior_assertions = (prior_assertions,)
+            elif not isinstance(prior_assertions, Sequence):
+                prior_assertions = ()
+            metadata["membership_assertions"] = tuple(
+                (*prior_assertions, software_assertion)
+            )
+            if is_software:
+                prior_membership_ids = metadata.get("membership_ids", ())
+                if isinstance(prior_membership_ids, (str, bytes, bytearray)):
+                    prior_membership_ids = (prior_membership_ids,)
+                elif not isinstance(prior_membership_ids, Sequence):
+                    prior_membership_ids = ()
+                metadata["membership_ids"] = tuple(
+                    dict.fromkeys((*prior_membership_ids, software_membership_id))
+                )
+            prior_evidence = metadata.get("pool_membership_evidence", ())
+            if isinstance(prior_evidence, (str, bytes, bytearray)) or not isinstance(
+                prior_evidence, Sequence
+            ):
+                prior_evidence = ()
+            metadata["pool_membership_evidence"] = tuple(
+                (*prior_evidence, {
+                    "membership_id": software_membership_id,
+                    "state": VERIFIED if is_software else "NOT_MEMBER",
+                    "kind": "official_handbook_membership" if is_software else "registry_negative",
+                    "source_reference": f"{candidate_source}:software_subset",
+                })
+            )
+    rows.append(row)
+    return rows
+
+
+def _earth_secondary_catalog_rows(
+    cohort: str,
+    role: str,
+    track: str | None = None,
+) -> list[dict[str, Any]]:
+    contract = _secondary_catalog(cohort, "earth", role)
+    source = _secondary_source(cohort, "earth", None, role, contract)
+    rows: list[dict[str, Any]] = []
+    base_items = _secondary_items(contract, "required" if role == "minor" else "base")
+    for index, item in enumerate(base_items):
+        name = str(item["name"])
+        credits = float(item.get("credits", 0) or 0)
+        requirement_type = str(item.get("requirement_type") or "named_course")
+        raw_options = item.get("options", ())
+        option_pairs = tuple(
+            (str(option.get("name")), float(option.get("credits", credits) or credits))
+            for option in raw_options
+            if isinstance(option, Mapping) and str(option.get("name") or "").strip()
+        ) if isinstance(raw_options, Sequence) and not isinstance(raw_options, (str, bytes, bytearray)) else ()
+        eligible_names = tuple(option_name for option_name, _option_credits in option_pairs) or (name,)
+        if role == "minor":
+            row = _minor_row(
+                cohort,
+                "earth",
+                None,
+                str(item.get("slug") or f"common_{index}"),
+                name,
+                credits,
+                component=str(item.get("component") or ("lab" if "實驗" in name else "lecture")),
+                eligible_names=eligible_names,
+                eligible_options=option_pairs or None,
+                requirement_type=requirement_type,
+                choice_group=str(item.get("choice_group") or "") or None,
+                choice_rule=str(item.get("choice_rule") or "擇一"),
+                coverage_state=COMPLETE,
+                original_clause=str(item.get("original_clause") or f"{name} {credits:g} 學分。"),
+            )
+            _apply_secondary_item(
+                row,
+                item,
+                source,
+                role=role,
+                program="earth",
+                cohort=cohort,
+                track=None,
+                candidate_names=eligible_names,
+            )
+        else:
+            target_pool = _pool_id("double_major_target", cohort, "earth", track, "base")
+            row = _secondary_target_row(
+                cohort,
+                "earth",
+                track,
+                item,
+                bucket="base",
+                pool_ids=(target_pool,) if requirement_type == "named_course" else (),
+                eligible_pool_ids=(target_pool,) if requirement_type != "named_course" else (),
+                requirement_type=requirement_type,
+                choice_group=str(item.get("choice_group") or "") or None,
+                choice_rule=str(item.get("choice_rule") or "擇一"),
+                candidate_names=eligible_names if requirement_type != "named_course" else (),
+                candidate_options=option_pairs,
+                source=source,
+            )
+        rows.append(row)
+    if role == "double_major":
+        elective_items = _secondary_items(contract, "domain_electives")
+        pool_id = _pool_id("double_major_target", cohort, "earth", track, "domain_elective")
+        pairs = _secondary_item_pairs(elective_items)
+        aggregate_item = _secondary_aggregate_item(
+            "兩領域專業選修",
+            float(contract.get("other_minimum", 16) or 16),
+        source_reference=f"{source.get('source_reference', 'handbook')}:row:domain_elective",
+            original_clause="地球環境與生命科學兩領域專業選修合計至少 16 學分。",
+            source_table="earth_environment_and_life_science.domain_elective",
+        )
+        row = _secondary_target_row(
+            cohort,
+            "earth",
+            track,
+            aggregate_item,
+            bucket="domain_elective",
+            eligible_pool_ids=(pool_id,),
+            requirement_type="credit_quota",
+            choice_rule="earth_union_of_both_domain_elective_pools",
+            candidate_names=tuple(name for name, _credits in pairs),
+            candidate_options=pairs,
+            source=source,
+        )
+        row["required_credits"] = float(contract.get("other_minimum", 16) or 16)
+        row["requirement_minimum_credits"] = float(contract.get("other_minimum", 16) or 16)
+        row["secondary_domain_scope"] = "earth_environment_and_life_science"
+        _secondary_pool_row(
+            row,
+            elective_items,
+            cohort=cohort,
+            program="earth",
+            role=role,
+            track=track,
+            source=source,
+            membership_id=f"earth-secondary:{cohort}:domain-elective",
+            source_category="domain_elective",
+        )
+        for name, metadata in row.get("candidate_metadata", {}).items():
+            source_track = str(metadata.get("source_track") or metadata.get("source_track_slug") or "")
+            if source_track:
+                metadata["source_track_slug"] = source_track
+                metadata["membership_ids"] = (
+                    f"earth-secondary:{cohort}:domain-elective",
+                    f"earth-secondary:{cohort}:{source_track}:domain-elective",
+                )
+                metadata["observed_requirement_ids"] = (
+                    f"earth.primary.{cohort}.{source_track}.domain_elective",
+                )
+        rows.append(row)
+    return rows
+
+
+def _cs_secondary_catalog_rows(cohort: str, role: str) -> list[dict[str, Any]]:
+    contract = _secondary_catalog(cohort, "cs", role)
+    source = _secondary_source(cohort, "cs", None, role, contract)
+    rows: list[dict[str, Any]] = []
+    required_items = _secondary_items(contract, "required")
+    for item in required_items:
+        name = str(item["name"])
+        credits = float(item.get("credits", 0) or 0)
+        if role == "minor":
+            row = _minor_row(
+                cohort,
+                "cs",
+                None,
+                str(item.get("slug") or _pool_token(name)),
+                name,
+                credits,
+                coverage_state=COMPLETE,
+                original_clause=str(item.get("original_clause") or f"{name} {credits:g} 學分。"),
+            )
+            _apply_secondary_item(
+                row,
+                item,
+                source,
+                role=role,
+                program="cs",
+                cohort=cohort,
+                track=None,
+                candidate_names=(name,),
+            )
+        else:
+            row = _secondary_target_row(
+                cohort,
+                "cs",
+                None,
+                item,
+                bucket="required",
+                pool_ids=(_pool_id("double_major_target", cohort, "cs", None, "required_named"),),
+                source=source,
+            )
+        rows.append(row)
+    other_items = _secondary_items(contract, "other")
+    other_minimum = float(contract.get("other_minimum", 0) or 0)
+    row_name = "資科系其他開設課程" if role == "minor" else "資科雙主修其他開設課程"
+    aggregate_item = _secondary_aggregate_item(
+        row_name,
+        other_minimum,
+        source_reference=f"{source.get('source_reference', 'handbook')}:row:other",
+        original_clause=f"官方資科系其他開設課程至少 {other_minimum:g} 學分。",
+        source_table="department_courses",
+    )
+    if role == "minor":
+        pool_id = _pool_id("minor_target", cohort, "cs", None, "quota")
+        row = _minor_row(
+            cohort,
+            "cs",
+            None,
+            "other_cs_offerings",
+            row_name,
+            other_minimum,
+            requirement_type="credit_quota",
+            eligible_pool_ids=(pool_id,),
+            choice_rule="server_owned_official_cs_offering_without_named_overlap",
+            coverage_state=COMPLETE,
+            original_clause=aggregate_item["original_clause"],
+        )
+        _apply_secondary_item(
+            row,
+            aggregate_item,
+            source,
+            role=role,
+            program="cs",
+            cohort=cohort,
+            track=None,
+            candidate_names=tuple(name for name, _credits in _secondary_item_pairs(other_items)),
+        )
+    else:
+        pool_id = _pool_id("double_major_target", cohort, "cs", None, "other_required")
+        row = _secondary_target_row(
+            cohort,
+            "cs",
+            None,
+            aggregate_item,
+            bucket="other_required",
+            eligible_pool_ids=(pool_id,),
+            requirement_type="credit_quota",
+            choice_rule="server_owned_official_cs_offering_without_named_overlap",
+            candidate_names=tuple(name for name, _credits in _secondary_item_pairs(other_items)),
+            candidate_options=_secondary_item_pairs(other_items),
+            source=source,
+        )
+    row["required_credits"] = other_minimum
+    row["requirement_minimum_credits"] = other_minimum
+    row["requires_server_owned_offering"] = True
+    _secondary_pool_row(
+        row,
+        other_items,
+        cohort=cohort,
+        program="cs",
+        role=role,
+        track=None,
+        source=source,
+        membership_id=f"cs-secondary:{cohort}:other",
+        membership_assertion=f"cs.secondary.{cohort}.official_department_offering",
+        source_category="department_courses",
+    )
+    row["requires_server_owned_offering"] = True
+    rows.append(row)
+    return rows
+
+
+def _apc_secondary_catalog_rows(cohort: str, track: str, role: str) -> list[dict[str, Any]]:
+    contract = _secondary_catalog(cohort, "apc", role, track)
+    # The APC accessor is track-aware in the config; _secondary_catalog has
+    # already selected the role but the source remains the exact track page.
+    source = _secondary_source(cohort, "apc", track, role, contract)
+    rows: list[dict[str, Any]] = []
+    base_items = _secondary_items(contract, "base")
+    base_pool = _pool_id(
+        "minor_target" if role == "minor" else "double_major_target",
+        cohort,
+        "apc",
+        track,
+        "base",
+    )
+    for index, item in enumerate(base_items):
+        name = str(item["name"])
+        credits = float(item.get("credits", 0) or 0)
+        if role == "minor":
+            row = _minor_row(
+                cohort,
+                "apc",
+                track,
+                str(item.get("slug") or f"base_{index}"),
+                name,
+                credits,
+                component=str(item.get("component") or ("lab" if "實驗" in name else "lecture")),
+                coverage_state=COMPLETE,
+                original_clause=str(item.get("original_clause") or f"{name} {credits:g} 學分。"),
+            )
+            _apply_secondary_item(
+                row,
+                item,
+                source,
+                role=role,
+                program="apc",
+                cohort=cohort,
+                track=track,
+                candidate_names=(name,),
+            )
+        else:
+            row = _secondary_target_row(
+                cohort,
+                "apc",
+                track,
+                item,
+                bucket="base",
+                pool_ids=(base_pool,),
+                source=source,
+            )
+        rows.append(row)
+    remainder_items = _secondary_items(contract, "remainder")
+    remainder_minimum = float(contract.get("remainder_minimum", 0) or 0)
+    if remainder_minimum > 0:
+        pairs = _secondary_item_pairs(remainder_items)
+        name = "同組主修必修剩餘課程"
+        aggregate_item = _secondary_aggregate_item(
+            name,
+            remainder_minimum,
+            source_reference=f"{source.get('source_reference', 'handbook')}:row:remainder_required",
+            original_clause=f"同組主修必修剩餘課程至少 {remainder_minimum:g} 學分。",
+            source_table="primary_track_compulsory_remainder",
+        )
+        pool_bucket = "remainder_required"
+        pool_id = _pool_id(
+            "minor_target" if role == "minor" else "double_major_target",
+            cohort,
+            "apc",
+            track,
+            pool_bucket,
+        )
+        if role == "minor":
+            row = _minor_row(
+                cohort,
+                "apc",
+                track,
+                "remainder_required",
+                name,
+                remainder_minimum,
+                requirement_type="credit_quota",
+                eligible_pool_ids=(pool_id,),
+                eligible_names=tuple(item_name for item_name, _credits in pairs),
+                eligible_options=pairs,
+                choice_rule="same_track_primary_required_remainder",
+                coverage_state=COMPLETE,
+                original_clause=aggregate_item["original_clause"],
+            )
+            _apply_secondary_item(
+                row,
+                aggregate_item,
+                source,
+                role=role,
+                program="apc",
+                cohort=cohort,
+                track=track,
+                candidate_names=tuple(item_name for item_name, _credits in pairs),
+            )
+        else:
+            row = _secondary_target_row(
+                cohort,
+                "apc",
+                track,
+                aggregate_item,
+                bucket="remainder_required",
+                eligible_pool_ids=(pool_id,),
+                requirement_type="credit_quota",
+                choice_rule="same_track_primary_required_remainder",
+                candidate_names=tuple(item_name for item_name, _credits in pairs),
+                candidate_options=pairs,
+                source=source,
+            )
+        row["required_credits"] = remainder_minimum
+        row["requirement_minimum_credits"] = remainder_minimum
+        row["source_track_slug"] = track
+        _secondary_pool_row(
+            row,
+            remainder_items,
+            cohort=cohort,
+            program="apc",
+            role=role,
+            track=track,
+            source=source,
+            membership_id=f"apc-secondary:{cohort}:{track}:primary-required-remainder",
+            membership_assertion=f"apc.primary.{cohort}.{track}.track_required",
+            source_category="primary_track_compulsory_remainder",
+        )
+        row["source_track_slug"] = track
+        rows.append(row)
+    return rows
+
 # The APC chemistry double-major table is one of the few target tables that
 # can be transcribed safely from the checked-in handbook page images.  Keep
 # this list separate from ``rules_config.json``: that file is an older
@@ -399,6 +1901,46 @@ _APC_CHEMISTRY_DM_ROWS = {
     ),
 }
 _APC_PHYSICS_DM_ROWS = {
+    "111": (
+        ("普通物理學(一)", 3.0, "lecture", "physics_1"),
+        ("普通物理實驗(一)", 1.0, "lab", "physics_lab_1"),
+        ("普通化學(一)", 3.0, "lecture", "chemistry_1"),
+        ("普通化學實驗(一)", 1.0, "lab", "chemistry_lab_1"),
+        ("普通物理學(二)", 3.0, "lecture", "physics_2"),
+        ("普通物理實驗(二)", 1.0, "lab", "physics_lab_2"),
+        ("普通化學(二)", 3.0, "lecture", "chemistry_2"),
+        ("普通化學實驗(二)", 1.0, "lab", "chemistry_lab_2"),
+    ),
+    "112": (
+        ("普通物理學(一)", 3.0, "lecture", "physics_1"),
+        ("普通物理實驗(一)", 1.0, "lab", "physics_lab_1"),
+        ("普通化學(一)", 3.0, "lecture", "chemistry_1"),
+        ("普通化學實驗(一)", 1.0, "lab", "chemistry_lab_1"),
+        ("普通物理學(二)", 3.0, "lecture", "physics_2"),
+        ("普通物理實驗(二)", 1.0, "lab", "physics_lab_2"),
+        ("普通化學(二)", 3.0, "lecture", "chemistry_2"),
+        ("普通化學實驗(二)", 1.0, "lab", "chemistry_lab_2"),
+    ),
+    "113": (
+        ("普通物理學(一)", 3.0, "lecture", "physics_1"),
+        ("普通物理實驗(一)", 1.0, "lab", "physics_lab_1"),
+        ("普通化學(一)", 3.0, "lecture", "chemistry_1"),
+        ("普通化學實驗(一)", 1.0, "lab", "chemistry_lab_1"),
+        ("普通物理學(二)", 3.0, "lecture", "physics_2"),
+        ("普通物理實驗(二)", 1.0, "lab", "physics_lab_2"),
+        ("普通化學(二)", 3.0, "lecture", "chemistry_2"),
+        ("普通化學實驗(二)", 1.0, "lab", "chemistry_lab_2"),
+    ),
+    "114": (
+        ("普通物理學(一)", 3.0, "lecture", "physics_1"),
+        ("普通物理實驗(一)", 1.0, "lab", "physics_lab_1"),
+        ("普通化學(一)", 3.0, "lecture", "chemistry_1"),
+        ("普通化學實驗(一)", 1.0, "lab", "chemistry_lab_1"),
+        ("普通物理學(二)", 3.0, "lecture", "physics_2"),
+        ("普通物理實驗(二)", 1.0, "lab", "physics_lab_2"),
+        ("普通化學(二)", 3.0, "lecture", "chemistry_2"),
+        ("普通化學實驗(二)", 1.0, "lab", "chemistry_lab_2"),
+    ),
     "115": (
         ("普通物理學(一)", 3.0, "lecture", "physics_1"),
         ("普通化學(一)", 3.0, "lecture", "chemistry_1"),
@@ -443,6 +1985,9 @@ _SLUG_ALIASES = {
     "資科": "cs",
     "math": "math",
     "數學": "math",
+    "math_scientific_computing": "math_scientific_computing",
+    "data_science": "data_science",
+    "math_education": "math_education",
 }
 
 
@@ -535,7 +2080,14 @@ def _canonical_id(kind: str, cohort: str, program: str, track: str | None = None
         # Minor scopes are department-level for Earth/CS/Math and track-level
         # only for APC.  ``department`` is part of the stable public ID.
         parts.append(track or "department")
-    elif track and ((program == "earth") or (program == "apc")):
+    elif track and (
+        program in {"earth", "apc"}
+        or (
+            program == "math"
+            and kind == "primary"
+            and track in _MATH_PRIMARY_TRACKS.get(str(cohort), ())
+        )
+    ):
         parts.append(track)
     return ":".join(parts)
 
@@ -584,6 +2136,35 @@ def _apc_target_catalog_assertions(cohort: str, track: str) -> list[dict[str, An
     primary catalogue as the target's course list.
     """
 
+    contract = _secondary_catalog(cohort, "apc", "double_major", track)
+    page = _apc_target_page(cohort, track)
+    track_label = "電子物理組" if track == "physics" else "應用化學組"
+    label = f"{cohort} 學年度物化系{track_label}雙主修表"
+    base_items = _secondary_items(contract, "base")
+    remainder = float(contract.get("other_minimum", 20 if cohort == "115" else 24) or 0)
+    assertions = [
+        _assertion(
+            f"apc.dm.{cohort}.{track}.{_pool_token(item['name'])}",
+            cohort,
+            page["pages"],
+            f"雙主修列項：{item['name']}",
+            float(item.get("credits", 0) or 0),
+            label=label,
+        )
+        for item in base_items
+    ]
+    assertions.append(
+        _assertion(
+            f"apc.dm.{cohort}.{track}.other{int(remainder)}",
+            cohort,
+            page["pages"],
+            "同組主修必修剩餘額度",
+            remainder,
+            label=label,
+        )
+    )
+    return assertions
+
     page = _apc_target_page(cohort, track)
     track_label = "電子物理組" if track == "physics" else "應用化學組"
     label = f"{cohort} 學年度物化系{track_label}雙主修表"
@@ -601,11 +2182,14 @@ def _apc_target_catalog_assertions(cohort: str, track: str) -> list[dict[str, An
         )
     other_credits = 20 if cohort == "115" else 24
     other_claim = (
-        "表尾必修課程應修畢（語義待確認）"
+        "表尾額外目標必修額度"
         if cohort in {"111", "112"} and track == "chemistry"
         else "表尾其餘必修課程應修畢"
     )
-    other_evidence = CONFLICTED if cohort in {"111", "112"} and track == "chemistry" else VERIFIED
+    # The 111/112 chemistry page explicitly gives the additional 24-credit
+    # target requirement.  Its named course catalogue is still incomplete,
+    # but the aggregate itself is no longer a source conflict.
+    other_evidence = VERIFIED
     assertions.append(
         _assertion(
             f"apc.dm.{cohort}.{track}.other_catalog",
@@ -645,9 +2229,17 @@ def _apc_target_catalog(cohort: str, track: str) -> list[dict[str, Any]]:
     that would be a false claim about the target page's missing choice pool.
     """
 
+    # The source-backed secondary contract now contains the complete base
+    # rows and same-track remainder pool for every cohort/track.  Keep the
+    # legacy implementation below for reference, but route all callers to
+    # the scoped catalogue so no target falls back to an aggregate-only row.
+    return _apc_secondary_catalog_rows(cohort, track, "double_major")
+
     page = _apc_target_page(cohort, track)
     track_label = "電子物理組" if track == "physics" else "應用化學組"
     source = _citation(cohort, page["pages"], f"物化系{track_label}雙主修課程表")
+    base_pool_id = _pool_id("double_major_target", cohort, "apc", track, "base")
+    other_pool_id = _pool_id("double_major_target", cohort, "apc", track, "other_required")
     rows: list[dict[str, Any]] = []
     for name, credits, component, slug in _apc_target_rows(cohort, track):
         requirement_id = f"apc.dm.{cohort}.{track}.{slug}"
@@ -699,6 +2291,11 @@ def _apc_target_catalog(cohort: str, track: str) -> list[dict[str, Any]]:
                 "is_lab": component == "lab",
                 "is_zero_credit": False,
                 "allow_combined_lab_source": False,
+                "pool_ids": (base_pool_id,),
+                "eligible_pool_ids": (),
+                "overflow_routes": (),
+                "candidate_only": False,
+                "pool_requirement": False,
                 "evidence": VERIFIED,
                 "evidence_state": VERIFIED,
                 "assertion_id": requirement_id,
@@ -731,13 +2328,13 @@ def _apc_target_catalog(cohort: str, track: str) -> list[dict[str, Any]]:
     quota_requirement_id = f"apc.dm.{cohort}.{track}.{quota_slug}"
     quota_assertion_id = f"apc.dm.{cohort}.{track}.other{int(other_credits)}"
     quota_reference = f"{page['source_reference']}:footer:{quota_slug}"
-    quota_is_conflicted = cohort in {"111", "112"} and track == "chemistry"
-    quota_title = "必修課程（語義待確認）" if quota_is_conflicted else "其餘必修課程"
+    quota_is_additional_target = cohort in {"111", "112"} and track == "chemistry"
+    quota_title = "額外目標必修課程" if quota_is_additional_target else "其餘必修課程"
     quota_original_clause = f"{track_label}雙主修表尾：{quota_title} {int(other_credits)} 學分。"
-    quota_evidence = CONFLICTED if quota_is_conflicted else VERIFIED
+    quota_evidence = VERIFIED
     quota_manual_reason = (
-        "可見 16 學分與表尾必修 24 學分的語義衝突，不能自動解讀為其餘必修。"
-        if quota_is_conflicted
+        "官方頁面已核對 16＋24＝40 的 aggregate；24 學分是額外目標必修額度，完整命名目錄與核准 mapping 仍需人工確認。"
+        if quota_is_additional_target
         else "官方頁面未在本地證據中提供其餘必修的完整命名課程池。"
     )
     quota_provenance = {
@@ -788,6 +2385,11 @@ def _apc_target_catalog(cohort: str, track: str) -> list[dict[str, Any]]:
             "is_lab": False,
             "is_zero_credit": False,
             "allow_combined_lab_source": False,
+            "pool_ids": (),
+            "eligible_pool_ids": (other_pool_id,),
+            "overflow_routes": (),
+            "candidate_only": False,
+            "pool_requirement": True,
             "evidence": quota_evidence,
             "evidence_state": quota_evidence,
             "assertion_id": quota_assertion_id,
@@ -845,6 +2447,7 @@ def _assertion(
     manual_reason: str | None = None,
     coverage_state: str | None = None,
     conflict_group: str | None = None,
+    blocks_decision: bool | None = None,
 ) -> dict[str, Any]:
     source = _citation(cohort, pages, label, url=url)
     resolved_pdf_page = str(pdf_page or pages).strip()
@@ -857,6 +2460,11 @@ def _assertion(
     )
     resolved_manual_reason = manual_reason or (
         "官方證據不足或衝突，需人工確認。" if not resolved_automatic else ""
+    )
+    resolved_blocks_decision = (
+        blocks_decision
+        if blocks_decision is not None
+        else evidence_state == CONFLICTED
     )
     resolved_original_clause = original_clause or claim
     resolved_reference = source_reference or f"handbook:{cohort}:pdf:{resolved_pdf_page}:assertion:{assertion_id}"
@@ -872,6 +2480,7 @@ def _assertion(
             "automation_sufficiency": "COMPLETE" if resolved_automatic else "PARTIAL" if evidence_state == VERIFIED else "NONE",
             "automatic_decision": resolved_automatic,
             "manual_reason": resolved_manual_reason,
+            "blocks_decision": resolved_blocks_decision,
         }
     )
     if conflict_group:
@@ -902,6 +2511,7 @@ def _assertion(
         "automatic_decision": resolved_automatic,
         "manual_reason": resolved_manual_reason,
         "manual_review_reason": resolved_manual_reason,
+        "blocks_decision": resolved_blocks_decision,
     }
 
 
@@ -938,24 +2548,132 @@ def _base_thresholds(program: str, cohort: str, track: str | None) -> dict[str, 
             "university_common": 28,
             "department_required": 31,
             "department_elective": 54,
+            "department_alpha_required": 32,
+            "department_beta_required": 22,
+            "beta_minimum_course_count": 1,
+            "elective_rollup_group_id": "cs_primary_elective_54",
+            "elective_rollup_required_credits": 54,
             "free": 15,
             "common_split": {"compulsory": 10, "category": 16, "elective": 2},
         }
+    if program == "math":
+        # 111/112 use a 36-credit common block and a 64-credit department
+        # elective block.  The 15-credit alpha rule is a subset of that
+        # block; it is deliberately not added to the 128-credit total.
+        if cohort in {"111", "112"}:
+            return {
+                "total": 128,
+                "university_common": 28,
+                "program_common": 36,
+                "program_elective": 64,
+                "program_elective_by_student_type": {"non_teacher": 64, "teacher": 44},
+                "active_student_type": "non_teacher",
+                "department_elective_minimum": 64,
+                "department_alpha_minimum": 15,
+                "free": 15,
+                "free_requirement_minimum": None,
+                "free_subset_maxima": {
+                    "external_department_or_school_professional": {
+                        "non_teacher": 15,
+                        "teacher": 11,
+                    }
+                },
+                "department_subset_maxima": {
+                    "external_department_or_school_professional": {"non_teacher": 15}
+                },
+                "free_amount_semantics": "MAXIMUM",
+                "free_max": 15,
+            }
+        domain_required_by_track = {
+            "math_scientific_computing": 7,
+            "data_science": 6,
+            "math_education": 3,
+        }
+        domain_required = domain_required_by_track.get(track or "math_scientific_computing", 7)
+        return {
+            "total": 128,
+            "university_common": 28,
+            "program_common": 20,
+            "domain_required": domain_required,
+            "domain_required_by_track": domain_required_by_track,
+            "program_elective": 65,
+            "department_elective_minimum": 65 - domain_required,
+            "professional_total": 65,
+            "active_student_type": "non_teacher",
+            "free": 15,
+            "free_requirement_minimum": 15,
+            "free_subset_maxima": {
+                "external_department_or_school_professional": {
+                    "non_teacher": 15,
+                    "teacher": 15,
+                }
+            },
+            "free_amount_semantics": "MINIMUM",
+        }
     if cohort in {"111", "112"}:
-        return {"total": 128, "university_common": 28, "program_common": 36, "program_elective": 64, "free": 15}
+        return {
+            "total": 128,
+            "university_common": 28,
+            "program_common": 36,
+            "program_elective": 64,
+            "program_elective_by_student_type": {
+                "non_teacher": 64,
+                "teacher": 44,
+            },
+            "free": 15,
+            "free_requirement_minimum": None,
+            "free_subset_maxima": {
+                "external_department_or_school_professional": {
+                    "non_teacher": 15,
+                    "teacher": 11,
+                }
+            },
+            "free_amount_semantics": "MAXIMUM",
+            "free_max": 15,
+        }
     if cohort == "115":
-        return {"total": 128, "university_common": 28, "program_common": 20, "domain_required": 7, "program_elective": 65, "free": 15}
-    return {"total": 128, "university_common": 28, "program_common": 20, "domain_required": 7, "program_elective": 65, "free": 15}
+        return {
+            "total": 128,
+            "university_common": 28,
+            "program_common": 20,
+            "domain_required": 7,
+            "program_elective": 65,
+            "free": 15,
+            "free_requirement_minimum": 15,
+            "free_subset_maxima": {
+                "external_department_or_school_professional": {
+                    "non_teacher": 15,
+                    "teacher": 15,
+                }
+            },
+            "free_amount_semantics": "MINIMUM",
+        }
+    return {
+        "total": 128,
+        "university_common": 28,
+        "program_common": 20,
+        "domain_required": 7,
+        "program_elective": 65,
+        "free": 15,
+        "free_requirement_minimum": 15,
+        "free_subset_maxima": {
+            "external_department_or_school_professional": {
+                "non_teacher": 15,
+                "teacher": 15,
+            }
+        },
+        "free_amount_semantics": "MINIMUM",
+    }
 
 
 def _double_thresholds(program: str, cohort: str, track: str | None) -> dict[str, Any]:
     """Return the separate 40-credit double-major aggregate schema.
 
     These values describe the target curriculum only.  They intentionally do
-    not inherit the primary 128-credit graduation thresholds.  For the
-    Math 111/112 and APC chemistry 111/112 conflicts, the visible bucket
-    values are retained as evidence while the registry keeps the official
-    total independently.
+    not inherit the primary 128-credit graduation thresholds.  Math 111/112
+    records three jointly satisfiable minimum constraints (total 40, required
+    minimum 21, and elective minimum 18); the visible bucket values remain
+    evidence while the untranscribed course allocation stays PARTIAL.
     """
 
     if program == "earth":
@@ -986,11 +2704,10 @@ def _primary_conflict_assertions(program: str, cohort: str) -> list[dict[str, An
     if program == "math" and cohort == "114":
         return [
             _assertion("math.primary.114.common20", cohort, "PDF p.67", "系共同必修架構", 20, label="數學系課程架構"),
-            _assertion("math.primary.114.detail36", cohort, "PDF p.70", "必修科目表總額", 36, label="數學系必修科目表"),
         ]
     if program == "cs" and cohort == "114":
         conflict_group = "cs.primary.114.common-course-split"
-        manual_reason = "官方 114 手冊同一共同課程分配同時有兩個可加總為 28 的版本，不能自動選定其中一個。"
+        manual_reason = "PDF p.110 是摘要說明；共同課程分配依中央通識手冊與 PDF p.108 表格的 10／16／2 定案。"
         return [
             _assertion(
                 "cs.primary.114.split10-16-2",
@@ -1002,10 +2719,6 @@ def _primary_conflict_assertions(program: str, cohort: str) -> list[dict[str, An
                 pdf_page="108",
                 printed_page="107",
                 original_clause="共同課程分配：10／16／2。",
-                automatic_decision=False,
-                manual_reason=manual_reason,
-                coverage_state=PARTIAL,
-                conflict_group=conflict_group,
             ),
             _assertion(
                 "cs.primary.114.split8-16-4",
@@ -1017,15 +2730,26 @@ def _primary_conflict_assertions(program: str, cohort: str) -> list[dict[str, An
                 pdf_page="110",
                 printed_page="109",
                 original_clause="共同課程分配：8／16／4。",
+                evidence_state=CONFLICTED,
                 automatic_decision=False,
                 manual_reason=manual_reason,
                 coverage_state=PARTIAL,
                 conflict_group=conflict_group,
+                blocks_decision=False,
             ),
         ]
     if program == "cs" and cohort == "115":
         return [
-            _assertion("cs.primary.115.diagram15", cohort, "PDF p.118", "學校共同課程下限", "at-least-15", label="資科系課程架構圖"),
+            _assertion(
+                "cs.primary.115.diagram15",
+                cohort,
+                "PDF p.118",
+                "自由選修額度",
+                "at-least-15",
+                label="資科系課程架構圖",
+                original_clause="課程架構圖另列自由選修至少 15 學分。",
+                blocks_decision=False,
+            ),
             _assertion("cs.primary.115.table28", cohort, "PDF p.119", "校共同課程總額", 28, label="資科系學分規劃表"),
         ]
     return []
@@ -1055,6 +2779,79 @@ def _primary_assertions(program: str, cohort: str, track: str | None) -> list[di
 def _double_assertions(program: str, cohort: str, track: str | None) -> tuple[list[dict[str, Any]], str, str, str]:
     """Return assertions, evidence state, coverage and warning for a target."""
 
+    # Secondary catalogues are now transcribed from the year-scoped contracts
+    # below.  Keep aggregate assertions small and independent from the
+    # candidate pools; a pool candidate is eligible evidence, never an extra
+    # credit consumer.  The older branches remain below for historical
+    # compatibility with callers that inspect this module, but all registry
+    # construction follows this complete path.
+    if program == "math":
+        if cohort in {"111", "112"}:
+            pages = "PDF pp.80–82" if cohort == "111" else "PDF pp.75–77"
+            required = 21
+            elective = 18
+        elif cohort == "113":
+            pages = "PDF pp.77–79"
+            required = 14
+            elective = 26
+        else:
+            pages = "PDF pp.80–82" if cohort == "114" else "PDF pp.91–93"
+            required = 14
+            elective = 26
+        assertions = [
+            _assertion(f"math.dm.{cohort}.total40", cohort, pages, "雙主修總額", 40, label="數學系雙主修表"),
+            _assertion(f"math.dm.{cohort}.required{required}", cohort, pages, "雙主修必修最低額度", required, label="數學系雙主修表"),
+            _assertion(f"math.dm.{cohort}.elective{elective}", cohort, pages, "雙主修選修最低額度", elective, label="數學系雙主修表"),
+        ]
+        if cohort == "113":
+            assertions.extend(
+                (
+                    _assertion(
+                        "math.dm.113.elective.high_calculus_1",
+                        cohort,
+                        pages,
+                        "高等微積分(一)正式選修列項",
+                        4,
+                        label="數學系雙主修表",
+                    ),
+                    _assertion(
+                        "math.dm.113.elective.algebra_1",
+                        cohort,
+                        pages,
+                        "代數學(一)正式選修列項",
+                        3,
+                        label="數學系雙主修表",
+                    ),
+                )
+            )
+        return assertions, VERIFIED, COMPLETE, ""
+    if program == "earth":
+        pages = {"111": "PDF p.39", "112": "PDF p.39", "113": "PDF p.45", "114": "PDF p.47", "115": "PDF p.55"}[cohort]
+        assertions = [
+            _assertion(f"earth.dm.{cohort}.total40", cohort, pages, "地生雙主修總額", 40, label="地生系雙主修表"),
+            _assertion(f"earth.dm.{cohort}.base24", cohort, pages, "共同必修", 24, label="地生系雙主修表"),
+            _assertion(f"earth.dm.{cohort}.other16", cohort, pages, "兩領域專業選修", 16, label="地生系雙主修表"),
+        ]
+        return assertions, VERIFIED, COMPLETE, ""
+    if program == "apc":
+        page_map = _APC_PHYSICS_DM_PAGE if track == "physics" else _APC_CHEMISTRY_DM_PAGE
+        page = page_map[cohort]
+        pages = f"PDF p.{page['pdf_page']}"
+        base, other = (20, 20) if cohort == "115" else (16, 24)
+        track_label = "電子物理組" if track == "physics" else "應用化學組"
+        assertions = [
+            _assertion(f"apc.dm.{cohort}.base{base}", cohort, pages, "物化雙主修基礎列項", base, label=f"物化系{track_label}雙主修表"),
+            _assertion(f"apc.dm.{cohort}.other{other}", cohort, pages, "物化系同組主修必修剩餘額度", other, label=f"物化系{track_label}雙主修表"),
+        ]
+        return assertions, VERIFIED, COMPLETE, ""
+    if program == "cs":
+        pages = {"111": "PDF pp.121–122", "112": "PDF pp.116–117", "113": "PDF pp.111–112", "114": "PDF pp.116–117", "115": "PDF p.127"}[cohort]
+        assertions = [
+            _assertion(f"cs.dm.{cohort}.required15", cohort, pages, "資科雙主修命名必修", 15, label="資科系雙主修表"),
+            _assertion(f"cs.dm.{cohort}.other25", cohort, pages, "資科雙主修其他課程", 25, label="資科系雙主修表"),
+        ]
+        return assertions, VERIFIED, COMPLETE, ""
+
     if program == "math" and cohort in {"111", "112"}:
         pages = "PDF pp.80–82" if cohort == "111" else "PDF pp.75–77"
         assertions = [
@@ -1062,15 +2859,57 @@ def _double_assertions(program: str, cohort: str, track: str | None) -> tuple[li
             _assertion(f"math.dm.{cohort}.required21", cohort, pages, "雙主修必修列項合計", 21, label="數學系雙主修表"),
             _assertion(f"math.dm.{cohort}.elective18", cohort, pages, "雙主修選修下限", 18, label="數學系雙主修表"),
         ]
-        return assertions, CONFLICTED, PARTIAL, "總額40與必修21＋選修至少18的分項無法安全相加。"
+        return (
+            assertions,
+            VERIFIED,
+            PARTIAL,
+            "總額40、必修最低21、選修最低18是共同最低約束；選修可修19以上以達總額40，逐課目錄尚未完整建置。",
+        )
     if program == "math" and cohort == "113":
         pages = "PDF pp.77–79"
+        conflict_group = "math.dm.113.required-course-revision"
         assertions = [
             _assertion("math.dm.113.header14", cohort, pages, "雙主修表頭必修", 14, label="數學系雙主修表"),
-            _assertion("math.dm.113.visible21", cohort, pages, "雙主修可見必修列項合計", 21, label="數學系雙主修表"),
+            _assertion(
+                "math.dm.113.visible21",
+                cohort,
+                pages,
+                "雙主修原表可見必修列項合計",
+                21,
+                label="數學系雙主修表",
+                evidence_state=CONFLICTED,
+                coverage_state=PARTIAL,
+                automatic_decision=False,
+                manual_reason="同頁修訂將高等微積分(一)與代數學(一)自必修列移至正式選修列；保留原列合計作來源稽核，不阻擋總額判定。",
+                conflict_group=conflict_group,
+                blocks_decision=False,
+            ),
             _assertion("math.dm.113.elective26", cohort, pages, "雙主修選修下限", 26, label="數學系雙主修表"),
+            _assertion(
+                "math.dm.113.elective.high_calculus_1",
+                cohort,
+                pages,
+                "高等微積分(一)正式選修列項",
+                4,
+                label="數學系雙主修表",
+                original_clause="高等微積分(一) 4 學分於同頁修訂後選修表列出。",
+            ),
+            _assertion(
+                "math.dm.113.elective.algebra_1",
+                cohort,
+                pages,
+                "代數學(一)正式選修列項",
+                3,
+                label="數學系雙主修表",
+                original_clause="代數學(一) 3 學分於同頁修訂後選修表列出。",
+            ),
         ]
-        return assertions, CONFLICTED, PARTIAL, "表頭必修14與可見必修列項21衝突；選修下限26亦不能替代表頭。"
+        return (
+            assertions,
+            VERIFIED,
+            PARTIAL,
+            "雙主修總額40、必修14、選修至少26已依同頁修訂核對；高等微積分(一)與代數學(一)移入正式選修池，完整逐課配置仍需人工複核。",
+        )
     if program == "math" and cohort in {"114", "115"}:
         pages = "PDF pp.80–82" if cohort == "114" else "PDF pp.91–93"
         assertions = [
@@ -1083,13 +2922,34 @@ def _double_assertions(program: str, cohort: str, track: str | None) -> tuple[li
         pages = "PDF p.19"
         assertions = [
             _assertion(f"apc.dm.{cohort}.visible16", cohort, pages, "應用化學雙主修可見基礎列項", 16, label="物化系雙主修表"),
-            _assertion(f"apc.dm.{cohort}.footer24", cohort, pages, "表尾必修課程應修", 24, label="物化系雙主修表"),
-            _assertion(f"apc.dm.{cohort}.footer-semantics", cohort, pages, "表尾是否為其餘必修", "unknown", evidence_state=MISSING, label="物化系雙主修表"),
+            _assertion(
+                f"apc.dm.{cohort}.footer24",
+                cohort,
+                pages,
+                "表尾額外目標必修額度",
+                24,
+                label="物化系雙主修表",
+                original_clause="表尾額外目標必修 24 學分；與可見基礎列項16合計40。",
+            ),
+            _assertion(
+                f"apc.dm.{cohort}.footer-semantics",
+                cohort,
+                pages,
+                "表尾額度用途",
+                "additional_required",
+                label="物化系雙主修表",
+                original_clause="表尾24學分為雙主修額外目標必修額度。",
+            ),
         ]
         row_assertions = _apc_target_catalog_assertions(cohort, track)
         existing_ids = {item["id"] for item in assertions}
         assertions.extend(item for item in row_assertions if item["id"] not in existing_ids)
-        return assertions, CONFLICTED, PARTIAL, "可見16學分與表尾必修24的語義不明，不能擅自解讀為其餘必修。"
+        return (
+            assertions,
+            VERIFIED,
+            PARTIAL,
+            "可見基礎16與額外目標必修24已核對為雙主修40；完整目標必修命名目錄與核准 mapping 仍需人工確認。",
+        )
     if program == "cs" and cohort == "115":
         pages = "PDF p.127"
         assertions = [
@@ -1189,6 +3049,239 @@ def _primary_evidence(cohort: str, program: str) -> dict[str, Any]:
     }
 
 
+def _primary_section_source(
+    source: Mapping[str, Any],
+    section: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Apply a source-backed page/coverage override to one primary section."""
+
+    if not isinstance(section, Mapping):
+        return deepcopy(dict(source))
+    scoped = deepcopy(dict(source))
+    for key in (
+        "research_file",
+        "source_reference",
+        "source_url",
+        "source_file",
+        "pdf_page",
+        "printed_page",
+        "pages",
+        "table_location",
+        "original_clause",
+        "evidence_state",
+        "coverage_state",
+        "automation_sufficiency",
+        "automatic_decision",
+        "manual_reason",
+        "manual_review_reason",
+    ):
+        if key in section and section[key] not in (None, ""):
+            scoped[key] = deepcopy(section[key])
+    return scoped
+
+
+def _policy_source(
+    cohort: str,
+    policy_key: str,
+    fallback: Mapping[str, Any],
+    *,
+    program: str | None = None,
+    track: str | None = None,
+) -> dict[str, Any]:
+    """Return a source contract for a policy-only pool.
+
+    Shared university policies are sourced from the year-specific official
+    general-education manual.  The free-elective rule is instead stated in
+    each primary programme section, so it uses that section's source while
+    retaining a distinct policy reference.  The returned object deliberately
+    keeps both the normalized source keys used by the registry and the
+    ``url``/``file`` aliases used by older exporters.
+    """
+
+    shared = _RULES.get("shared", {})
+    config = shared.get(policy_key, {}) if isinstance(shared, Mapping) else {}
+    config = config if isinstance(config, Mapping) else {}
+    contract: Mapping[str, Any] = {}
+    evidence_by_cohort = config.get("evidence_by_cohort", {})
+    if isinstance(evidence_by_cohort, Mapping):
+        item = evidence_by_cohort.get(str(cohort), {})
+        if isinstance(item, Mapping):
+            # ``free_elective`` is a programme/track-scoped policy.  Keep the
+            # shared cohort entry as a compact source family, then overlay the
+            # selected track contract so a policy can never inherit another
+            # programme's page, amount semantics, or subset rule.
+            if policy_key == "free_elective" and program:
+                programme_contract = item.get(program, {})
+                if isinstance(programme_contract, Mapping):
+                    merged: dict[str, Any] = {
+                        key: deepcopy(value)
+                        for key, value in programme_contract.items()
+                        if key != "tracks"
+                    }
+                    tracks = programme_contract.get("tracks", {})
+                    selected_track = track or "department"
+                    if isinstance(tracks, Mapping):
+                        # Math 113+ exposes canonical domain tracks while the
+                        # handbook's free-elective clause is shared by the
+                        # department section.  Reuse that department source
+                        # only when a selected track has no dedicated clause;
+                        # Earth/APC track-specific contracts still win.
+                        track_contract = (
+                            tracks.get(selected_track)
+                            or tracks.get("default")
+                            or tracks.get("department", {})
+                        )
+                        if isinstance(track_contract, Mapping):
+                            merged.update(deepcopy(dict(track_contract)))
+                    contract = merged
+            else:
+                contract = item
+
+    if contract:
+        source_reference = str(contract.get("source_reference") or fallback.get("source_reference") or "")
+        source_file = str(contract.get("source_file") or fallback.get("source_file") or "")
+        source_url = str(contract.get("source_url") or fallback.get("source_url") or "")
+        pdf_page = contract.get("pdf_page") or fallback.get("pdf_page") or "未標示"
+        printed_page = contract.get("printed_page") or fallback.get("printed_page") or "未標示"
+        pages = contract.get("pages") or f"{pdf_page}（印刷 {printed_page}）"
+        table_location = contract.get("table_location") or config.get("table_location") or "官方政策條款"
+        research_file = contract.get("research_file") or "research/university_common_policy_111_115.md"
+    else:
+        source_reference = str(fallback.get("source_reference") or "")
+        source_file = str(fallback.get("source_file") or "")
+        source_url = str(fallback.get("source_url") or "")
+        pdf_page = fallback.get("pdf_page") or "未標示"
+        printed_page = fallback.get("printed_page") or "未標示"
+        pages = fallback.get("pages") or f"{pdf_page}（印刷 {printed_page}）"
+        table_location = fallback.get("table_location") or "官方主修課程表"
+        research_file = fallback.get("research_file") or ""
+
+    if policy_key == "free_elective":
+        source_reference = f"{source_reference}:policy:free_total"
+        table_location = f"{table_location}；自由選修政策"
+        research_file = str(
+            contract.get("research_file")
+            or fallback.get("research_file")
+            or "research/math_earth_handbook_matrix_111_115.md"
+        )
+        source_type = str(contract.get("source_type") or "official_primary_handbook_section")
+    else:
+        source_type = str(contract.get("source_type") or "official_general_education_manual") if contract else "official_policy"
+
+    result = {
+        "source_type": source_type,
+        "research_file": research_file,
+        "source_url": source_url,
+        "url": source_url,
+        "source_file": source_file,
+        "file": source_file,
+        "pdf_page": pdf_page,
+        "printed_page": printed_page,
+        "pages": pages,
+        "table_location": table_location,
+        "source_reference": source_reference,
+        "curriculum_version": str(cohort),
+        "program_slug": program,
+        "track_slug": track or "department",
+        "original_clause": str(
+            contract.get("original_clause")
+            or config.get("policy_clause")
+            or fallback.get("original_clause")
+            or ""
+        ),
+    }
+    for key in (
+        "manual_embedded",
+        "historical_handbook_embedded",
+        "applicability_state",
+        "applicability_note",
+        "policy_source_reference",
+        "verified_fields",
+        "evidence_state",
+        "coverage_state",
+        "automation_sufficiency",
+        "manual_reason",
+        "manual_review_reason",
+        "amount_semantics",
+        "total_req",
+        "requirement_minimum_credits",
+        "subset_maxima",
+        "maximum_credits",
+        "maximum_credits_by_student_type",
+        "minimum_science_college_credits",
+        "science_subset_state",
+        "allow_external_departments",
+        "requires_official_course_catalog",
+        "exclude_allocated_attempts",
+        "source_contract",
+        "rule_components",
+        "supplemental_source",
+        "compulsory_total",
+        "compulsory_courses",
+        "courses",
+        "category_min_each",
+        "common_elective_min",
+        "flex_credits",
+        "requirement_id",
+        "kind",
+        "requirement_type",
+        "required_completions",
+        "min_earned_credits_per_completion",
+        "membership_id",
+        "affects_credit_ledger",
+        "waiver_allowed",
+        "waiver_authority_ids",
+        "effective_cohorts",
+        "scope_state",
+        "catalog_source",
+        "automatic_decision",
+    ):
+        if key in contract:
+            result[key] = deepcopy(contract[key])
+    return result
+
+
+def _university_common_contract(cohort: str) -> dict[str, Any]:
+    """Return the year-scoped common-course compile contract.
+
+    The shared defaults describe the later 10-credit language structure.  The
+    111 handbook is an explicit exception (8 credits plus a two-credit flex
+    route), so both pool and row builders must read the same cohort contract
+    instead of silently inheriting that default.
+    """
+
+    shared = _RULES.get("shared", {}).get("university_common", {})
+    if not isinstance(shared, Mapping):
+        return {}
+    evidence_by_cohort = shared.get("evidence_by_cohort", {})
+    contract = evidence_by_cohort.get(str(cohort), {}) if isinstance(evidence_by_cohort, Mapping) else {}
+    contract = deepcopy(dict(contract)) if isinstance(contract, Mapping) else {}
+    compulsory = shared.get("compulsory", {})
+    compulsory = compulsory if isinstance(compulsory, Mapping) else {}
+    fallback_courses = compulsory.get("courses", {})
+    fallback_courses = fallback_courses if isinstance(fallback_courses, Mapping) else {}
+    courses = contract.get("compulsory_courses") or contract.get("courses") or fallback_courses
+    courses = dict(courses) if isinstance(courses, Mapping) else {}
+    contract["courses"] = deepcopy(courses)
+    contract["compulsory_courses"] = deepcopy(courses)
+    contract["compulsory_total"] = contract.get(
+        "compulsory_total",
+        sum(float(value) for value in courses.values()),
+    )
+    ge = shared.get("ge_categories", {})
+    ge = ge if isinstance(ge, Mapping) else {}
+    contract["category_min_each"] = contract.get(
+        "category_min_each",
+        ge.get("per_category_req", 4),
+    )
+    contract["common_elective_min"] = contract.get(
+        "common_elective_min",
+        shared.get("ge_common_elective_req", 2),
+    )
+    contract["flex_credits"] = contract.get("flex_credits", 0)
+    return contract
+
+
 def _primary_course_row(
     cohort: str,
     program: str,
@@ -1197,6 +3290,18 @@ def _primary_course_row(
     credits: int | float,
     bucket: str,
     source: Mapping[str, Any],
+    *,
+    kind: str = "PRIMARY_COURSE",
+    requirement_type: str = "named_course",
+    choice_group: str | None = None,
+    choice_rule: str | None = "exact_course_or_approved_equivalency",
+    eligible_names: tuple[str, ...] | None = None,
+    eligible_options: tuple[tuple[str, int | float], ...] | None = None,
+    pool_ids: tuple[str, ...] = (),
+    eligible_pool_ids: tuple[str, ...] = (),
+    overflow_routes: tuple[str, ...] = (),
+    coverage_state: str | None = None,
+    automatic_decision: bool | None = None,
 ) -> dict[str, Any]:
     """Build one auditable primary course row from a source-backed map."""
 
@@ -1207,7 +3312,13 @@ def _primary_course_row(
     source_reference = f"{source['source_reference']}:row:{slug}"
     original_clause = source.get("original_clause") or f"{name} {float(credits):g} 學分。"
     evidence_state = source.get("evidence_state", VERIFIED)
-    row_automatic = evidence_state == VERIFIED and source.get("automation_sufficiency") == "COMPLETE"
+    row_coverage = coverage_state or source.get("coverage_state", PARTIAL)
+    row_automatic = (
+        automatic_decision
+        if automatic_decision is not None
+        else evidence_state == VERIFIED and row_coverage == COMPLETE
+    )
+    names = eligible_names if eligible_names is not None else (name,)
     provenance = {
         "assertion_id": row_id,
         "source_type": "official_handbook",
@@ -1223,7 +3334,7 @@ def _primary_course_row(
         "original_clause": original_clause,
         "evidence_state": evidence_state,
         "verification_status": evidence_state,
-        "automation_sufficiency": source.get("automation_sufficiency", PARTIAL),
+        "automation_sufficiency": "COMPLETE" if row_automatic else "PARTIAL",
         "automatic_decision": row_automatic,
         "manual_reason": source.get("manual_reason", ""),
         "manual_review_reason": source.get("manual_reason", ""),
@@ -1235,14 +3346,22 @@ def _primary_course_row(
         "raw_title": name,
         "credits": float(credits),
         "bucket": bucket,
-        "kind": "PRIMARY_COURSE",
-        "requirement_type": "named_course",
-        "choice_group": None,
-        "choice_rule": "exact_course_or_approved_equivalency",
+        "kind": kind,
+        "requirement_type": requirement_type,
+        "choice_group": choice_group,
+        "choice_rule": choice_rule,
         "track": _TRACK_DISPLAY.get(track) if track else None,
         "track_slug": track_slug,
-        "eligible_course_names": (name,),
-        "eligible_course_options": ({"name": name, "credits": float(credits)},),
+        "eligible_course_names": tuple(names),
+        "eligible_course_options": tuple(
+            {"name": option_name, "credits": float(option_credits)}
+            for option_name, option_credits in (eligible_options or ((name, credits),))
+        ),
+        "pool_ids": tuple(pool_ids),
+        "eligible_pool_ids": tuple(eligible_pool_ids),
+        "overflow_routes": tuple(overflow_routes),
+        "candidate_only": False,
+        "pool_requirement": requirement_type in {"choice", "course_pool", "credit_quota"},
         "waiver": False,
         "waiver_generates_credits": False,
         "component": component,
@@ -1254,9 +3373,9 @@ def _primary_course_row(
         "allow_combined_lab_source": False,
         "evidence": evidence_state,
         "evidence_state": evidence_state,
-        "coverage_state": source.get("coverage_state", PARTIAL),
+        "coverage_state": row_coverage,
         "verification_status": evidence_state,
-        "automation_sufficiency": source.get("automation_sufficiency", PARTIAL),
+        "automation_sufficiency": "COMPLETE" if row_automatic else "PARTIAL",
         "automatic_decision": row_automatic,
         "manual_reason": source.get("manual_reason", ""),
         "manual_review_reason": source.get("manual_reason", ""),
@@ -1284,6 +3403,8 @@ def _primary_course_row(
 def _cs_target_quota_catalog(cohort: str) -> list[dict[str, Any]]:
     """Expose only the official CS double-major aggregates as generic rows."""
 
+    return _cs_secondary_catalog_rows(cohort, "double_major")
+
     pages = {
         "111": ("121", "120"),
         "112": ("116", "115"),
@@ -1294,6 +3415,8 @@ def _cs_target_quota_catalog(cohort: str) -> list[dict[str, Any]]:
     pdf_page, printed_page = pages[cohort]
     label = f"{cohort} 學年度資科系雙主修 aggregate 表"
     source = _citation(cohort, f"PDF p.{pdf_page}（印刷 p.{printed_page}）", label)
+    required_pool_id = _pool_id("double_major_target", cohort, "cs", None, "required_named")
+    other_pool_id = _pool_id("double_major_target", cohort, "cs", None, "other_required")
     rows: list[dict[str, Any]] = []
     for slug, name, credits, clause in (
         ("required15", "資科雙主修命名必修 aggregate", 15.0, "資科雙主修必修 15 學分。"),
@@ -1362,6 +3485,11 @@ def _cs_target_quota_catalog(cohort: str) -> list[dict[str, Any]]:
                 "eligible_course_names": (),
                 "eligible_course_options": (),
                 "accept_any": False,
+                "pool_ids": (),
+                "eligible_pool_ids": (required_pool_id if slug == "required15" else other_pool_id,),
+                "overflow_routes": (),
+                "candidate_only": False,
+                "pool_requirement": True,
                 "waiver": False,
                 "waiver_generates_credits": False,
                 "evidence": VERIFIED,
@@ -1395,88 +3523,2631 @@ def _cs_target_quota_catalog(cohort: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _primary_pool_requirement_row(
+    cohort: str,
+    program: str,
+    track: str | None,
+    pool: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    suffix: str,
+    requirement_type: str = "course_pool",
+    choice_group: str | None = None,
+    choice_rule: str | None = "at_least_credits_from_pool",
+    overflow_routes: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Turn one explicit pool quota into an executable requirement row.
+
+    The candidate courses remain under ``course_pools``.  This row is the
+    credit consumer and is the only primary row that receives
+    ``eligible_pool_ids``.  Named compulsory rows use ``pool_ids`` instead,
+    so a candidate from a broad pool cannot replace a named course.
+    """
+
+    pool_id = str(pool["id"])
+    row_id = f"{program}.primary.{cohort}.{track or 'department'}.pool.{_pool_token(suffix)}"
+    label = str(pool.get("label") or suffix)
+    credits = float(pool.get("required_credits") or 0)
+    candidates = tuple(pool.get("candidate_courses") or ())
+    eligible_names = tuple(
+        str(item.get("name"))
+        for item in candidates
+        if isinstance(item, Mapping) and item.get("name")
+    )
+    eligible_options = tuple(
+        (
+            str(item.get("name")),
+            float(item.get("credits", 0)),
+        )
+        for item in candidates
+        if isinstance(item, Mapping) and item.get("name") and float(item.get("credits", 0)) > 0
+    )
+    row = _primary_course_row(
+        cohort,
+        program,
+        track,
+        label,
+        credits,
+        str(pool.get("bucket") or suffix),
+        source,
+        kind="quota" if requirement_type != "choice" else "choice",
+        requirement_type=requirement_type,
+        choice_group=choice_group,
+        choice_rule=choice_rule,
+        eligible_names=eligible_names,
+        eligible_options=eligible_options,
+        pool_ids=(),
+        eligible_pool_ids=(pool_id,),
+        overflow_routes=overflow_routes,
+        coverage_state=str(pool.get("coverage_state") or PARTIAL),
+        automatic_decision=(
+            str(pool.get("evidence_state")) == VERIFIED
+            and str(pool.get("coverage_state")) == COMPLETE
+            and not pool.get("manual_reason")
+        ),
+    )
+    row.update(
+        {
+            "id": row_id,
+            "requirement_id": row_id,
+            "name": label,
+            "raw_title": label,
+            "display_name": label,
+            "kind": "choice" if requirement_type == "choice" else "quota",
+            "requirement_type": requirement_type,
+            "component": "quota",
+            "component_type": "quota",
+            "component_label": "選課池額度",
+            "lecture_or_lab": "quota",
+            "is_lab": False,
+            "official_course_identity": f"{cohort}:{program}:{track or 'department'}:pool:{_pool_token(suffix)}",
+            "source_assertion_id": row_id,
+            "assertion_id": row_id,
+            "required_credits": credits,
+            "pool_ids": (),
+            "eligible_pool_ids": (pool_id,),
+            "overflow_routes": tuple(overflow_routes),
+            "candidate_only": False,
+            "pool_requirement": True,
+            "named_course_pool_state": "COMPLETE" if str(pool.get("coverage_state")) == COMPLETE else PARTIAL,
+            "policy_id": pool.get("policy_id"),
+            "policy_revision": pool.get("policy_revision"),
+            "applies_to": deepcopy(pool.get("applies_to")),
+            "predicate": deepcopy(pool.get("predicate")),
+            "policy_source": deepcopy(pool.get("policy_source")),
+        }
+    )
+    provenance = dict(row.get("provenance") or {})
+    provenance.update(
+        {
+            "assertion_id": row_id,
+            "pool_id": pool_id,
+            "required_credits": credits,
+            "candidate_only": False,
+            "original_clause": pool.get("original_clause") or f"{label}至少 {credits:g} 學分。",
+        }
+    )
+    if pool.get("policy"):
+        row["policy"] = deepcopy(pool["policy"])
+        row["provenance"]["policy"] = deepcopy(pool["policy"])
+    if pool.get("policy_source"):
+        row["provenance"]["policy_source"] = deepcopy(pool["policy_source"])
+    row["provenance"] = provenance
+    row["original_clause"] = pool.get("original_clause") or f"{label}至少 {credits:g} 學分。"
+    row["original_text"] = row["original_clause"]
+    row["source_reference"] = pool.get("source_reference") or row["source_reference"]
+    row["source_url"] = pool.get("source_url") or row["source_url"]
+    row["source_file"] = pool.get("source_file") or row["source_file"]
+    row["research_file"] = pool.get("research_file") or row["research_file"]
+    row["pdf_page"] = pool.get("pdf_page") or row["pdf_page"]
+    row["printed_page"] = pool.get("printed_page") or row["printed_page"]
+    row["page"] = row["pdf_page"]
+    row["pages"] = pool.get("pages") or row["pages"]
+    row["table_location"] = pool.get("table_location") or row["table_location"]
+    row["manual_reason"] = str(pool.get("manual_reason") or "")
+    row["manual_review_reason"] = row["manual_reason"]
+    row["evidence"] = pool.get("evidence_state", row.get("evidence_state", VERIFIED))
+    row["evidence_state"] = pool.get("evidence_state", row.get("evidence_state", VERIFIED))
+    row["verification_status"] = row["evidence_state"]
+    row["automation_sufficiency"] = "COMPLETE" if row.get("automatic_decision") else "PARTIAL"
+    row["source"] = {
+        "file": row["source_file"],
+        "source_file": row["source_file"],
+        "url": row["source_url"],
+        "source_url": row["source_url"],
+        "pages": row["pages"],
+        "pdf_page": row["pdf_page"],
+        "printed_page": row["printed_page"],
+        "source_reference": row["source_reference"],
+        "original_clause": row["original_clause"],
+        "curriculum_version": cohort,
+        "pool_id": pool_id,
+    }
+    row["provenance"].update(row["source"])
+    return row
+
+
+def _math_primary_catalog(cohort: str) -> dict[str, Any]:
+    """Return the independently transcribed Math primary catalogue contract."""
+
+    handbook = _RULES.get("handbooks", {}).get(str(cohort), {})
+    rules = handbook.get("math_rules", {}) if isinstance(handbook, Mapping) else {}
+    catalog = rules.get("primary_catalog", {}) if isinstance(rules, Mapping) else {}
+    return deepcopy(dict(catalog)) if isinstance(catalog, Mapping) else {}
+
+
+def _math_course_map(value: Any) -> dict[str, int | float]:
+    """Normalize one source course map while retaining source row credits."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, int | float] = {}
+    for name, credits in value.items():
+        if name in (None, "") or credits in (None, ""):
+            continue
+        try:
+            numeric = float(credits)
+        except (TypeError, ValueError):
+            continue
+        result[str(name)] = int(numeric) if numeric.is_integer() else numeric
+    return result
+
+
+def _math_expand_courses(
+    courses: Mapping[str, int | float],
+    aliases: Any,
+) -> tuple[dict[str, int | float], dict[str, dict[str, Any]]]:
+    """Add explicitly printed alternate names without changing requirements."""
+
+    expanded = dict(courses)
+    metadata: dict[str, dict[str, Any]] = {}
+    if not isinstance(aliases, Mapping):
+        return expanded, metadata
+    for canonical, values in aliases.items():
+        canonical_name = str(canonical)
+        if canonical_name not in courses or not isinstance(values, (list, tuple)):
+            continue
+        for alias in values:
+            alias_name = str(alias or "").strip()
+            if not alias_name or alias_name in expanded:
+                continue
+            expanded[alias_name] = courses[canonical_name]
+            metadata[alias_name] = {
+                "canonical_name": canonical_name,
+                "course_alias_of": canonical_name,
+            }
+    return expanded, metadata
+
+
+def _math_catalog_source(
+    source: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    sources = catalog.get("sources", {})
+    section = sources.get(key, {}) if isinstance(sources, Mapping) else {}
+    return _primary_section_source(source, section if isinstance(section, Mapping) else None)
+
+
+def _cs_primary_catalog(cohort: str) -> dict[str, Any]:
+    """Return the year-scoped CS primary catalogue contract.
+
+    The catalogue is deliberately separate from ``department_courses``:
+    that older map is also used by minor/target compatibility paths and does
+    not carry the primary page's alpha/beta membership evidence.  Primary
+    compilation therefore reads only the source-backed catalogue when it is
+    present, with the old map retained as a conservative fallback.
+    """
+
+    handbook = _RULES.get("handbooks", {}).get(str(cohort), {})
+    rules = handbook.get("cs_rules", {}) if isinstance(handbook, Mapping) else {}
+    catalog = rules.get("primary_catalog", {}) if isinstance(rules, Mapping) else {}
+    return deepcopy(dict(catalog)) if isinstance(catalog, Mapping) else {}
+
+
+def _cs_catalog_source(
+    source: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    """Resolve one CS primary category to its official page contract."""
+
+    sources = catalog.get("sources", {})
+    section = sources.get(key, {}) if isinstance(sources, Mapping) else {}
+    return _primary_section_source(source, section if isinstance(section, Mapping) else None)
+
+
+def _cs_course_source(
+    category_source: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Overlay one exact CS handbook row on its category source contract."""
+
+    scoped = deepcopy(dict(category_source))
+    source_reference = str(row.get("source_reference") or "")
+    pdf_page = row.get("pdf_page")
+    if pdf_page not in (None, ""):
+        scoped["pdf_page"] = pdf_page
+        scoped["printed_page"] = row.get("printed_page") or pdf_page
+        scoped["pages"] = f"PDF p.{pdf_page}"
+    if source_reference:
+        scoped["source_reference"] = source_reference
+    source_table = str(row.get("source_table") or "").strip()
+    if source_table:
+        scoped["table_location"] = source_table
+    name = str(row.get("course_name") or row.get("name") or "").strip()
+    credits = row.get("credits", 0)
+    note = str(row.get("original_note") or "").strip()
+    scoped["original_clause"] = (
+        f"{name} {float(credits):g} 學分；{note}"
+        if note
+        else f"{name} {float(credits):g} 學分；列於資科系主修課程表。"
+    )
+    return scoped
+
+
+def _cs_catalog_rows(catalog: Mapping[str, Any], category: str) -> tuple[dict[str, Any], ...]:
+    """Normalize draft-backed CS rows without inventing course identities."""
+
+    raw_rows = catalog.get(category, ())
+    if not isinstance(raw_rows, Sequence) or isinstance(raw_rows, (str, bytes, bytearray)):
+        return ()
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            continue
+        name = str(raw.get("course_name") or raw.get("name") or "").strip()
+        if not name or raw.get("credits") in (None, ""):
+            continue
+        try:
+            credits = float(raw["credits"])
+        except (TypeError, ValueError):
+            continue
+        if credits <= 0:
+            continue
+        row = deepcopy(dict(raw))
+        row["course_name"] = name
+        row["credits"] = int(credits) if credits.is_integer() else credits
+        domains = row.get("domains", ())
+        row["domains"] = tuple(
+            str(item).strip().lower()
+            for item in domains
+            if str(item).strip().lower() in {"common", "software", "network"}
+        ) if isinstance(domains, Sequence) and not isinstance(domains, (str, bytes, bytearray)) else ()
+        rows.append(row)
+    return tuple(rows)
+
+
+def _cs_candidate_data(
+    catalog: Mapping[str, Any],
+    cohort: str,
+    category: str,
+    requirement_id: str,
+) -> tuple[dict[str, int | float], dict[str, dict[str, Any]]]:
+    """Build exact candidate rows and server-owned membership evidence."""
+
+    rows = _cs_catalog_rows(catalog, category)
+    membership_id = f"cs_elective_{category}:{cohort}"
+    candidates: dict[str, int | float] = {}
+    metadata: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row["course_name"])
+        credits = row["credits"]
+        candidates[name] = credits
+        domains = tuple(row.get("domains", ())) if category == "beta" else ()
+        domain_ids = tuple(f"cs_beta_domain:{cohort}:{domain}" for domain in domains)
+        memberships = (membership_id, *domain_ids)
+        observed_ids = (requirement_id, *domain_ids)
+        source_reference = str(row.get("source_reference") or "")
+        note = str(row.get("original_note") or "").strip()
+        metadata[name] = {
+            "membership_ids": memberships,
+            "subset_ids": memberships,
+            "membership_source_reference": source_reference,
+            "observed_requirement_ids": observed_ids,
+            "source_domains": domains,
+            "source_row": row.get("source_row"),
+            "source_table": row.get("source_table"),
+            "original_note": note,
+            "pdf_page": row.get("pdf_page"),
+            "source_reference": source_reference,
+            "original_clause": (
+                f"{name} {float(credits):g} 學分；{note}"
+                if note
+                else f"{name} {float(credits):g} 學分；列於資科系{category}類課程表。"
+            ),
+            "pool_membership_evidence": tuple(
+                {
+                    "membership_id": item,
+                    "state": VERIFIED,
+                    "source_reference": source_reference,
+                    "kind": "official_handbook_membership",
+                }
+                for item in memberships
+            ),
+            "membership_assertions": tuple(
+                {
+                    "membership_id": item,
+                    "state": VERIFIED,
+                    "observed_requirement_ids": (requirement_id,),
+                    "source_reference": source_reference,
+                }
+                for item in memberships
+            ),
+        }
+    return candidates, metadata
+
+
+def _math_domain_courses(
+    catalog: Mapping[str, Any],
+    domain: str,
+    *,
+    include_required: bool = True,
+    include_electives: bool = True,
+) -> tuple[dict[str, int | float], dict[str, dict[str, Any]]]:
+    domains = catalog.get("domains", {})
+    spec = domains.get(domain, {}) if isinstance(domains, Mapping) else {}
+    if not isinstance(spec, Mapping):
+        return {}, {}
+    courses: dict[str, int | float] = {}
+    if include_required:
+        courses.update(_math_course_map(spec.get("required")))
+    if include_electives:
+        courses.update(_math_course_map(spec.get("electives")))
+    return _math_expand_courses(courses, spec.get("aliases"))
+
+
+def _math_department_candidates(
+    catalog: Mapping[str, Any],
+    cohort: str,
+    selected_track: str | None,
+) -> tuple[dict[str, int | float], dict[str, dict[str, Any]]]:
+    """Build the year-specific professional candidate pool.
+
+    The source tables list every domain and the ``其他`` rows.  A selected
+    113+ domain's named required rows are removed from this broad elective
+    pool so one transcript attempt cannot satisfy both the named requirement
+    and the 65-credit professional total.
+    """
+
+    candidates: dict[str, int | float] = {}
+    metadata: dict[str, dict[str, Any]] = {}
+    domains = catalog.get("domains", {})
+    selected_required: set[str] = set()
+    if selected_track and isinstance(domains, Mapping):
+        selected = domains.get(selected_track, {})
+        if isinstance(selected, Mapping):
+            selected_required = set(_math_course_map(selected.get("required")))
+    if isinstance(domains, Mapping):
+        for domain, spec in domains.items():
+            domain_courses, domain_metadata = _math_domain_courses(catalog, str(domain))
+            for name, credits in domain_courses.items():
+                if name in selected_required:
+                    continue
+                candidates.setdefault(name, credits)
+                if name in domain_metadata:
+                    metadata.setdefault(name, {}).update(domain_metadata[name])
+            if isinstance(spec, Mapping):
+                for name in spec.get("alpha", ()) if isinstance(spec.get("alpha"), (list, tuple)) else ():
+                    if name in candidates:
+                        metadata.setdefault(name, {}).setdefault("subset_ids", []).append(f"math_alpha:{cohort}")
+    other, other_metadata = _math_expand_courses(
+        _math_course_map(catalog.get("other")),
+        catalog.get("other_aliases"),
+    )
+    for name, credits in other.items():
+        if name in selected_required:
+            continue
+        candidates.setdefault(name, credits)
+        if name in other_metadata:
+            metadata.setdefault(name, {}).update(other_metadata[name])
+    requirement_ids = {
+        "alpha": f"math_alpha:{cohort}",
+        "external": f"external_department_or_school_professional:{cohort}",
+    }
+    for name in candidates:
+        item = metadata.setdefault(name, {})
+        memberships = item.setdefault("membership_assertions", [])
+        memberships.append(
+            {
+                "membership_id": "external_department_or_school_professional",
+                "state": "NOT_MEMBER",
+                "observed_requirement_ids": (requirement_ids["external"],),
+            }
+        )
+    return candidates, metadata
+
+
+def _primary_pool_bundle(
+    cohort: str,
+    program: str,
+    track: str | None,
+    source: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Build scoped pool policies and quota rows for one primary curriculum."""
+
+    handbook = _RULES.get("handbooks", {}).get(cohort, {})
+    handbook = handbook if isinstance(handbook, Mapping) else {}
+    shared = _RULES.get("shared", {}).get("university_common", {})
+    shared = shared if isinstance(shared, Mapping) else {}
+    university_contract = _university_common_contract(cohort)
+    pools: dict[str, dict[str, Any]] = {}
+    requirements: list[dict[str, Any]] = []
+    university_policy_source = _policy_source(
+        cohort,
+        "university_common",
+        source,
+        program=program,
+        track=track,
+    )
+    free_policy_source = _policy_source(
+        cohort,
+        "free_elective",
+        source,
+        program=program,
+        track=track,
+    )
+
+    def policy_descriptor(
+        policy_id: str,
+        predicate: Mapping[str, Any],
+        policy_source: Mapping[str, Any],
+        *,
+        automatic_decision: bool = True,
+    ) -> dict[str, Any]:
+        """Create the stable policy fields consumed by the policy adapter."""
+
+        evidence_state = str(policy_source.get("evidence_state") or VERIFIED)
+        coverage_state = str(policy_source.get("coverage_state") or COMPLETE)
+        source_automatic = policy_source.get("automatic_decision")
+        if source_automatic is False:
+            automatic_decision = False
+
+        return {
+            "policy_id": policy_id,
+            "revision": f"{cohort}.1",
+            "applies_to": {
+                "curriculum_versions": (cohort,),
+                "program_slugs": (program,),
+                "track_slugs": (track or "department",),
+                "roles": ("primary",),
+            },
+            "predicate": deepcopy(dict(predicate)),
+            "evidence_state": evidence_state,
+            "coverage_state": coverage_state,
+            "automatic_decision": automatic_decision,
+            "source_reference": policy_source.get("source_reference", ""),
+            "source_url": policy_source.get("source_url", ""),
+            "source_file": policy_source.get("source_file", ""),
+            "pdf_page": policy_source.get("pdf_page", "未標示"),
+            "printed_page": policy_source.get("printed_page", "未標示"),
+            "original_clause": policy_source.get("original_clause", ""),
+            "policy_source": deepcopy(dict(policy_source)),
+        }
+
+    def add(
+        bucket: str,
+        label: str,
+        candidates: Mapping[str, int | float] | None = None,
+        *,
+        source_override: Mapping[str, Any] | None = None,
+        candidate_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        required_credits: int | float | None = None,
+        selection_rule: str = "exact_title_credit_component",
+        policy: Mapping[str, Any] | None = None,
+        coverage_state: str = COMPLETE,
+        evidence_state: str = VERIFIED,
+        manual_reason: str = "",
+        requirement: bool = False,
+        requirement_type: str = "course_pool",
+        choice_group: str | None = None,
+        choice_rule: str | None = "at_least_credits_from_pool",
+        overflow_buckets: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        pool = _pool_record(
+            kind="primary",
+            cohort=cohort,
+            program=program,
+            track=track,
+            bucket=bucket,
+            label=label,
+            source=source_override or source,
+            candidates=candidates,
+            candidate_metadata=candidate_metadata,
+            required_credits=required_credits,
+            evidence_state=evidence_state,
+            coverage_state=coverage_state,
+            selection_rule=selection_rule,
+            policy=policy,
+            manual_reason=manual_reason,
+        )
+        pools[pool["id"]] = pool
+        if requirement and required_credits is not None and float(required_credits) > 0:
+            overflow_routes = tuple(
+                f"primary:{_canonical_id('primary', cohort, program, track)}:{program}.primary.{cohort}.{track or 'department'}.pool.{_pool_token(item)}"
+                for item in overflow_buckets
+            )
+            requirements.append(
+                _primary_pool_requirement_row(
+                    cohort,
+                    program,
+                    track,
+                    pool,
+                    source,
+                    suffix=bucket,
+                    requirement_type=requirement_type,
+                    choice_group=choice_group,
+                    choice_rule=choice_rule,
+                    overflow_routes=overflow_routes,
+                )
+            )
+        return pool
+
+    compulsory = shared.get("compulsory", {}) if isinstance(shared, Mapping) else {}
+    compulsory = compulsory if isinstance(compulsory, Mapping) else {}
+    compulsory_courses = university_contract.get("compulsory_courses", {})
+    add(
+        "university_compulsory",
+        "校共同必修",
+        compulsory_courses if isinstance(compulsory_courses, Mapping) else {},
+        required_credits=university_contract.get("compulsory_total", compulsory.get("total_req", 10)),
+        policy={
+            "allowed_scope": "university_common",
+            "exact_title_and_credits": True,
+            "excluded_from_free": True,
+        },
+    )
+    ge = shared.get("ge_categories", {}) if isinstance(shared, Mapping) else {}
+    categories = ge.get("categories", {}) if isinstance(ge, Mapping) else {}
+    per_category = university_contract.get(
+        "category_min_each",
+        ge.get("per_category_req", 4) if isinstance(ge, Mapping) else 4,
+    )
+    if isinstance(categories, Mapping):
+        for category, aliases in categories.items():
+            add(
+                f"ge_{category}",
+                f"通識分類：{category}",
+                {},
+                required_credits=per_category,
+                selection_rule="official_category_policy",
+                policy={
+                    **policy_descriptor(
+                        f"university_common.ge_category.{cohort}.{_pool_token(category)}",
+                        {
+                            "kind": "official_category_membership",
+                            "category": category,
+                            "minimum_credits": float(per_category),
+                            "candidate_aliases_are_not_authoritative": True,
+                        },
+                        university_policy_source,
+                    ),
+                    "category": category,
+                    "title_aliases": tuple(aliases) if isinstance(aliases, (list, tuple)) else (),
+                    "allowed_scope": "university_common",
+                    "excluded_from_free": True,
+                },
+            )
+    add(
+        "ge_common_elective",
+        "通識共同選修",
+        {},
+        required_credits=university_contract.get(
+            "common_elective_min",
+            shared.get("ge_common_elective_req", 2) if isinstance(shared, Mapping) else 2,
+        ),
+        selection_rule="official_category_policy",
+        policy={
+            **policy_descriptor(
+                f"university_common.ge_common_elective.{cohort}",
+                {
+                    "kind": "official_category_membership",
+                    "category": "common_elective",
+                    "minimum_credits": float(
+                        university_contract.get(
+                            "common_elective_min",
+                            shared.get("ge_common_elective_req", 2) if isinstance(shared, Mapping) else 2,
+                        )
+                    ),
+                    "candidate_aliases_are_not_authoritative": True,
+                },
+                university_policy_source,
+            ),
+            "allowed_scope": "university_common",
+            "category": "common_elective",
+            "excluded_from_free": True,
+        },
+    )
+    free_amount = float(free_policy_source.get("total_req") or 15)
+    free_amount_semantics = str(free_policy_source.get("amount_semantics") or "MINIMUM").upper()
+    raw_requirement_minimum = free_policy_source.get("requirement_minimum_credits")
+    if raw_requirement_minimum not in (None, ""):
+        free_requirement_minimum = float(raw_requirement_minimum)
+    elif free_amount_semantics not in {"MAXIMUM", "SUBSET_MAXIMUM"}:
+        free_requirement_minimum = free_amount
+    else:
+        # 111/112 use the 15-credit value only for the external-professional
+        # subset; it is not an independent free-elective minimum.
+        free_requirement_minimum = None
+    raw_subset_maxima = free_policy_source.get("subset_maxima")
+    free_subset_maxima = (
+        deepcopy(dict(raw_subset_maxima))
+        if isinstance(raw_subset_maxima, Mapping)
+        else {}
+    )
+    # The 113–115 Math handbooks state the same 15-credit external
+    # professional cap even when the shared policy payload predates the
+    # per-program subset field.  Keep the source payload untouched in the
+    # audit copy, while making the selected non-teacher policy executable.
+    if program == "math" and cohort not in {"111", "112"}:
+        free_subset_maxima.setdefault("external_department_or_school_professional", {})[
+            "non_teacher"
+        ] = 15
+    free_is_legacy_maximum = (
+        free_requirement_minimum is None
+        and free_amount_semantics == "MAXIMUM"
+        and not free_subset_maxima
+    )
+    free_science_minimum = float(free_policy_source.get("minimum_science_college_credits") or 0)
+    free_science_state = str(free_policy_source.get("science_subset_state") or "NOT_STATED").upper()
+    free_predicate: dict[str, Any] = {
+        "kind": "exclusive_open_elective",
+        "amount_semantics": free_amount_semantics,
+        "candidate_aliases_are_not_authoritative": True,
+    }
+    if free_requirement_minimum is not None:
+        free_predicate["minimum_credits"] = free_requirement_minimum
+    elif free_is_legacy_maximum:
+        free_predicate["maximum_credits"] = free_amount
+        maximum_by_student_type = free_policy_source.get("maximum_credits_by_student_type")
+        if isinstance(maximum_by_student_type, Mapping):
+            free_predicate["maximum_credits_by_student_type"] = deepcopy(dict(maximum_by_student_type))
+    if free_subset_maxima:
+        free_predicate["subset_maxima"] = deepcopy(free_subset_maxima)
+        subset_constraints: list[dict[str, Any]] = []
+        active_student_type = "non_teacher" if program == "math" else None
+        for subset_id, limits in free_subset_maxima.items():
+            if not isinstance(limits, Mapping):
+                continue
+            for student_type, maximum in limits.items():
+                if maximum in (None, ""):
+                    continue
+                if active_student_type and str(student_type) != active_student_type:
+                    continue
+                subset_constraints.append(
+                    {
+                        "constraint_id": f"{subset_id}:{student_type}:maximum",
+                        "subset_id": str(subset_id),
+                        "student_type": str(student_type),
+                        "maximum_credits": float(maximum),
+                    }
+                )
+        if subset_constraints:
+            free_predicate["subset_constraints"] = subset_constraints
+        if active_student_type:
+            free_predicate["student_type"] = active_student_type
+    if free_science_minimum > 0 and free_science_state == VERIFIED:
+        free_predicate.setdefault("subset_constraints", []).append(
+            {
+                "constraint_id": "science_college_minimum",
+                "membership_id": "science_college",
+                "minimum_credits": free_science_minimum,
+            }
+        )
+    # CS 甲類 rows are named requirements, so a matching attempt cannot be
+    # reused to satisfy the open-free pool.  ``exclude_pool_ids`` is the
+    # executable identity guard used by the allocator; the explicit
+    # membership value remains available to the policy/subset adapters and
+    # makes the source contract auditable without trusting student input.
+    if program == "cs":
+        alpha_membership_id = f"cs_elective_alpha:{cohort}"
+        alpha_pool_id = _pool_id("primary", cohort, program, track, "cs_elective_alpha")
+        free_predicate["excluded_membership_ids"] = (alpha_membership_id,)
+        free_predicate["exclude_pool_ids"] = (alpha_pool_id,)
+    free_policy = {
+        **policy_descriptor(
+            f"university_common.free_total.{cohort}",
+            free_predicate,
+            free_policy_source,
+        ),
+        "allowed_scope": "official_course_catalog",
+        "amount_semantics": free_amount_semantics,
+        "total_req": free_amount,
+        "requirement_minimum_credits": free_requirement_minimum,
+        "subset_maxima": deepcopy(free_subset_maxima),
+        "active_subset_maxima": (
+            {
+                subset_id: {"non_teacher": limits.get("non_teacher")}
+                for subset_id, limits in free_subset_maxima.items()
+                if isinstance(limits, Mapping) and limits.get("non_teacher") not in (None, "")
+            }
+            if program == "math"
+            else {}
+        ),
+        "allow_external_departments": bool(free_policy_source.get("allow_external_departments", True)),
+        "minimum_science_college_credits": free_science_minimum,
+        "science_subset_state": free_science_state,
+        "exclude_allocated_attempts": bool(free_policy_source.get("exclude_allocated_attempts", True)),
+        "requires_official_course_catalog": bool(free_policy_source.get("requires_official_course_catalog", True)),
+    }
+    if program == "cs":
+        free_policy.update(
+            {
+                "excluded_membership_ids": (f"cs_elective_alpha:{cohort}",),
+                "exclude_pool_ids": (_pool_id("primary", cohort, program, track, "cs_elective_alpha"),),
+            }
+        )
+    add(
+        "free_elective",
+        "自由選修",
+        {},
+        required_credits=free_requirement_minimum,
+        selection_rule="official_open_elective_policy",
+        policy=free_policy,
+        requirement=free_requirement_minimum is not None,
+    )
+
+    if program == "earth":
+        earth = handbook.get("earth_life_major", {})
+        earth = earth if isinstance(earth, Mapping) else {}
+        common = earth.get("common_compulsory", {})
+        common = common if isinstance(common, Mapping) else {}
+        common_courses = common.get("courses", {})
+        add(
+            "common_compulsory",
+            "地生共同必修",
+            common_courses if isinstance(common_courses, Mapping) else {},
+            required_credits=common.get("total_req", 24),
+            policy={"allowed_scope": "earth_common", "exact_title_and_credits": True},
+        )
+        domain_label = "地球環境" if track == "earth_environment" else "生命科學"
+        domains = earth.get("domains", {})
+        selected_domain = domains.get(domain_label, {}) if isinstance(domains, Mapping) else {}
+        selected_domain = selected_domain if isinstance(selected_domain, Mapping) else {}
+        domain_compulsory = selected_domain.get("compulsory", {})
+        domain_electives = selected_domain.get("electives", {})
+        add(
+            "domain_required",
+            f"{domain_label}專業領域必修",
+            domain_compulsory if isinstance(domain_compulsory, Mapping) else {},
+            required_credits=14,
+            policy={"allowed_scope": "earth_domain", "domain": domain_label, "exact_title_and_credits": True},
+        )
+        common_electives = earth.get("common_electives", {})
+        common_electives = common_electives if isinstance(common_electives, Mapping) else {}
+        common_elective_requirement = 12 if cohort == "111" else None
+        domain_elective_credits = 22 if cohort == "111" else 20
+        other_credits = 13 if cohort == "111" else 27
+        add(
+            "common_elective",
+            "地生共同選修",
+            common_electives,
+            required_credits=common_elective_requirement,
+            policy={"allowed_scope": "earth_common_elective", "exact_title_and_credits": True},
+            requirement=common_elective_requirement is not None,
+            overflow_buckets=("department_professional",),
+        )
+        add(
+            "domain_elective",
+            f"{domain_label}專業領域選修",
+            domain_electives if isinstance(domain_electives, Mapping) else {},
+            required_credits=domain_elective_credits,
+            policy={"allowed_scope": "earth_domain_elective", "domain": domain_label, "exact_title_and_credits": True},
+            requirement=True,
+            overflow_buckets=("department_professional",),
+        )
+        all_professional: dict[str, int | float] = {}
+        for domain_data in (domains.values() if isinstance(domains, Mapping) else ()):
+            if not isinstance(domain_data, Mapping):
+                continue
+            for field in ("compulsory", "electives"):
+                values = domain_data.get(field, {})
+                if isinstance(values, Mapping):
+                    all_professional.update(values)
+        all_professional.update(common_electives)
+        add(
+            "department_professional",
+            "地生系內／全系專業課程",
+            all_professional,
+            required_credits=other_credits,
+            policy={
+                "allowed_scope": "earth_department_professional",
+                "department": "地球環境暨生物資源學系",
+                "exclude_non_professional": True,
+                "exact_title_and_credits": True,
+            },
+            requirement=True,
+        )
+        alternatives = earth.get("common_alternatives", ())
+        if isinstance(alternatives, (list, tuple)):
+            for index, alternative in enumerate(alternatives, start=1):
+                if not isinstance(alternative, Mapping):
+                    continue
+                options = alternative.get("options", {})
+                if not isinstance(options, Mapping):
+                    continue
+                pool = add(
+                    f"common_alternative_{index}",
+                    str(alternative.get("label") or f"共同必修選擇 {index}"),
+                    options,
+                    required_credits=alternative.get("required_credits", 0),
+                    selection_rule="one_of_exact_title_credit",
+                    policy={"allowed_scope": "earth_common", "choice_count": 1},
+                    coverage_state=COMPLETE,
+                    requirement=True,
+                    requirement_type="choice",
+                    choice_group=f"earth_common_alternative_{index}",
+                    choice_rule="one_of",
+                )
+                # The row above is a pool requirement only when the source
+                # declares a positive amount; keep the candidate pool even
+                # when malformed/empty input is encountered.
+                del pool
+    elif program == "apc":
+        apc = handbook.get("apc_rules", {})
+        apc = apc if isinstance(apc, Mapping) else {}
+        common_catalog = apc.get("common_catalog")
+        if not isinstance(common_catalog, Mapping):
+            common_catalog = {
+                **(
+                    apc.get("basic_core", {})
+                    if isinstance(apc.get("basic_core", {}), Mapping)
+                    else {}
+                ),
+                **(
+                    apc.get("shared_other_required", {})
+                    if isinstance(apc.get("shared_other_required", {}), Mapping)
+                    else {}
+                ),
+            }
+        common_by_track = apc.get("common_required_by_track", {})
+        common_by_track = common_by_track if isinstance(common_by_track, Mapping) else {}
+        division_label = "物理組" if track == "physics" else "化學組"
+        required_common = common_by_track.get(division_label)
+        if not isinstance(required_common, Mapping):
+            required_common = common_catalog
+        common_evidence = _primary_section_source(
+            source,
+            apc.get("common_catalog_evidence"),
+        )
+        required_credits = sum(float(value) for value in required_common.values())
+        add(
+            "apc_common_compulsory",
+            "物化系共同必修",
+            required_common,
+            source_override=common_evidence,
+            required_credits=required_credits,
+            policy={"allowed_scope": "apc_common", "exact_title_and_credits": True},
+        )
+        # Keep the other group's experiments as auditable candidate evidence,
+        # but outside the selected common requirement.  They can only be
+        # considered later by the official open-free policy.
+        cross_track_candidates = {
+            name: credits
+            for name, credits in common_catalog.items()
+            if name not in required_common
+        }
+        if cross_track_candidates:
+            add(
+                "apc_cross_track_lab_candidates",
+                "物化系跨組實驗候選（不可直接列入本組必修）",
+                cross_track_candidates,
+                source_override=common_evidence,
+                policy={
+                    "allowed_scope": "apc_cross_track_lab_candidate",
+                    "eligible_for_free_elective_policy": True,
+                    "track_required": division_label,
+                    "exact_title_and_credits": True,
+                },
+            )
+        division = apc.get("divisions", {}).get(division_label, {}) if isinstance(apc.get("divisions", {}), Mapping) else {}
+        compulsory_values = division.get("compulsory", {}) if isinstance(division, Mapping) else {}
+        required_evidence_by_track = apc.get("required_evidence_by_track", {})
+        required_evidence_by_track = (
+            required_evidence_by_track
+            if isinstance(required_evidence_by_track, Mapping)
+            else {}
+        )
+        add(
+            "apc_track_compulsory",
+            f"物化{division_label}專業必修",
+            compulsory_values if isinstance(compulsory_values, Mapping) else {},
+            source_override=_primary_section_source(
+                source,
+                required_evidence_by_track.get(division_label),
+            ),
+            required_credits=sum(float(value) for value in compulsory_values.values()) if isinstance(compulsory_values, Mapping) else 0,
+            policy={"allowed_scope": "apc_track", "track": division_label, "exact_title_and_credits": True},
+        )
+        elective_catalogs = apc.get("primary_electives", {})
+        elective_catalogs = elective_catalogs if isinstance(elective_catalogs, Mapping) else {}
+        elective_spec = elective_catalogs.get(division_label, {})
+        elective_spec = elective_spec if isinstance(elective_spec, Mapping) else {}
+        elective_courses = elective_spec.get("courses", {})
+        elective_courses = elective_courses if isinstance(elective_courses, Mapping) else {}
+        elective_evidence = elective_spec.get("evidence", {})
+        elective_evidence = elective_evidence if isinstance(elective_evidence, Mapping) else {}
+        elective_metadata = elective_spec.get("course_metadata", {})
+        elective_metadata = elective_metadata if isinstance(elective_metadata, Mapping) else {}
+        elective_state = str(elective_evidence.get("evidence_state") or VERIFIED)
+        elective_coverage = str(elective_evidence.get("coverage_state") or COMPLETE)
+        elective_reason = str(
+            elective_evidence.get("manual_reason")
+            or elective_evidence.get("manual_review_reason")
+            or ""
+        )
+        add(
+            "apc_track_elective",
+            f"物化{division_label}專業選修",
+            elective_courses,
+            source_override=_primary_section_source(source, elective_evidence),
+            candidate_metadata=elective_metadata,
+            required_credits=25 if cohort == "115" else 24 if track == "chemistry" else 25,
+            selection_rule="official_department_elective_policy",
+            policy={"allowed_scope": "apc_track_elective", "track": division_label, "department_approval_required": True},
+            evidence_state=elective_state,
+            coverage_state=elective_coverage,
+            manual_reason=elective_reason,
+            requirement=True,
+        )
+    elif program == "cs":
+        cs = handbook.get("cs_rules", {})
+        cs = cs if isinstance(cs, Mapping) else {}
+        primary_catalog = _cs_primary_catalog(cohort)
+        configured_required = primary_catalog.get("named_core") if primary_catalog else cs.get("primary_named_core")
+        required = (
+            dict(configured_required)
+            if isinstance(configured_required, Mapping)
+            else {
+                "計算機概論": 3,
+                "Java程式設計": 3,
+                "離散數學": 3,
+                "C程式設計": 3,
+                "資料結構": 3,
+                "數位電子學": 3,
+                "線性代數": 3,
+                "演算法": 3,
+                "數位系統設計": 3,
+                "作業系統": 3,
+                "資訊專題(I)": 1,
+            }
+        )
+        required_source = (
+            _cs_catalog_source(source, primary_catalog, "required")
+            if primary_catalog
+            else source
+        )
+        add(
+            "cs_department_required",
+            "資科系專業必修",
+            required,
+            source_override=required_source,
+            required_credits=31,
+            policy={"allowed_scope": "cs_required", "exact_title_and_credits": True},
+        )
+
+        # The 54-credit elective block is composed of 12 named alpha rows
+        # (32 credits) plus one beta remainder (22 credits).  Keep alpha as
+        # a candidate pool only: its individual named rows are emitted by
+        # _course_catalog below, so a missing alpha course cannot be replaced
+        # by another beta course or by the free-elective pool.
+        alpha_requirement_id = f"cs.primary.{cohort}.alpha"
+        alpha_candidates, alpha_metadata = _cs_candidate_data(
+            primary_catalog,
+            cohort,
+            "alpha",
+            alpha_requirement_id,
+        )
+        alpha_source = (
+            _cs_catalog_source(source, primary_catalog, "alpha")
+            if primary_catalog
+            else source
+        )
+        alpha_pool = add(
+            "cs_elective_alpha",
+            "資科系甲類專業選修（指定課程候選）",
+            alpha_candidates,
+            source_override=alpha_source,
+            candidate_metadata=alpha_metadata,
+            selection_rule="exact_title_credit_component",
+            policy={
+                "allowed_scope": "cs_elective_alpha",
+                "membership_id": f"cs_elective_alpha:{cohort}",
+                "required_named_courses": True,
+                "excluded_from_free": True,
+                "exact_title_and_credits": True,
+                "rollup_group_id": "cs_primary_elective_54",
+                "rollup_required_credits": 54,
+            },
+            coverage_state=COMPLETE,
+        )
+        alpha_pool.update(
+            {
+                "membership_id": f"cs_elective_alpha:{cohort}",
+                "membership_ids": (f"cs_elective_alpha:{cohort}",),
+                "excluded_from_free": True,
+                "rollup_group_id": "cs_primary_elective_54",
+                "rollup_required_credits": 54,
+            }
+        )
+
+        beta_requirement_id = f"cs.primary.{cohort}.beta_remainder"
+        beta_candidates, beta_metadata = _cs_candidate_data(
+            primary_catalog,
+            cohort,
+            "beta",
+            beta_requirement_id,
+        )
+        beta_source = (
+            _cs_catalog_source(source, primary_catalog, "beta")
+            if primary_catalog
+            else source
+        )
+        beta_domains = primary_catalog.get("beta_domains", {}) if primary_catalog else {}
+        beta_domains = beta_domains if isinstance(beta_domains, Mapping) else {}
+        beta_constraints: list[dict[str, Any]] = []
+        for domain, domain_spec in beta_domains.items():
+            if not isinstance(domain_spec, Mapping):
+                continue
+            membership_id = str(
+                domain_spec.get("membership_id")
+                or f"cs_beta_domain:{cohort}:{domain}"
+            )
+            observed_ids = (
+                beta_requirement_id,
+                f"primary:primary:{cohort}:cs:{beta_requirement_id}",
+            )
+            beta_constraints.append(
+                {
+                    "constraint_id": membership_id,
+                    "membership_id": membership_id,
+                    "subset_id": membership_id,
+                    "minimum_course_count": 1,
+                    "observed_requirement_ids": observed_ids,
+                    "source_reference": beta_source.get("source_reference", ""),
+                    "evidence_state": VERIFIED,
+                }
+            )
+        beta_membership_id = f"cs_elective_beta:{cohort}"
+        beta_predicate = {
+            "kind": "exclusive_cs_beta_remainder",
+            "membership_id": beta_membership_id,
+            "required_credits": 22,
+            "minimum_credits": 22,
+            "observed_requirement_ids": (
+                beta_requirement_id,
+                f"primary:primary:{cohort}:cs:{beta_requirement_id}",
+            ),
+            "subset_constraints": beta_constraints,
+            "minimum_course_count": 1,
+            "count_unique_attempts": True,
+            "exclusive_only": True,
+            "exclude_free_and_unallocated": True,
+            "overflow_to_free": True,
+            "rollup_group_id": "cs_primary_elective_54",
+            "rollup_required_credits": 54,
+        }
+        beta_policy = {
+            **policy_descriptor(
+                f"cs.primary.beta_remainder.{cohort}",
+                beta_predicate,
+                beta_source,
+            ),
+            "allowed_scope": "cs_elective_beta",
+            "membership_id": beta_membership_id,
+            "membership_ids": (beta_membership_id,),
+            "required_credits": 22,
+            "minimum_course_count": 1,
+            "subset_constraints": beta_constraints,
+            "exclusive": True,
+            "overflow_to_free": True,
+            "rollup_group_id": "cs_primary_elective_54",
+            "rollup_required_credits": 54,
+            "exact_title_and_credits": True,
+        }
+        beta_pool = add(
+            "cs_elective_beta",
+            "資科系乙類專業選修（領域候選）",
+            beta_candidates,
+            source_override=beta_source,
+            candidate_metadata=beta_metadata,
+            required_credits=22,
+            selection_rule="official_category_elective_policy",
+            policy=beta_policy,
+            coverage_state=COMPLETE,
+            requirement=True,
+            overflow_buckets=("free_elective",),
+        )
+        beta_pool.update(
+            {
+                "membership_id": beta_membership_id,
+                "membership_ids": (beta_membership_id,),
+                "minimum_course_count": 1,
+                "subset_constraints": deepcopy(beta_constraints),
+                "rollup_group_id": "cs_primary_elective_54",
+                "rollup_required_credits": 54,
+            }
+        )
+        if requirements:
+            # ``add`` derives the pool row ID from the bucket.  Publish a
+            # short stable requirement ID for the Core subset adapter while
+            # retaining the pool ID and all source provenance.
+            remainder = requirements[-1]
+            old_requirement_id = remainder.get("requirement_id")
+            remainder["id"] = beta_requirement_id
+            remainder["requirement_id"] = beta_requirement_id
+            remainder["source_assertion_id"] = beta_requirement_id
+            remainder["assertion_id"] = beta_requirement_id
+            remainder["official_course_identity"] = f"{cohort}:cs:department:pool:beta_remainder"
+            remainder["observed_requirement_ids"] = (
+                beta_requirement_id,
+                f"primary:primary:{cohort}:cs:{beta_requirement_id}",
+            )
+            # Keep the subset contract on the executable row as well as on
+            # the pool policy.  The current compiler preserves row-level
+            # constraints even when a custom selection rule is not a public
+            # policy descriptor; Core can therefore enforce the domain
+            # witnesses without inventing another credit consumer.
+            remainder["membership_id"] = beta_membership_id
+            remainder["membership_ids"] = (beta_membership_id,)
+            remainder["minimum_course_count"] = 1
+            remainder["subset_constraints"] = deepcopy(beta_constraints)
+            remainder["exclusive"] = True
+            remainder["overflow_to_free"] = True
+            remainder["rollup_group_id"] = "cs_primary_elective_54"
+            remainder["rollup_required_credits"] = 54
+            remainder.setdefault("provenance", {})["requirement_id"] = beta_requirement_id
+            remainder["provenance"]["legacy_requirement_id"] = old_requirement_id
+    else:
+        math_rules = handbook.get("math_rules", {})
+        math_rules = math_rules if isinstance(math_rules, Mapping) else {}
+        primary_catalog = _math_primary_catalog(cohort)
+        if primary_catalog:
+            common_math = _math_course_map(primary_catalog.get("common_required"))
+            if not common_math:
+                common_math = _math_course_map(math_rules.get("common_compulsory"))
+            common_required_credits = sum(float(value) for value in common_math.values())
+            common_math, common_metadata = _math_expand_courses(
+                common_math,
+                primary_catalog.get("common_aliases"),
+            )
+            add(
+                "math_common_compulsory",
+                "數學系共同必修",
+                common_math,
+                source_override=_math_catalog_source(source, primary_catalog, "common"),
+                candidate_metadata=common_metadata,
+                required_credits=common_required_credits,
+                policy={
+                    "allowed_scope": "math_common",
+                    "student_type": "non_teacher",
+                    "exact_title_and_credits": True,
+                },
+            )
+
+            selected_domain = track if track in set(_MATH_PRIMARY_TRACKS.get(cohort, ())) else None
+            selected_required: dict[str, int | float] = {}
+            selected_source = _math_catalog_source(source, primary_catalog, selected_domain or "professional")
+            if selected_domain:
+                domain_spec = (
+                    primary_catalog.get("domains", {}).get(selected_domain, {})
+                    if isinstance(primary_catalog.get("domains", {}), Mapping)
+                    else {}
+                )
+                if isinstance(domain_spec, Mapping):
+                    selected_required = _math_course_map(domain_spec.get("required"))
+                add(
+                    "math_domain_required",
+                    f"數學系{_TRACK_DISPLAY.get(selected_domain, selected_domain)}領域必修",
+                    selected_required,
+                    source_override=selected_source,
+                    required_credits=sum(float(value) for value in selected_required.values()),
+                    policy={
+                        "allowed_scope": "math_domain",
+                        "domain": selected_domain,
+                        "student_type": "non_teacher",
+                        "membership_id": f"math_domain:{cohort}:{selected_domain}",
+                        "observed_requirement_ids": (f"math.primary.{cohort}.{selected_domain}.required",),
+                        "exact_title_and_credits": True,
+                    },
+                    # The selected domain's named rows are the authoritative
+                    # required consumers.  Keep this pool for candidate and
+                    # provenance discovery, but do not emit a second quota
+                    # consumer for the same domain credits.
+                    requirement=False,
+                )
+            else:
+                # 111/112 have no selectable domain requirement.  Keep an
+                # empty named bucket for stable pool discovery without
+                # inventing an extra requirement or unioning all domains.
+                add(
+                    "math_domain_required",
+                    "數學系專業領域課程（非獨立必修）",
+                    {},
+                    source_override=_math_catalog_source(source, primary_catalog, "professional"),
+                    policy={
+                        "allowed_scope": "math_domain_catalog",
+                        "student_type": "non_teacher",
+                        "candidate_only": True,
+                    },
+                )
+
+            department_courses, department_metadata = _math_department_candidates(
+                primary_catalog,
+                cohort,
+                selected_domain,
+            )
+            department_requirement_id = (
+                f"{program}.primary.{cohort}.{track or 'department'}.pool.math_department_elective"
+            )
+            subset_constraints: list[dict[str, Any]] = []
+            alpha_minimum = primary_catalog.get("alpha_minimum_credits")
+            if cohort in {"111", "112"} and alpha_minimum not in (None, "", 0):
+                alpha_id = f"math_alpha:{cohort}"
+                subset_constraints.append(
+                    {
+                        "constraint_id": f"{alpha_id}:minimum",
+                        "membership_id": alpha_id,
+                        "subset_id": alpha_id,
+                        "minimum_credits": float(alpha_minimum),
+                        "observed_requirement_ids": (department_requirement_id,),
+                    }
+                )
+            if cohort in {"111", "112"}:
+                subset_constraints.append(
+                    {
+                        "constraint_id": f"external_department_or_school_professional:{cohort}:maximum",
+                        "membership_id": "external_department_or_school_professional",
+                        "subset_id": "external_department_or_school_professional",
+                        "maximum_credits": 15.0,
+                        "student_type": "non_teacher",
+                        "observed_requirement_ids": (department_requirement_id,),
+                    }
+                )
+            department_minimum = primary_catalog.get("department_elective_minimum_by_track", {}).get(
+                selected_domain or "department",
+                64 if cohort in {"111", "112"} else max(0, 65 - int(sum(selected_required.values()))),
+            )
+            department_policy = {
+                "allowed_scope": "math_department",
+                # Modern handbooks allow the same eligible departmental
+                # elective to supply the remaining free-elective credits.
+                # The allocator checks destination eligibility separately.
+                "overflow_to_free": cohort not in {"111", "112"},
+                "student_type": "non_teacher",
+                "membership_id": f"math_department:{cohort}",
+                "observed_requirement_ids": (f"math.primary.{cohort}.department_elective",),
+                "department_approval_required": True,
+                "exact_title_and_credits": True,
+            }
+            if subset_constraints:
+                department_policy["subset_constraints"] = subset_constraints
+            add(
+                "math_department_elective",
+                "數學系專業選修",
+                department_courses,
+                source_override=_math_catalog_source(source, primary_catalog, "professional"),
+                candidate_metadata=department_metadata,
+                required_credits=department_minimum,
+                selection_rule="official_department_elective_policy",
+                policy=department_policy,
+                coverage_state=COMPLETE,
+                requirement=True,
+            )
+        else:
+            # Conservative compatibility path for a malformed/legacy
+            # handbook config.  Normal checked-in Math cohorts all carry the
+            # source-backed primary_catalog above.
+            common_math = math_rules.get("common_compulsory", {})
+            add(
+                "math_common_compulsory",
+                "數學系共同必修",
+                common_math if isinstance(common_math, Mapping) else {},
+                required_credits=sum(float(value) for value in common_math.values()) if isinstance(common_math, Mapping) else 0,
+                policy={"allowed_scope": "math_common", "exact_title_and_credits": True},
+            )
+            add(
+                "math_domain_required",
+                "數學系專業領域必修",
+                {},
+                policy={"allowed_scope": "math_domain", "exact_title_and_credits": True},
+            )
+            add(
+                "math_department_elective",
+                "數學系專業選修",
+                {},
+                required_credits=64 if cohort in {"111", "112"} else 65,
+                selection_rule="official_department_elective_policy",
+                policy={"allowed_scope": "math_department", "department_approval_required": True},
+                coverage_state=PARTIAL,
+                manual_reason="手冊明列選修額度與分類限制；本地逐課候選池仍需依該年度表格補齊。",
+                requirement=True,
+            )
+
+    return pools, requirements
+
+
+def _primary_zero_credit_source(
+    cohort: str,
+    program: str,
+    series: str,
+    source: Mapping[str, Any],
+    *,
+    original_clause: str,
+) -> dict[str, Any] | None:
+    """Return the year/program-scoped source for a primary zero-credit gate.
+
+    The handbook tables describe an aggregate series, while the public course
+    catalogue supplies the term-bound course membership later.  Keep those
+    two facts separate here: this source object records only the reviewed
+    primary-table evidence and never invents an offering identity.
+    """
+
+    shared = _RULES.get("shared", {})
+    policy = shared.get("primary_zero_credit", {}) if isinstance(shared, Mapping) else {}
+    if not isinstance(policy, Mapping):
+        return None
+    series_contract = policy.get(series, {})
+    if not isinstance(series_contract, Mapping):
+        return None
+    evidence_by_cohort = series_contract.get("evidence_by_cohort", {})
+    cohort_contract = (
+        evidence_by_cohort.get(str(cohort), {})
+        if isinstance(evidence_by_cohort, Mapping)
+        else {}
+    )
+    evidence = cohort_contract.get(program, {}) if isinstance(cohort_contract, Mapping) else {}
+    if not isinstance(evidence, Mapping) or not evidence or bool(evidence.get("omitted")):
+        # An omitted or deleted source row is provenance, not a required=false
+        # placeholder.  The caller therefore emits no active requirement.
+        return None
+
+    research_by_program = policy.get("research_file_by_program", {})
+    research_file = (
+        research_by_program.get(program)
+        if isinstance(research_by_program, Mapping)
+        else None
+    ) or source.get("research_file", "")
+    pdf_page = str(evidence.get("pdf_page") or "未標示")
+    printed_page = str(evidence.get("printed_page") or "未標示")
+    pages = str(evidence.get("pages") or pdf_page)
+    page_token = re.sub(r"[^0-9A-Za-z一-鿿]+", "-", pdf_page).strip("-").lower()
+    source_reference = str(
+        evidence.get("source_reference")
+        or f"handbook:{cohort}:primary:{program}:{series}:pdf:{page_token or 'unmarked'}"
+    )
+    source_file = str(evidence.get("source_file") or source.get("source_file") or _source_file(cohort))
+    source_url = str(evidence.get("source_url") or source.get("source_url") or _HANDBOOK_URLS.get(cohort, ""))
+    result = deepcopy(dict(source))
+    result.update(
+        {
+            "source_type": str(policy.get("source_type") or "official_primary_handbook_section"),
+            "research_file": str(research_file),
+            "source_url": source_url,
+            "url": source_url,
+            "source_file": source_file,
+            "file": source_file,
+            "pdf_page": pdf_page,
+            "printed_page": printed_page,
+            "pages": pages,
+            "table_location": str(evidence.get("table_location") or "官方主修課程表"),
+            "source_reference": source_reference,
+            "original_clause": str(evidence.get("original_clause") or original_clause),
+            "evidence_state": str(evidence.get("evidence_state") or VERIFIED),
+            "verification_status": str(evidence.get("evidence_state") or VERIFIED),
+            "coverage_state": str(evidence.get("coverage_state") or COMPLETE),
+            "automation_sufficiency": str(evidence.get("automation_sufficiency") or COMPLETE),
+            "automatic_decision": bool(evidence.get("automatic_decision", True)),
+            "manual_reason": str(evidence.get("manual_reason") or ""),
+            "manual_review_reason": str(evidence.get("manual_review_reason") or evidence.get("manual_reason") or ""),
+        }
+    )
+    if evidence.get("amendment_action"):
+        result["amendment_action"] = str(evidence["amendment_action"])
+    return result
+
+
+def _primary_zero_credit_descriptor(
+    cohort: str,
+    program: str,
+    track: str | None,
+    series: str,
+    source: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build one source-backed primary non-credit series descriptor.
+
+    ``applicable_*`` describes the selected registry record.  The membership
+    flags stay false because a server-owned GE/department course listing may
+    not carry the student's programme or track as offering metadata.
+    """
+
+    shared = _RULES.get("shared", {})
+    policy = shared.get("primary_zero_credit", {}) if isinstance(shared, Mapping) else {}
+    contract = policy.get(series, {}) if isinstance(policy, Mapping) else {}
+    if not isinstance(contract, Mapping):
+        return None
+    name = str(contract.get("name") or ("大學生活學習與輔導" if series == "life_guidance" else "服務學習"))
+    track_slug = track if program in {"earth", "apc"} else "department"
+    if series == "life_guidance" and program == "cs":
+        eligible_names = tuple(f"{name} Part {index}" for index in range(1, 9))
+    else:
+        eligible_names = (name,)
+    hours_by_program = contract.get("hours_by_program", {})
+    hours = hours_by_program.get(program, {}) if isinstance(hours_by_program, Mapping) else {}
+    hours = hours if isinstance(hours, Mapping) else {}
+    if series == "life_guidance":
+        if program == "cs":
+            clause = "各學期「大學生活學習與輔導 Part 1–8」為 0 學分，第一至四年共 8 學期。"
+        else:
+            clause = "各學期「大學生活學習與輔導」為 0 學分，第一至四年共 8 學期。"
+    elif hours:
+        clause = "二年級兩學期「服務學習」各 0 學分；每學期至少 24 小時，其中至少 12 小時為公共服務。"
+    else:
+        clause = "二年級兩學期「服務學習」各 0 學分，須完成兩個不同學期。"
+    scoped_source = _primary_zero_credit_source(
+        cohort,
+        program,
+        series,
+        source,
+        original_clause=clause,
+    )
+    if scoped_source is None:
+        return None
+
+    required_count = int(contract.get("required_count") or 0)
+    requirement_id = f"{program}.primary.{cohort}.{track_slug}.{series}"
+    membership_id = f"{contract.get('membership_id_prefix', f'university_primary_{series}:')}{cohort}:{program}:{track_slug}"
+    raw_course_ids = contract.get("official_course_ids", ())
+    if isinstance(raw_course_ids, str):
+        official_course_ids = (raw_course_ids,)
+    elif isinstance(raw_course_ids, Sequence):
+        official_course_ids = tuple(str(item) for item in raw_course_ids if str(item))
+    else:
+        official_course_ids = ()
+    applies_to = {
+        "curriculum_versions": (cohort,),
+        "program_slugs": (program,),
+        "track_slugs": (track_slug,),
+        "roles": ("primary",),
+    }
+    predicate: dict[str, Any] = {
+        "kind": str(contract.get("kind") or "OFFICIAL_LISTED_COURSE_COMPLETION"),
+        "requirement_type": str(contract.get("requirement_type") or "non_credit_course_series"),
+        "required_count": required_count,
+        "required_completions": required_count,
+        "distinct_term_required": bool(contract.get("distinct_term_required", True)),
+        "max_completions_per_term": int(contract.get("max_completions_per_term") or 1),
+        "require_zero_credits": bool(contract.get("require_zero_credits", True)),
+        "completion_statuses": tuple(str(item) for item in contract.get("completion_statuses", ("COMPLETED",))),
+        "membership_id": membership_id,
+        "membership_only": True,
+        "exact_titles": eligible_names,
+        "official_course_ids": official_course_ids,
+    }
+    row: dict[str, Any] = {
+        "id": requirement_id,
+        "requirement_id": requirement_id,
+        "name": name,
+        "display_name": name,
+        "raw_title": name,
+        "credits": 0.0,
+        "required_credits": 0.0,
+        "bucket": series,
+        "kind": str(contract.get("kind") or "OFFICIAL_LISTED_COURSE_COMPLETION"),
+        "requirement_type": str(contract.get("requirement_type") or "non_credit_course_series"),
+        "component": "non_credit",
+        "component_type": "non_credit",
+        "component_label": "非學分門檻",
+        "lecture_or_lab": "non_credit",
+        "is_zero_credit": True,
+        "zero_credit_gate": True,
+        "require_zero_credits": bool(contract.get("require_zero_credits", True)),
+        "required": True,
+        "required_count": required_count,
+        "required_completions": required_count,
+        "distinct_term_required": bool(contract.get("distinct_term_required", True)),
+        "max_completions_per_term": int(contract.get("max_completions_per_term") or 1),
+        "completion_statuses": tuple(str(item) for item in contract.get("completion_statuses", ("COMPLETED",))),
+        "membership_id": membership_id,
+        "official_membership_id": membership_id,
+        "membership_ids": (membership_id,),
+        "term_bound": "VERIFIED",
+        "membership_program_required": False,
+        "membership_track_required": False,
+        "membership_version_required": False,
+        "applicable_curriculum_version": cohort,
+        "applicable_program_slug": program,
+        "applicable_track_slug": track_slug,
+        "applicability_state": "VERIFIED",
+        "applicability_basis": "YEAR_SCOPED_PRIMARY_HANDBOOK_SECTION",
+        "applies_to": applies_to,
+        "scope_state": "VERIFIED",
+        "evidence_state": scoped_source["evidence_state"],
+        "coverage_state": scoped_source["coverage_state"],
+        "verification_status": scoped_source["verification_status"],
+        "automation_sufficiency": scoped_source["automation_sufficiency"],
+        "automatic_decision": scoped_source["automatic_decision"],
+        "affects_credit_ledger": bool(contract.get("affects_credit_ledger", False)),
+        "excluded_from_free": True,
+        "waiver_allowed": False,
+        "waiver_evidence_required": True,
+        "candidate_only": False,
+        "pool_requirement": False,
+        "pool_ids": (),
+        "eligible_pool_ids": (),
+        "overflow_routes": (),
+        "eligible_course_names": eligible_names,
+        "eligible_course_options": tuple({"name": item, "credits": 0.0} for item in eligible_names),
+        "eligible_course_ids": official_course_ids,
+        "course_ids": official_course_ids,
+        "official_course_ids": official_course_ids,
+        "match": {
+            "official_membership_only": True,
+            "exact_titles": eligible_names,
+            "official_aliases": (),
+        },
+        "predicate": predicate,
+        "policy_id": requirement_id,
+        "policy_revision": f"{cohort}.1",
+        "policy_source": deepcopy(scoped_source),
+        "source_assertion_id": requirement_id,
+        "assertion_id": requirement_id,
+        "source_reference": f"{scoped_source['source_reference']}:row:{series}",
+        "source_url": scoped_source["source_url"],
+        "source_file": scoped_source["source_file"],
+        "research_file": scoped_source["research_file"],
+        "pdf_page": scoped_source["pdf_page"],
+        "printed_page": scoped_source["printed_page"],
+        "page": scoped_source["pdf_page"],
+        "pages": scoped_source["pages"],
+        "table_location": scoped_source["table_location"],
+        "original_clause": scoped_source["original_clause"],
+        "original_text": scoped_source["original_clause"],
+    }
+    if hours:
+        for key in (
+            "required_hours",
+            "hours_per_completion",
+            "minimum_public_service_hours_per_completion",
+            "hours_evidence_semantics",
+        ):
+            if hours.get(key) not in (None, ""):
+                row[key] = deepcopy(hours[key])
+                predicate[key] = deepcopy(hours[key])
+    row["source"] = {
+        "source_type": scoped_source["source_type"],
+        "file": scoped_source["source_file"],
+        "source_file": scoped_source["source_file"],
+        "url": scoped_source["source_url"],
+        "source_url": scoped_source["source_url"],
+        "pages": scoped_source["pages"],
+        "pdf_page": scoped_source["pdf_page"],
+        "printed_page": scoped_source["printed_page"],
+        "source_reference": row["source_reference"],
+        "original_clause": row["original_clause"],
+        "curriculum_version": cohort,
+        "program_slug": program,
+        "track_slug": track_slug,
+        "requirement_id": requirement_id,
+    }
+    provenance = {
+        **deepcopy(scoped_source),
+        "assertion_id": requirement_id,
+        "requirement_id": requirement_id,
+        "source_reference": row["source_reference"],
+        "membership_id": membership_id,
+        "official_membership_id": membership_id,
+        "membership_ids": (membership_id,),
+        "official_course_ids": official_course_ids,
+        "eligible_course_ids": official_course_ids,
+        "applicable_curriculum_version": cohort,
+        "applicable_program_slug": program,
+        "applicable_track_slug": track_slug,
+        "scope_state": "VERIFIED",
+        "require_zero_credits": row["require_zero_credits"],
+        "required_count": required_count,
+        "distinct_term_required": row["distinct_term_required"],
+        "max_completions_per_term": row["max_completions_per_term"],
+        "affects_credit_ledger": row["affects_credit_ledger"],
+        "excluded_from_free": True,
+        "predicate": deepcopy(predicate),
+    }
+    if hours:
+        for key in (
+            "required_hours",
+            "hours_per_completion",
+            "minimum_public_service_hours_per_completion",
+            "hours_evidence_semantics",
+        ):
+            if key in row:
+                provenance[key] = deepcopy(row[key])
+    row["provenance"] = provenance
+    if scoped_source.get("amendment_action"):
+        row["amendment_action"] = scoped_source["amendment_action"]
+        provenance["amendment_action"] = scoped_source["amendment_action"]
+    return row
+
+
+def _primary_university_requirement_rows(
+    cohort: str,
+    program: str,
+    track: str | None,
+    pools: dict[str, dict[str, Any]],
+    source: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return shared university rows and the non-credit gates.
+
+    ``course_catalog`` used to contain only department rows.  That made a
+    COMPLETE Earth record look complete while its five language courses and
+    general-education allocation were still invisible to the registry
+    compiler.  Keep the exact language rows and policy-only category quotas
+    in the same auditable row shape as department requirements.  Physical
+    education remains the first non-credit row for compatibility; the
+    source-backed life-guidance and service-learning series follow it and
+    cannot consume graduation credits.
+    """
+
+    rows: list[dict[str, Any]] = []
+    university_contract = _university_common_contract(cohort)
+    compulsory_pool_id = _pool_id("primary", cohort, program, track, "university_compulsory")
+    compulsory_courses = university_contract.get("compulsory_courses", {})
+    for name, credits in compulsory_courses.items() if isinstance(compulsory_courses, Mapping) else ():
+        row = _primary_course_row(
+            cohort,
+            program,
+            track,
+            str(name),
+            credits,
+            "university_compulsory",
+            source,
+            pool_ids=(compulsory_pool_id,),
+            coverage_state=COMPLETE,
+        )
+        row["excluded_from_free"] = True
+        row.setdefault("provenance", {})["excluded_from_free"] = True
+        rows.append(row)
+
+    flex_credits = float(university_contract.get("flex_credits") or 0)
+    track_slug = track or "department"
+    flex_requirement_id = (
+        f"{program}.primary.{cohort}.{track_slug}.pool.ge_flex"
+        if flex_credits > 0
+        else ""
+    )
+    ge_source_rows: list[dict[str, Any]] = []
+    ge_pool_ids: list[str] = []
+    for pool_id, pool in pools.items():
+        bucket = str(pool.get("bucket") or "")
+        if not (bucket.startswith("ge_") or bucket == "ge_common_elective"):
+            continue
+        required_credits = pool.get("required_credits")
+        if required_credits is None or float(required_credits) <= 0:
+            continue
+        ge_pool_ids.append(str(pool_id))
+        ge_row = _primary_pool_requirement_row(
+            cohort,
+            program,
+            track,
+            pool,
+            source,
+            suffix=bucket,
+            requirement_type="course_pool",
+            choice_rule="official_category_policy",
+            overflow_routes=(flex_requirement_id,) if flex_requirement_id else (),
+        )
+        ge_row["excluded_from_free"] = True
+        ge_row.setdefault("provenance", {})["excluded_from_free"] = True
+        if isinstance(ge_row.get("policy"), Mapping):
+            ge_row["policy"]["excluded_from_free"] = True
+        ge_source_rows.append(ge_row)
+
+    rows.extend(ge_source_rows)
+    if flex_requirement_id:
+        # The flex requirement is a single exclusive credit consumer.  It
+        # reuses the five official GE source pools directly; no sixth shadow
+        # pool or extra 28-credit consumer is created.
+        base_pool = pools[ge_pool_ids[-1]] if ge_pool_ids and ge_pool_ids[-1] in pools else None
+        if base_pool is not None:
+            flex_row = _primary_pool_requirement_row(
+                cohort,
+                program,
+                track,
+                base_pool,
+                source,
+                suffix="ge_flex",
+                requirement_type="course_pool",
+                choice_rule="exclusive_university_common_flex",
+            )
+            university_policy_source = _policy_source(
+                cohort,
+                "university_common",
+                source,
+                program=program,
+                track=track,
+            )
+            flex_policy_id = f"university_common.ge_flex.{cohort}"
+            flex_applies_to = {
+                "curriculum_versions": (cohort,),
+                "program_slugs": (program,),
+                "track_slugs": (track_slug,),
+                "roles": ("primary",),
+            }
+            flex_predicate = {
+                "kind": "exclusive_university_common_flex",
+                "minimum_credits": flex_credits,
+                "source_pool_ids": tuple(ge_pool_ids),
+                "eligible_pool_ids": tuple(ge_pool_ids),
+                "overflow_only": True,
+                "excluded_from_free": True,
+            }
+            flex_policy = {
+                "policy_id": flex_policy_id,
+                "revision": f"{cohort}.1",
+                "applies_to": flex_applies_to,
+                "predicate": flex_predicate,
+                "evidence_state": university_policy_source.get("evidence_state", VERIFIED),
+                "coverage_state": university_policy_source.get("coverage_state", COMPLETE),
+                "automatic_decision": university_policy_source.get("automatic_decision", True),
+                "scope_state": "VERIFIED",
+                "source_reference": university_policy_source.get("source_reference", ""),
+                "source_url": university_policy_source.get("source_url", ""),
+                "source_file": university_policy_source.get("source_file", ""),
+                "pdf_page": university_policy_source.get("pdf_page", "未標示"),
+                "printed_page": university_policy_source.get("printed_page", "未標示"),
+                "original_clause": university_policy_source.get("original_clause", ""),
+                "policy_source": deepcopy(university_policy_source),
+                "allowed_scope": "university_common",
+                "exclusive": True,
+                "excluded_from_free": True,
+            }
+            flex_row.update(
+                {
+                    "id": flex_requirement_id,
+                    "requirement_id": flex_requirement_id,
+                    "name": "通識彈性補足",
+                    "display_name": "通識彈性補足",
+                    "raw_title": "通識彈性補足",
+                    "credits": flex_credits,
+                    "required_credits": flex_credits,
+                    "bucket": "ge_flex",
+                    "kind": "quota",
+                    "requirement_type": "course_pool",
+                    "choice_rule": "exclusive_university_common_flex",
+                    "eligible_course_names": (),
+                    "eligible_course_options": (),
+                    "pool_ids": (),
+                    "eligible_pool_ids": tuple(ge_pool_ids),
+                    "overflow_routes": (),
+                    "pool_requirement": True,
+                    "candidate_only": False,
+                    "excluded_from_free": True,
+                    "official_course_identity": f"{cohort}:{program}:{track_slug}:pool:ge_flex",
+                    "policy_id": flex_policy_id,
+                    "policy_revision": f"{cohort}.1",
+                    "applies_to": flex_applies_to,
+                    "predicate": flex_predicate,
+                    "policy_source": deepcopy(university_policy_source),
+                    "policy": flex_policy,
+                    "named_course_pool_state": "COMPLETE",
+                    "original_clause": f"111學年度通識彈性補足 {flex_credits:g} 學分；僅接收五個通識來源池的超額。",
+                    "original_text": f"111學年度通識彈性補足 {flex_credits:g} 學分；僅接收五個通識來源池的超額。",
+                }
+            )
+            flex_provenance = dict(flex_row.get("provenance") or {})
+            flex_provenance.update(
+                {
+                    "assertion_id": flex_requirement_id,
+                    "pool_ids": tuple(ge_pool_ids),
+                    "eligible_pool_ids": tuple(ge_pool_ids),
+                    "excluded_from_free": True,
+                    "policy": deepcopy(flex_policy),
+                    "policy_source": deepcopy(university_policy_source),
+                    "original_clause": flex_row["original_clause"],
+                }
+            )
+            flex_row["provenance"] = flex_provenance
+            rows.append(flex_row)
+
+    # Information application/design is a formal non-credit completion gate.
+    # The public-course adapter supplies the term-specific membership; this
+    # registry row supplies the student's applicability scope and never
+    # invents offering-level program, track, or version metadata.
+    it_policy = _RULES.get("shared", {}).get("information_technology", {})
+    it_policy = it_policy if isinstance(it_policy, Mapping) else {}
+    it_contracts = it_policy.get("evidence_by_cohort", {})
+    it_contract = it_contracts.get(str(cohort), {}) if isinstance(it_contracts, Mapping) else {}
+    it_contract = it_contract if isinstance(it_contract, Mapping) else {}
+    it_source = _policy_source(
+        cohort,
+        "information_technology",
+        source,
+        program=program,
+        track=track,
+    )
+    it_requirement_id = str(
+        it_contract.get("requirement_id")
+        or it_policy.get("requirement_id")
+        or "university.it_application_design"
+    )
+    it_required = program != "cs"
+    it_scope_state = "VERIFIED" if it_required else NOT_APPLICABLE
+    it_policy_id = f"{it_requirement_id}.{cohort}"
+    it_membership_program_required = bool(
+        it_contract.get(
+            "membership_program_required",
+            it_policy.get("membership_program_required", False),
+        )
+    )
+    it_membership_track_required = bool(
+        it_contract.get(
+            "membership_track_required",
+            it_policy.get("membership_track_required", False),
+        )
+    )
+    it_membership_version_required = bool(
+        it_contract.get(
+            "membership_version_required",
+            it_policy.get("membership_version_required", False),
+        )
+    )
+    it_row = _primary_course_row(
+        cohort,
+        program,
+        track,
+        str(it_contract.get("name") or it_policy.get("name") or "資訊應用與設計"),
+        0,
+        "information_technology",
+        it_source,
+        kind=str(it_contract.get("kind") or it_policy.get("kind") or "OFFICIAL_LISTED_COURSE_COMPLETION"),
+        requirement_type="non_credit",
+        eligible_names=(),
+        eligible_options=(),
+        coverage_state=str(it_contract.get("coverage_state") or it_policy.get("coverage_state") or COMPLETE),
+        automatic_decision=bool(
+            it_contract.get(
+                "automatic_decision",
+                it_policy.get("automatic_decision", True),
+            )
+        ),
+    )
+    it_row.update(
+        {
+            "id": it_requirement_id,
+            "requirement_id": it_requirement_id,
+            "name": str(it_contract.get("name") or it_policy.get("name") or "資訊應用與設計"),
+            "display_name": str(it_contract.get("name") or it_policy.get("name") or "資訊應用與設計"),
+            "raw_title": str(it_contract.get("name") or it_policy.get("name") or "資訊應用與設計"),
+            "credits": 0.0,
+            "required_credits": 0.0,
+            "bucket": "information_technology",
+            "kind": str(it_contract.get("kind") or it_policy.get("kind") or "OFFICIAL_LISTED_COURSE_COMPLETION"),
+            "requirement_type": "non_credit",
+            "component": "non_credit",
+            "component_type": "non_credit",
+            "component_label": "非學分門檻",
+            "lecture_or_lab": "non_credit",
+            "is_zero_credit": True,
+            "zero_credit_gate": True,
+            "eligible_course_names": (),
+            "eligible_course_options": (),
+            "pool_ids": (),
+            "eligible_pool_ids": (),
+            "overflow_routes": (),
+            "pool_requirement": False,
+            "candidate_only": False,
+            "required": it_required,
+            "required_count": int(it_contract.get("required_completions", it_policy.get("required_completions", 1))),
+            "required_completions": int(it_contract.get("required_completions", it_policy.get("required_completions", 1))),
+            "min_earned_credits_per_completion": float(
+                it_contract.get(
+                    "min_earned_credits_per_completion",
+                    it_policy.get("min_earned_credits_per_completion", 2),
+                )
+            ),
+            "membership_id": str(
+                it_contract.get("membership_id")
+                or it_policy.get("membership_id")
+                or "university_it_direct_completion"
+            ),
+            "official_membership_id": str(
+                it_contract.get("membership_id")
+                or it_policy.get("membership_id")
+                or "university_it_direct_completion"
+            ),
+            "membership_ids": (
+                str(
+                    it_contract.get("membership_id")
+                    or it_policy.get("membership_id")
+                    or "university_it_direct_completion"
+                ),
+            ),
+            "completion_statuses": ("COMPLETED",),
+            "term_bound": "VERIFIED",
+            # These are requirement applicability fields.  The course-list
+            # membership is term-bound, but a GE offering need not carry the
+            # student's primary program, track, or curriculum version.
+            "membership_program_required": it_membership_program_required,
+            "membership_track_required": it_membership_track_required,
+            "membership_version_required": it_membership_version_required,
+            "program_slug": program,
+            "track_slug": track_slug,
+            "curriculum_version": cohort,
+            "program": program,
+            "track": _TRACK_DISPLAY.get(track) if track else None,
+            "waiver_requirement_version": cohort,
+            "waiver_program_slug": program,
+            "waiver_track_slug": track_slug,
+            "policy_id": it_policy_id,
+            "policy_revision": f"{cohort}.1",
+            "applies_to": {
+                "curriculum_versions": (cohort,),
+                "program_slugs": (program,),
+                "track_slugs": (track_slug,),
+                "roles": ("primary",),
+            },
+            "predicate": {
+                "kind": "OFFICIAL_LISTED_COURSE_COMPLETION",
+                "required_completions": int(
+                    it_contract.get("required_completions", it_policy.get("required_completions", 1))
+                ),
+                "min_earned_credits_per_completion": float(
+                    it_contract.get(
+                        "min_earned_credits_per_completion",
+                        it_policy.get("min_earned_credits_per_completion", 2),
+                    )
+                ),
+                "membership_id": str(
+                    it_contract.get("membership_id")
+                    or it_policy.get("membership_id")
+                    or "university_it_direct_completion"
+                ),
+                "membership_only": True,
+            },
+            "evidence_state": str(it_contract.get("evidence_state") or it_policy.get("evidence_state") or VERIFIED),
+            "coverage_state": str(it_contract.get("coverage_state") or it_policy.get("coverage_state") or COMPLETE),
+            "automatic_decision": bool(
+                it_contract.get("automatic_decision", it_policy.get("automatic_decision", True))
+            ),
+            "scope_state": str(it_contract.get("scope_state") or "VERIFIED") if it_required else NOT_APPLICABLE,
+            "applicability_state": it_scope_state,
+            "applicability_basis": str(it_contract.get("applicability_state") or "YEAR_SCOPED_OFFICIAL_POLICY"),
+            "applicability_source": deepcopy(it_source),
+            "waiver_allowed": bool(it_contract.get("waiver_allowed", it_policy.get("waiver_allowed", True))),
+            "waiver_evidence_required": True,
+            "waiver_authority_ids": tuple(
+                str(item)
+                for item in (
+                    it_contract.get(
+                        "waiver_authority_ids",
+                        it_policy.get("waiver_authority_ids", ()),
+                    )
+                    or ()
+                )
+                if str(item)
+            ),
+            "affects_credit_ledger": bool(
+                it_contract.get("affects_credit_ledger", it_policy.get("affects_credit_ledger", False))
+            ),
+            "excluded_from_free": True,
+            "match": {"official_membership_only": True, "exact_titles": (), "official_aliases": ()},
+            "policy_source": deepcopy(it_source),
+            "source_reference": f"{it_source['source_reference']}:row:information_technology",
+            "source_url": it_source["source_url"],
+            "source_file": it_source["source_file"],
+            "research_file": it_source["research_file"],
+            "pdf_page": it_source["pdf_page"],
+            "printed_page": it_source["printed_page"],
+            "pages": it_source["pages"],
+            "table_location": it_source["table_location"],
+            "original_clause": it_source["original_clause"] or it_policy.get("policy_clause", ""),
+            "original_text": it_source["original_clause"] or it_policy.get("policy_clause", ""),
+        }
+    )
+    it_row["source_assertion_id"] = it_requirement_id
+    it_row["assertion_id"] = it_requirement_id
+    it_row["official_course_identity"] = f"{cohort}:university:information_technology"
+    it_row["provenance"] = {
+        **dict(it_row.get("provenance") or {}),
+        "assertion_id": it_requirement_id,
+        "source_type": it_source.get("source_type", "official_general_education_policy"),
+        "source_reference": it_row["source_reference"],
+        "source_url": it_row["source_url"],
+        "source_file": it_row["source_file"],
+        "research_file": it_row["research_file"],
+        "pdf_page": it_row["pdf_page"],
+        "printed_page": it_row["printed_page"],
+        "pages": it_row["pages"],
+        "table_location": it_row["table_location"],
+        "original_clause": it_row["original_clause"],
+        "evidence_state": it_row["evidence_state"],
+        "verification_status": it_row["evidence_state"],
+        "coverage_state": it_row["coverage_state"],
+        "automatic_decision": it_row["automatic_decision"],
+        "scope_state": it_row["scope_state"],
+        "curriculum_version": cohort,
+        "program_slug": program,
+        "track_slug": track_slug,
+        "membership_id": it_row["membership_id"],
+        "waiver_authority_ids": it_row["waiver_authority_ids"],
+        "affects_credit_ledger": it_row["affects_credit_ledger"],
+        "excluded_from_free": True,
+        "policy_source": deepcopy(it_source),
+    }
+    zero_credit_rows: list[dict[str, Any]] = []
+    for series in ("life_guidance", "service_learning"):
+        descriptor = _primary_zero_credit_descriptor(
+            cohort,
+            program,
+            track,
+            series,
+            source,
+        )
+        if descriptor is not None:
+            zero_credit_rows.append(descriptor)
+    pe_pool_id = _pool_id("primary", cohort, program, track, "physical_education")
+    pe_policy = _RULES.get("shared", {}).get("physical_education", {})
+    pe_policy = pe_policy if isinstance(pe_policy, Mapping) else {}
+    pe_contract = pe_policy.get("evidence_by_cohort", {}).get(cohort, {})
+    pe_contract = pe_contract if isinstance(pe_contract, Mapping) else {}
+    # Historical handbooks share the four-course/zero-credit rule, while the
+    # later general-education manual adds the 8-hour, one-per-term, and
+    # non-repeating activity constraints.  Read each year's contract instead
+    # of applying the current shared defaults to every cohort.
+    pe_semesters = int(pe_contract.get("semesters_required", pe_policy.get("semesters_required", 0)))
+    pe_hours = float(pe_contract.get("required_hours", pe_policy.get("hours_required", 0)) or 0)
+    pe_courses = int(pe_contract.get("courses_required", pe_policy.get("courses_required", 0)))
+    pe_hours_per_completion = float(
+        pe_contract.get(
+            "hours_per_completion",
+            pe_hours / pe_courses if pe_courses else 0,
+        )
+        or 0
+    )
+    raw_pe_max_per_term = pe_contract.get(
+        "per_semester_limit",
+        pe_policy.get("per_semester_limit"),
+    )
+    pe_max_per_term = (
+        int(raw_pe_max_per_term)
+        if raw_pe_max_per_term not in (None, "")
+        else None
+    )
+    pe_distinct_term = bool(
+        pe_contract.get("distinct_term_required", pe_policy.get("distinct_term_required", True))
+    )
+    pe_distinct_activity = bool(
+        pe_contract.get(
+            "distinct_activity_required",
+            pe_policy.get("distinct_activity_required", False),
+        )
+    )
+    pe_aliases = deepcopy(pe_policy.get("activity_aliases", {}))
+    pe_membership_id = str(
+        pe_contract.get("membership_id")
+        or pe_policy.get("membership_id")
+        or "university_physical_education_completion"
+    )
+    pe_activity_prefix = str(
+        pe_contract.get("activity_membership_prefix")
+        or pe_policy.get("activity_membership_prefix")
+        or "university_physical_education_activity:"
+    )
+    pe_excluded_from_free = bool(
+        pe_contract.get("excluded_from_free", pe_policy.get("excluded_from_free", True))
+    )
+    pe_policy_source = _policy_source(
+        cohort,
+        "physical_education",
+        source,
+        program=program,
+        track=track,
+    )
+    pe_scope_state = str(pe_contract.get("applicability_state") or "UNSPECIFIED").upper()
+    pe_scope_verified = pe_scope_state not in {
+        "REQUIRES_HISTORICAL_CONFIRMATION",
+        "NOT_STATED",
+        "UNSPECIFIED",
+    }
+    pe_evidence_state = str(pe_contract.get("evidence_state") or VERIFIED)
+    pe_coverage_state = str(pe_contract.get("coverage_state") or COMPLETE)
+    pe_automatic = pe_scope_verified and pe_evidence_state == VERIFIED and pe_coverage_state == COMPLETE
+    pe_policy_id = f"university_common.physical_education.{cohort}"
+    pe_policy_descriptor = {
+        "policy_id": pe_policy_id,
+        "revision": f"{cohort}.1",
+        "applies_to": {
+            "curriculum_versions": (cohort,),
+            "program_slugs": (program,),
+            "track_slugs": (track or "department",),
+            "roles": ("primary",),
+        },
+        "predicate": {
+            "kind": "DISTINCT_TERM_ITEM_COUNT",
+            "required_completions": pe_courses,
+            "required_hours": pe_hours,
+            "hours_per_completion": pe_hours_per_completion,
+            "max_completions_per_term": pe_max_per_term,
+            "distinct_term_required": pe_distinct_term,
+            "distinct_activity_required": pe_distinct_activity,
+            "title_base": "體育",
+            "official_activity_aliases": pe_aliases,
+            "membership_id": pe_membership_id,
+            "activity_membership_prefix": pe_activity_prefix,
+            "excluded_from_free": pe_excluded_from_free,
+        },
+        "evidence_state": pe_evidence_state,
+        "coverage_state": pe_coverage_state,
+        "automatic_decision": pe_automatic,
+        "scope_state": "VERIFIED" if pe_scope_verified else "RULE_POLICY_SCOPE_UNVERIFIED",
+        "source_reference": pe_policy_source["source_reference"],
+        "source_url": pe_policy_source["source_url"],
+        "source_file": pe_policy_source["source_file"],
+        "pdf_page": pe_policy_source["pdf_page"],
+        "printed_page": pe_policy_source["printed_page"],
+        "original_clause": pe_policy_source["original_clause"]
+        or pe_policy.get("policy_clause", ""),
+        "policy_source": pe_policy_source,
+        "official_activity_aliases": pe_aliases,
+        "applicability_basis": pe_contract.get("applicability_state", "UNSPECIFIED"),
+    }
+    pe_pool = _pool_record(
+        kind="primary",
+        cohort=cohort,
+        program=program,
+        track=track,
+        bucket="physical_education",
+        label="體育學期門檻",
+        source=source,
+        required_credits=0,
+        selection_rule="semester_count",
+        policy={
+            **pe_policy_descriptor,
+            "allowed_scope": "university_common",
+            "semesters_required": pe_semesters,
+            "required_completions": pe_courses,
+            "required_hours": pe_hours,
+            "hours_per_completion": pe_hours_per_completion,
+            "max_completions_per_term": pe_max_per_term,
+            "distinct_term_required": pe_distinct_term,
+            "distinct_activity_required": pe_distinct_activity,
+            "official_activity_aliases": pe_aliases,
+            "membership_id": pe_membership_id,
+            "activity_membership_prefix": pe_activity_prefix,
+            "excluded_from_free": pe_excluded_from_free,
+            "zero_credit": True,
+        },
+    )
+    pools[pe_pool_id] = pe_pool
+    pe_row = _primary_course_row(
+        cohort,
+        program,
+        track,
+        "體育",
+        0,
+        "physical_education",
+        source,
+        kind="DISTINCT_TERM_ITEM_COUNT",
+        requirement_type="non_credit",
+        coverage_state=pe_coverage_state,
+        automatic_decision=pe_automatic,
+    )
+    pe_row.update(
+        {
+            "pool_ids": (pe_pool_id,),
+            "eligible_pool_ids": (),
+            "candidate_only": False,
+            "pool_requirement": False,
+            "is_zero_credit": True,
+            "zero_credit_gate": True,
+            "semesters_required": pe_semesters,
+            "required_count": pe_courses,
+            "required_completions": pe_courses,
+            "required_hours": pe_hours,
+            "hours_per_completion": pe_hours_per_completion,
+            "max_completions_per_term": pe_max_per_term,
+            "distinct_term_required": pe_distinct_term,
+            "distinct_activity_required": pe_distinct_activity,
+            "policy_id": pe_policy_id,
+            "policy_revision": f"{cohort}.1",
+            "applies_to": pe_policy_descriptor["applies_to"],
+            "predicate": pe_policy_descriptor["predicate"],
+            "policy_source": deepcopy(pe_policy_source),
+            "title_base": "體育",
+            "official_activity_aliases": pe_aliases,
+            "membership_id": pe_membership_id,
+            "official_membership_id": pe_membership_id,
+            "activity_membership_prefix": pe_activity_prefix,
+            "excluded_from_free": pe_excluded_from_free,
+            "match": {
+                "exact_titles": ("體育",),
+                "official_aliases": tuple(
+                    alias
+                    for item in pe_aliases.values()
+                    if isinstance(item, Mapping)
+                    for alias in item.get("aliases", ())
+                ),
+            },
+            "completion_statuses": ("COMPLETED",),
+            "waiver_allowed": True,
+            "waiver_evidence_required": True,
+            "affects_credit_ledger": False,
+            "applicability_basis": pe_contract.get("applicability_state", "UNSPECIFIED"),
+            "applicability_source": deepcopy(pe_policy_source),
+            "scope_state": "VERIFIED" if pe_scope_verified else "RULE_POLICY_SCOPE_UNVERIFIED",
+            "component": "non_credit",
+            "component_type": "non_credit",
+            "lecture_or_lab": "non_credit",
+            "source_reference": f"{pe_policy_source['source_reference']}:row:physical_education",
+            "source_url": pe_policy_source["source_url"],
+            "source_file": pe_policy_source["source_file"],
+            "research_file": pe_policy_source["research_file"],
+            "pdf_page": pe_policy_source["pdf_page"],
+            "printed_page": pe_policy_source["printed_page"],
+            "pages": pe_policy_source["pages"],
+            "table_location": pe_policy_source["table_location"],
+            "original_clause": pe_policy_source["original_clause"]
+            or pe_policy.get("policy_clause", ""),
+            "original_text": pe_policy_source["original_clause"]
+            or pe_policy.get("policy_clause", ""),
+        }
+    )
+    pe_row["page"] = pe_row["pdf_page"]
+    pe_row["source"] = {
+        "source_type": pe_policy_source.get("source_type", "official_policy"),
+        "file": pe_row["source_file"],
+        "source_file": pe_row["source_file"],
+        "url": pe_row["source_url"],
+        "source_url": pe_row["source_url"],
+        "pages": pe_row["pages"],
+        "pdf_page": pe_row["pdf_page"],
+        "printed_page": pe_row["printed_page"],
+        "source_reference": pe_row["source_reference"],
+        "original_clause": pe_row["original_clause"],
+        "curriculum_version": cohort,
+        "program_slug": program,
+        "track_slug": track or "department",
+        "policy_id": pe_policy_id,
+    }
+    pe_row["provenance"] = {
+        **dict(pe_row.get("provenance") or {}),
+        "source_type": pe_policy_source.get("source_type", "official_policy"),
+        "research_file": pe_row["research_file"],
+        "source_url": pe_row["source_url"],
+        "source_file": pe_row["source_file"],
+        "pdf_page": pe_row["pdf_page"],
+        "printed_page": pe_row["printed_page"],
+        "pages": pe_row["pages"],
+        "table_location": pe_row["table_location"],
+        "source_reference": pe_row["source_reference"],
+        "original_clause": pe_row["original_clause"],
+        "evidence_state": pe_evidence_state,
+        "verification_status": pe_evidence_state,
+        "coverage_state": pe_coverage_state,
+        "automation_sufficiency": "COMPLETE" if pe_automatic else "PARTIAL",
+        "automatic_decision": pe_automatic,
+        "zero_credit_gate": True,
+        "semesters_required": pe_semesters,
+        "required_count": pe_courses,
+        "required_completions": pe_courses,
+        "required_hours": pe_hours,
+        "hours_per_completion": pe_hours_per_completion,
+        "max_completions_per_term": pe_max_per_term,
+        "distinct_term_required": pe_distinct_term,
+        "distinct_activity_required": pe_distinct_activity,
+        "official_activity_aliases": pe_aliases,
+        "membership_id": pe_membership_id,
+        "official_membership_id": pe_membership_id,
+        "activity_membership_prefix": pe_activity_prefix,
+        "excluded_from_free": pe_excluded_from_free,
+        "policy_id": pe_policy_id,
+        "policy_revision": f"{cohort}.1",
+        "applies_to": pe_policy_descriptor["applies_to"],
+        "predicate": pe_policy_descriptor["predicate"],
+        "policy_source": deepcopy(pe_policy_source),
+        "scope_state": pe_policy_descriptor["scope_state"],
+    }
+    return rows, [pe_row, it_row, *zero_credit_rows]
+
+
 def _course_catalog(program: str, cohort: str, kind: str, track: str | None, coverage: str) -> list[dict[str, Any]]:
     """Build source-scoped catalogs without silently borrowing another year."""
 
     if coverage == COVERAGE_NONE:
         return []
-    if kind == "double_major_target" and program == "apc" and (
-        track == "chemistry" or (track == "physics" and cohort == "115")
-    ):
-        # This is an intentionally partial but exact transcription: eight
-        # visible named rows plus the official footer quota.  Do not populate
-        # the quota from a primary/legacy catalogue that the target page does
-        # not identify as its complete choice pool.
+    if kind == "double_major_target" and program == "apc" and track in {"physics", "chemistry"}:
         return _apc_target_catalog(cohort, track)
     if kind == "double_major_target" and program == "cs":
-        # The checked-in evidence proves only the CS target aggregates
-        # (15 named-core credits + 25 other credits).  The department course
-        # catalogue is a candidate list, not proof that each row is required
-        # by the selected target handbook.  Keep only generic quota rows;
-        # these have no eligible course names and remain review-gated.
         return _cs_target_quota_catalog(cohort)
+    if kind == "double_major_target" and program == "earth":
+        return _earth_secondary_catalog_rows(cohort, "double_major", track)
+    if kind == "double_major_target" and program == "math":
+        return _math_secondary_catalog_rows(cohort, "double_major", track)
     if kind == "double_major_target":
         return []
     handbook = _RULES.get("handbooks", {}).get(cohort, {})
     if not isinstance(handbook, dict):
         return []
     source = _primary_evidence(cohort, program)
-    rows: list[dict[str, Any]] = []
+    pools, pool_requirements = _primary_pool_bundle(cohort, program, track, source)
+    university_rows, _ = _primary_university_requirement_rows(
+        cohort,
+        program,
+        track,
+        pools,
+        source,
+    )
+
+    def pool_for(bucket: str) -> tuple[str, ...]:
+        pool_id = _pool_id("primary", cohort, program, track, bucket)
+        return (pool_id,) if pool_id in pools else ()
+
+    # Shared university requirements are explicit registry rows.  Their
+    # category rows are quotas with policy-only pools; their candidate list is
+    # intentionally empty because the handbook gives category rules rather
+    # than a fixed title catalogue.
+    rows: list[dict[str, Any]] = list(university_rows)
     if program == "earth":
         major = handbook.get("earth_life_major", {})
-        for section, data in (("common", major.get("common_compulsory", {})), ("domains", major.get("domains", {}))):
-            if section == "common":
-                data = data.get("courses", {}) if isinstance(data, dict) else {}
-                for name, credits in data.items():
-                    rows.append(_primary_course_row(cohort, program, track, name, credits, "common_compulsory", source))
-            elif isinstance(data, dict):
-                for domain, domain_data in data.items():
-                    for name, credits in (domain_data.get("compulsory", {}) if isinstance(domain_data, dict) else {}).items():
-                        rows.append(_primary_course_row(cohort, program, track, name, credits, f"{domain}:compulsory", source))
-            if section == "common":
-                for alternative in major.get("common_alternatives", []):
-                    options = alternative.get("options", {}) if isinstance(alternative, dict) else {}
-                    for name, credits in options.items():
-                        rows.append(_primary_course_row(cohort, program, track, name, credits, "common_alternative", source))
+        common = major.get("common_compulsory", {}) if isinstance(major, dict) else {}
+        common_courses = common.get("courses", {}) if isinstance(common, dict) else {}
+        for name, credits in common_courses.items() if isinstance(common_courses, dict) else ():
+            # Life guidance and service learning are emitted as dedicated
+            # aggregate gates below.  Keeping their historical 0-credit
+            # department rows here would duplicate the same gate and expose
+            # them as ordinary course requirements to credit allocation.
+            if float(credits or 0) == 0:
+                continue
+            rows.append(
+                _primary_course_row(
+                    cohort,
+                    program,
+                    track,
+                    name,
+                    credits,
+                    "common_compulsory",
+                    source,
+                    pool_ids=pool_for("common_compulsory"),
+                    coverage_state=COMPLETE,
+                )
+            )
+        domains = major.get("domains", {}) if isinstance(major, dict) else {}
+        domain_label = "地球環境" if track == "earth_environment" else "生命科學"
+        domain_data = domains.get(domain_label, {}) if isinstance(domains, dict) else {}
+        domain_courses = domain_data.get("compulsory", {}) if isinstance(domain_data, dict) else {}
+        for name, credits in domain_courses.items() if isinstance(domain_courses, dict) else ():
+            rows.append(
+                _primary_course_row(
+                    cohort,
+                    program,
+                    track,
+                    name,
+                    credits,
+                    f"{domain_label}:compulsory",
+                    source,
+                    pool_ids=pool_for("domain_required"),
+                    coverage_state=COMPLETE,
+                )
+            )
+        # Alternatives are one requirement with a choice pool.  Expanding
+        # each title into its own row would incorrectly require both options.
+        rows.extend(
+            item
+            for item in pool_requirements
+            if item.get("requirement_type") == "choice"
+        )
     elif program == "apc":
         apc = handbook.get("apc_rules", {})
+        apc = apc if isinstance(apc, Mapping) else {}
+        common_catalog = apc.get("common_catalog")
+        if not isinstance(common_catalog, Mapping):
+            common_catalog = {
+                **(
+                    apc.get("basic_core", {})
+                    if isinstance(apc.get("basic_core", {}), Mapping)
+                    else {}
+                ),
+                **(
+                    apc.get("shared_other_required", {})
+                    if isinstance(apc.get("shared_other_required", {}), Mapping)
+                    else {}
+                ),
+            }
+        common_by_track = apc.get("common_required_by_track", {})
+        common_by_track = common_by_track if isinstance(common_by_track, Mapping) else {}
+        division_label = "物理組" if track == "physics" else "化學組"
+        required_common = common_by_track.get(division_label)
+        if not isinstance(required_common, Mapping):
+            required_common = common_catalog
+        common_source = _primary_section_source(
+            source,
+            apc.get("common_catalog_evidence"),
+        )
         seen: set[str] = set()
-        for name, credits in apc.get("basic_core", {}).items():
+        for name, credits in required_common.items():
             seen.add(name)
-            rows.append(_primary_course_row(cohort, program, track, name, credits, "apc_common", source))
-        for name, credits in apc.get("shared_other_required", {}).items():
-            if name not in seen:
-                seen.add(name)
-                rows.append(_primary_course_row(cohort, program, track, name, credits, "apc_common", source))
+            rows.append(
+                _primary_course_row(
+                    cohort,
+                    program,
+                    track,
+                    name,
+                    credits,
+                    "apc_common",
+                    common_source,
+                    pool_ids=pool_for("apc_common_compulsory"),
+                    coverage_state=COMPLETE,
+                )
+            )
         division = apc.get("divisions", {}).get(
             "物理組" if track == "physics" else "化學組" if track == "chemistry" else "",
             {},
         )
+        required_evidence_by_track = apc.get("required_evidence_by_track", {})
+        required_evidence_by_track = (
+            required_evidence_by_track
+            if isinstance(required_evidence_by_track, Mapping)
+            else {}
+        )
+        track_source = _primary_section_source(
+            source,
+            required_evidence_by_track.get(division_label),
+        )
         for name, credits in division.get("compulsory", {}).items() if isinstance(division, dict) else ():
             if name not in seen:
-                rows.append(_primary_course_row(cohort, program, track, name, credits, "apc_track_compulsory", source))
+                rows.append(
+                    _primary_course_row(
+                        cohort,
+                        program,
+                        track,
+                        name,
+                        credits,
+                        "apc_track_compulsory",
+                        track_source,
+                        pool_ids=pool_for("apc_track_compulsory"),
+                        coverage_state=COMPLETE,
+                    )
+                )
     elif program == "cs":
-        cs = handbook.get("cs_rules", {})
-        data = cs.get("department_courses", {}) if isinstance(cs, dict) else {}
-        double_major = cs.get("double_major", {}) if isinstance(cs, dict) else {}
-        required_names = set(double_major.get("compulsory", {})) if isinstance(double_major, dict) else set()
-        for name, credits in data.items():
-            bucket = "double_major_required" if kind == "double_major_target" and name in required_names else "department"
-            rows.append(_primary_course_row(cohort, program, track, name, credits, bucket, source))
+        primary_catalog = _cs_primary_catalog(cohort)
+        configured_required = primary_catalog.get("named_core") if primary_catalog else None
+        required = (
+            dict(configured_required)
+            if isinstance(configured_required, Mapping)
+            else {
+                "計算機概論": 3,
+                "Java程式設計": 3,
+                "離散數學": 3,
+                "C程式設計": 3,
+                "資料結構": 3,
+                "數位電子學": 3,
+                "線性代數": 3,
+                "演算法": 3,
+                "數位系統設計": 3,
+                "作業系統": 3,
+                "資訊專題(I)": 1,
+            }
+        )
+        required_source = (
+            _cs_catalog_source(source, primary_catalog, "required")
+            if primary_catalog
+            else source
+        )
+        for name, credits in required.items():
+            rows.append(
+                _primary_course_row(
+                    cohort,
+                    program,
+                    track,
+                    name,
+                    credits,
+                    "cs_required",
+                    required_source,
+                    pool_ids=pool_for("cs_department_required"),
+                    coverage_state=COMPLETE,
+                )
+            )
+        alpha_pool_ids = pool_for("cs_elective_alpha")
+        alpha_source = (
+            _cs_catalog_source(source, primary_catalog, "alpha")
+            if primary_catalog
+            else source
+        )
+        alpha_rows = _cs_catalog_rows(primary_catalog, "alpha")
+        alpha_membership_id = f"cs_elective_alpha:{cohort}"
+        for item in alpha_rows:
+            name = str(item["course_name"])
+            credits = item["credits"]
+            row_source = _cs_course_source(alpha_source, item)
+            row = _primary_course_row(
+                cohort,
+                program,
+                track,
+                name,
+                credits,
+                "cs_alpha_required",
+                row_source,
+                pool_ids=alpha_pool_ids,
+                coverage_state=COMPLETE,
+            )
+            row.update(
+                {
+                    "membership_id": alpha_membership_id,
+                    "membership_ids": (alpha_membership_id,),
+                    "subset_ids": (alpha_membership_id,),
+                    "excluded_from_free": True,
+                    "rollup_group_id": "cs_primary_elective_54",
+                    "rollup_required_credits": 54,
+                }
+            )
+            row.setdefault("provenance", {}).update(
+                {
+                    "membership_id": alpha_membership_id,
+                    "membership_ids": (alpha_membership_id,),
+                    "excluded_from_free": True,
+                    "rollup_group_id": "cs_primary_elective_54",
+                    "rollup_required_credits": 54,
+                }
+            )
+            rows.append(row)
     elif program == "math":
         math_rules = handbook.get("math_rules", {})
-        seen: set[str] = set()
-        for name, credits in math_rules.get("common_compulsory", {}).items():
-            seen.add(name)
-            rows.append(_primary_course_row(cohort, program, track, name, credits, "math_common_compulsory", source))
-        for domain, domain_data in math_rules.get("domains", {}).items():
-            required = domain_data.get("required", {}) if isinstance(domain_data, dict) else {}
-            for name, credits in required.items():
-                if name not in seen:
-                    seen.add(name)
-                    rows.append(_primary_course_row(cohort, program, track, name, credits, f"{domain}:required", source))
-    if coverage == PARTIAL:
-        return rows[: min(len(rows), 8)]
+        primary_catalog = _math_primary_catalog(cohort)
+        common_math = _math_course_map(primary_catalog.get("common_required"))
+        if not common_math:
+            common_math = _math_course_map(math_rules.get("common_compulsory"))
+        common_source = _math_catalog_source(source, primary_catalog, "common") if primary_catalog else source
+        common_aliases = primary_catalog.get("common_aliases", {}) if isinstance(primary_catalog, Mapping) else {}
+        for name, credits in common_math.items():
+            aliases = common_aliases.get(name, ()) if isinstance(common_aliases, Mapping) else ()
+            eligible_names = (name, *tuple(str(item) for item in aliases if item))
+            rows.append(
+                _primary_course_row(
+                    cohort,
+                    program,
+                    track,
+                    name,
+                    credits,
+                    "math_common_compulsory",
+                    common_source,
+                    eligible_names=eligible_names,
+                    pool_ids=pool_for("math_common_compulsory"),
+                    coverage_state=COMPLETE,
+                )
+            )
+        selected_domain = track if track in set(_MATH_PRIMARY_TRACKS.get(cohort, ())) else None
+        if selected_domain and primary_catalog:
+            domains = primary_catalog.get("domains", {})
+            selected_spec = domains.get(selected_domain, {}) if isinstance(domains, Mapping) else {}
+            selected_required = _math_course_map(
+                selected_spec.get("required") if isinstance(selected_spec, Mapping) else {}
+            )
+            aliases = selected_spec.get("aliases", {}) if isinstance(selected_spec, Mapping) else {}
+            required_source = _math_catalog_source(source, primary_catalog, selected_domain)
+            for name, credits in selected_required.items():
+                variants = aliases.get(name, ()) if isinstance(aliases, Mapping) else ()
+                eligible_names = (name, *tuple(str(item) for item in variants if item))
+                rows.append(
+                    _primary_course_row(
+                        cohort,
+                        program,
+                        track,
+                        name,
+                        credits,
+                        f"{selected_domain}:required",
+                        required_source,
+                        eligible_names=eligible_names,
+                        pool_ids=pool_for("math_domain_required"),
+                        coverage_state=COMPLETE,
+                    )
+                )
+    # Add explicit quota/choice rows after named requirements.  Every row has
+    # a scoped eligible_pool_ids tuple; the candidate catalogue stays inside
+    # the pool policy and is never compiled as a list of mandatory courses.
+    rows.extend(
+        item
+        for item in pool_requirements
+        if item.get("requirement_type") != "choice" or program != "earth"
+    )
     return rows
 
 
@@ -1495,6 +6166,63 @@ def _minor_catalog(cohort: str, program: str, track: str | None) -> tuple[list[d
         "conflicted_course_names": (),
         "zero_credit_gate": False,
     }
+    if program == "apc":
+        rows = _apc_secondary_catalog_rows(cohort, track or "physics", "minor")
+        metadata.update(
+            {
+                "secondary_catalog_complete": True,
+                "fixed_base_credits": 20 if cohort == "115" else 16,
+                "remaining_required_credits": 0 if cohort == "115" else 4,
+                "track_experiment": track,
+            }
+        )
+        return rows, metadata
+    if program == "earth":
+        rows = _earth_secondary_catalog_rows(cohort, "minor")
+        metadata.update(
+            {
+                "secondary_catalog_complete": True,
+                "credit_total": 24,
+                "zero_credit_gate": False,
+            }
+        )
+        return rows, metadata
+    if program == "cs":
+        rows = _cs_secondary_catalog_rows(cohort, "minor")
+        metadata.update(
+            {
+                "secondary_catalog_complete": True,
+                "mandatory_credits": 6,
+                "other_course_credits": 14,
+            }
+        )
+        return rows, metadata
+    if program == "math":
+        contract = _secondary_catalog(cohort, "math", "minor")
+        rows = _math_secondary_catalog_rows(cohort, "minor")
+        metadata.update(
+            {
+                "secondary_catalog_complete": True,
+                "calculus_credits": 8,
+                "elective_credits": float(contract.get("elective_minimum", 12) or 12),
+                "elective_maximum_credits": float(contract.get("elective_maximum", 20) or 20),
+                "math_secondary_composite_required": True,
+                "software_choice": deepcopy(contract.get("software_choice", {})),
+            }
+        )
+        if cohort == "113":
+            # Keep the handbook amendment as provenance while the operative
+            # candidate row uses the current three-credit value.  This is
+            # metadata for audit/review only; it is not a second requirement.
+            metadata["credit_revision_history"] = {
+                "數學導論": {
+                    "current_credits": 3,
+                    "previous_credits": 4,
+                    "revision_state": "CURRENT_VALUE_VERIFIED",
+                    "source_reference": "handbook:113:math:minor:p.74",
+                }
+            }
+        return rows, metadata
     if program == "apc":
         base_rows = (
             ("普通物理學(一)", 3, "lecture", "ordinary_physics_1"),
@@ -1858,32 +6586,99 @@ def _minor_catalog(cohort: str, program: str, track: str | None) -> tuple[list[d
         ),
     ]
     if cohort == "113":
-        metadata["conflicted_course_names"] = ("數學導論",)
-        rows.append(
-            _minor_row(
-                cohort,
-                program,
-                None,
-                "math_intro_conflict_candidate",
-                "數學導論",
-                0,
-                eligible_names=("數學導論",),
-                eligible_options=(("數學導論", 4), ("數學導論", 3)),
-                requirement_type="conflict_candidate",
-                choice_rule="4↔3 刪改衝突；僅作候選，不直接產生學分",
-                evidence_state=CONFLICTED,
-                coverage_state=COMPLETE,
-                original_clause="數學導論 4 與 3 同時保留",
-                manual_reason="官方 113 手冊的數學導論 4→3 刪改衝突，不能自動選擇學分。",
-            )
-        )
-        metadata["manual_review_reasons"].append("官方 113 手冊保留數學導論 4 與 3 的刪改衝突；使用該列時必須人工確認。")
+        # The current 113 handbook value is 3 credits.  Keep the previous
+        # four-credit value as revision provenance rather than exposing a
+        # same-title conflict candidate that can never be allocated.
+        metadata["credit_revision_history"] = {
+            "數學導論": {
+                "current_credits": 3,
+                "previous_credits": 4,
+                "revision_state": "CURRENT_VALUE_VERIFIED",
+                "source_reference": "handbook:113:math:minor:p.74",
+            }
+        }
     return rows, metadata
 
 
 def _minor_assertions(cohort: str, program: str, track: str | None, metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
     source = _minor_source(cohort, program, track)
     label = f"{cohort} 學年度{_PROGRAM_DISPLAY[program]}輔系規則"
+    if program == "apc":
+        total = 20
+        base = 20 if cohort == "115" else 16
+        remainder = 0 if cohort == "115" else 4
+        assertions = [
+            _assertion(
+                f"minor.{cohort}.apc.total20",
+                cohort,
+                source["pages"],
+                "物化輔系指定課程總計 20 學分",
+                total,
+                label=label,
+                url=source["source_url"],
+            ),
+            _assertion(
+                f"minor.{cohort}.apc.base{base}",
+                cohort,
+                source["pages"],
+                "物化輔系基礎列項",
+                base,
+                label=label,
+                url=source["source_url"],
+            ),
+        ]
+        if remainder:
+            assertions.append(
+                _assertion(
+                    f"minor.{cohort}.apc.remainder{remainder}",
+                    cohort,
+                    source["pages"],
+                    "同組主修必修剩餘額度",
+                    remainder,
+                    label=label,
+                    url=source["source_url"],
+                )
+            )
+        return _enrich_minor_assertions(assertions, source, label, metadata)
+    if program == "earth":
+        assertions = [
+            _assertion(
+                f"minor.{cohort}.earth.total24",
+                cohort,
+                source["pages"],
+                "地生輔系共同必修 24 學分",
+                24,
+                label=label,
+                url=source["source_url"],
+            )
+        ]
+        return _enrich_minor_assertions(assertions, source, label, metadata)
+    if program == "cs":
+        assertions = [
+            _assertion(
+                f"minor.{cohort}.cs.total20",
+                cohort,
+                source["pages"],
+                "計算機概論 3 + C 程式設計 3 + 資科其他開設課程至少 14 = 20",
+                20,
+                label=label,
+                url=source["source_url"],
+            )
+        ]
+        return _enrich_minor_assertions(assertions, source, label, metadata)
+    if program == "math":
+        assertions = [
+            _assertion(
+                f"minor.{cohort}.math.total20",
+                cohort,
+                source["pages"],
+                "微積分 8 + 表列選修至少 12 = 20",
+                20,
+                label=label,
+                url=source["source_url"],
+            )
+        ]
+        return _enrich_minor_assertions(assertions, source, label, metadata)
     if program == "apc":
         total = 20
         claim = "輔系指定課程總計 20 學分"
@@ -1918,8 +6713,325 @@ def _minor_assertions(cohort: str, program: str, track: str | None, metadata: Ma
         return _enrich_minor_assertions(assertions, source, label, metadata)
     assertions = [_assertion(f"minor.{cohort}.math.total20", cohort, source["pages"], "微積分 8 + 表列選修至少 12 = 20", 20, label=label, url=source["source_url"])]
     if cohort == "113":
-        assertions.append(_assertion(f"minor.{cohort}.math.conflict", cohort, source["pages"], "數學導論學分刪改衝突 4 與 3", "4↔3", evidence_state=CONFLICTED, label=label, url=source["source_url"]))
+        assertions.append(
+            _assertion(
+                f"minor.{cohort}.math.intro_current",
+                cohort,
+                source["pages"],
+                "數學導論現行學分",
+                3,
+                original_clause="數學導論現行 3 學分；4 學分為修訂前值，僅保留於修訂來源。",
+                label=label,
+                url=source["source_url"],
+            )
+        )
     return _enrich_minor_assertions(assertions, source, label, metadata)
+
+
+def _catalog_pool_projection(
+    kind: str,
+    cohort: str,
+    program: str,
+    track: str | None,
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Expose pool metadata for target/minor rows built outside primary rules."""
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        pool_ids = tuple(row.get("pool_ids", ())) + tuple(row.get("eligible_pool_ids", ()))
+        if not pool_ids:
+            continue
+        for pool_id in pool_ids:
+            entry = grouped.setdefault(
+                str(pool_id),
+                {
+                    "id": str(pool_id),
+                    "pool_id": str(pool_id),
+                    "schema": _POOL_ID_SCHEMA,
+                    "scope": _scope_slug(kind),
+                    "kind": kind,
+                    "curriculum_version": cohort,
+                    "cohort": cohort,
+                    "program_slug": program,
+                    "track_slug": track or "department",
+                    "label": str(row.get("bucket") or row.get("name") or pool_id),
+                    "bucket": str(row.get("bucket") or "course_pool"),
+                    "required_credits": None,
+                    "max_credits": None,
+                    "requirement_minimum_credits": None,
+                    "subset_maxima": {},
+                    "candidate_only": True,
+                    "eligible_pool_ids": (str(pool_id),),
+                    "overflow_routes": tuple(row.get("overflow_routes", ())),
+                    "selection_rule": str(row.get("choice_rule") or "exact_title_credit_component"),
+                    "identity_fields": _POOL_IDENTITY_FIELDS,
+                    "allow_user_claimed_department": False,
+                    "allowed_components": ("lecture", "lab"),
+                    "evidence_state": str(row.get("evidence_state") or VERIFIED),
+                    "verification_status": str(row.get("verification_status") or row.get("evidence_state") or VERIFIED),
+                    "coverage_state": str(row.get("coverage_state") or PARTIAL),
+                    "automation_sufficiency": str(row.get("automation_sufficiency") or PARTIAL),
+                    "manual_reason": str(row.get("manual_reason") or ""),
+                    "source_reference": str(row.get("source_reference") or ""),
+                    "source_url": str(row.get("source_url") or ""),
+                    "source_file": str(row.get("source_file") or ""),
+                    "research_file": str(row.get("research_file") or ""),
+                    "pdf_page": row.get("pdf_page", "未標示"),
+                    "printed_page": row.get("printed_page", "未標示"),
+                    "pages": row.get("pages", "未標示"),
+                    "table_location": row.get("table_location", "官方課程表"),
+                    "original_clause": str(row.get("original_clause") or ""),
+                    "policy": {},
+                    "candidate_courses": [],
+                    "courses": [],
+                },
+            )
+            if row.get("required_credits") is not None:
+                entry["required_credits"] = float(row["required_credits"])
+            elif row.get("kind") in {"quota", "choice"} and row.get("credits"):
+                entry["required_credits"] = float(row["credits"])
+            if row.get("max_credits") is not None:
+                entry["max_credits"] = float(row["max_credits"])
+            if row.get("requirement_minimum_credits") is not None:
+                entry["requirement_minimum_credits"] = float(row["requirement_minimum_credits"])
+            if isinstance(row.get("subset_maxima"), Mapping):
+                entry["subset_maxima"] = deepcopy(dict(row["subset_maxima"]))
+            for key in (
+                "secondary_course_key",
+                "math_secondary_composite_required",
+                "requires_server_owned_offering",
+                "pool_membership_evidence",
+                "membership_assertions",
+            ):
+                if row.get(key) is not None:
+                    entry[key] = deepcopy(row[key])
+            names = tuple(row.get("eligible_course_names", ()))
+            options = row.get("eligible_course_options", ())
+            candidate_metadata = row.get("candidate_metadata", {})
+            candidate_metadata = (
+                candidate_metadata if isinstance(candidate_metadata, Mapping) else {}
+            )
+            option_map: dict[str, float] = {}
+            if isinstance(options, (list, tuple)):
+                for option in options:
+                    if isinstance(option, Mapping) and option.get("name"):
+                        option_map[str(option["name"])] = float(option.get("credits", row.get("credits", 0)) or 0)
+            for name in names:
+                option_map.setdefault(str(name), float(row.get("credits", 0) or 0))
+            for name, credits in option_map.items():
+                if credits <= 0:
+                    continue
+                if not any(
+                    isinstance(item, Mapping) and item.get("name") == name
+                    for item in entry["candidate_courses"]
+                ):
+                    entry["candidate_courses"].append(
+                        _pool_course_entry(
+                            cohort,
+                            program,
+                            track,
+                            str(pool_id),
+                            name,
+                            credits,
+                            row,
+                            evidence_state=str(row.get("evidence_state") or VERIFIED),
+                            course_metadata=(
+                                candidate_metadata.get(name)
+                                if isinstance(candidate_metadata.get(name), Mapping)
+                                else None
+                            ),
+                        )
+                    )
+            entry["courses"] = entry["candidate_courses"]
+    return grouped
+
+
+def _target_source_contract(
+    cohort: str,
+    program: str,
+    track: str | None,
+    assertions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Normalize one target assertion into the pool source contract."""
+
+    first = next((item for item in assertions if isinstance(item, Mapping)), {})
+    nested = first.get("source") if isinstance(first.get("source"), Mapping) else {}
+    pages = nested.get("pages") or first.get("pages") or "官方學生手冊"
+    default_research = (
+        "research/math_earth_handbook_matrix_111_115.md"
+        if program in {"earth", "math"}
+        else "research/apc_cs_handbook_matrix_111_115.md"
+    )
+    return {
+        "research_file": str(nested.get("research_file") or first.get("research_file") or default_research),
+        "source_reference": str(
+            nested.get("source_reference")
+            or first.get("source_reference")
+            or f"handbook:{cohort}:target:{program}:{track or 'department'}"
+        ),
+        "source_url": str(nested.get("url") or nested.get("source_url") or first.get("source_url") or _HANDBOOK_URLS.get(cohort, "")),
+        "source_file": str(nested.get("file") or nested.get("source_file") or first.get("source_file") or _source_file(cohort)),
+        "pdf_page": nested.get("pdf_page") or first.get("pdf_page") or pages,
+        "printed_page": nested.get("printed_page") or first.get("printed_page") or "未標示",
+        "pages": pages,
+        "table_location": str(nested.get("label") or first.get("table_location") or f"{cohort} {_PROGRAM_DISPLAY[program]} 雙主修表"),
+        "original_clause": str(nested.get("original_clause") or first.get("original_clause") or first.get("claim") or ""),
+    }
+
+
+def _unresolved_target_pool_bundle(
+    kind: str,
+    cohort: str,
+    program: str,
+    track: str | None,
+    thresholds: Mapping[str, Any],
+    assertions: Sequence[Mapping[str, Any]],
+    evidence_state: str,
+    warning: str,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Expose aggregate-only target gaps as empty, year-scoped pools.
+
+    Earth and most Math double-major pages currently prove the aggregate
+    amounts but do not expose a safe named course table.  Returning no
+    registry rows made those scopes impossible to audit or route for later
+    manual review.  Math 113 is the documented exception: two courses struck
+    from the required table are explicitly re-listed in the same-page
+    elective table, so they remain candidate courses in the formal elective
+    pool while the required pool stays separate.
+    """
+
+    source = _target_source_contract(cohort, program, track, assertions)
+    pools: dict[str, dict[str, Any]] = {}
+    requirements: list[dict[str, Any]] = []
+    for bucket, amount in (("base_required", thresholds.get("base_required", thresholds.get("base"))), ("other_required", thresholds.get("other_required", thresholds.get("other")))):
+        if amount is None or float(amount) <= 0:
+            continue
+        moved_elective_candidates: dict[str, int | float] = {}
+        if kind == "double_major_target" and program == "math" and cohort == "113" and bucket == "other_required":
+            moved_elective_candidates = {
+                "高等微積分(一)": 4,
+                "代數學(一)": 3,
+            }
+        has_named_elective_candidates = bool(moved_elective_candidates)
+        pool_label = (
+            "同頁修訂後正式選修候選課程池"
+            if has_named_elective_candidates
+            else f"未具名{bucket}課程池"
+        )
+        pool_policy = {
+            "allow_user_claimed_department": False,
+            "requires_official_named_course_pool": not has_named_elective_candidates,
+            "aggregate_only": not has_named_elective_candidates,
+        }
+        if has_named_elective_candidates:
+            pool_policy.update(
+                {
+                    "role": "formal_elective_candidate_pool",
+                    "moved_from_required_courses": True,
+                    "moved_course_names": tuple(moved_elective_candidates),
+                }
+            )
+        pool = _pool_record(
+            kind=kind,
+            cohort=cohort,
+            program=program,
+            track=track,
+            bucket=f"unresolved_{bucket}",
+            label=pool_label,
+            source=source,
+            candidates=moved_elective_candidates,
+            required_credits=float(amount),
+            evidence_state=evidence_state,
+            coverage_state=PARTIAL,
+            selection_rule=(
+                "official_named_elective_candidate_pool"
+                if has_named_elective_candidates
+                else "manual_named_pool_required"
+            ),
+            policy=pool_policy,
+            manual_reason=warning,
+        )
+        pools[pool["id"]] = pool
+        requirement_id = f"{program}.target.{cohort}.{track or 'department'}.pool.{_pool_token(bucket)}"
+        clause = f"{source['table_location']}：{pool['label']} {float(amount):g} 學分；課程池尚未具名。"
+        requirement = {
+            "id": requirement_id,
+            "requirement_id": requirement_id,
+            "name": pool["label"],
+            "raw_title": pool["label"],
+            "display_name": pool["label"],
+            "credits": float(amount),
+            "required_credits": float(amount),
+            "bucket": bucket,
+            "kind": "quota",
+            "requirement_type": "credit_quota",
+            "choice_group": None,
+            "choice_rule": (
+                "official_named_elective_candidate_pool"
+                if has_named_elective_candidates
+                else "manual_named_pool_required"
+            ),
+            "eligible_course_names": tuple(moved_elective_candidates),
+            "eligible_course_options": tuple(
+                (name, float(credits))
+                for name, credits in moved_elective_candidates.items()
+            ),
+            "pool_ids": (pool["id"],) if has_named_elective_candidates else (),
+            "eligible_pool_ids": (pool["id"],),
+            "overflow_routes": (),
+            "candidate_only": False,
+            "pool_requirement": True,
+            "component": "quota",
+            "component_type": "quota",
+            "lecture_or_lab": "quota",
+            "is_lab": False,
+            "is_zero_credit": False,
+            "waiver": False,
+            "waiver_generates_credits": False,
+            "allow_combined_lab_source": False,
+            "evidence": evidence_state,
+            "evidence_state": evidence_state,
+            "verification_status": evidence_state,
+            "coverage_state": PARTIAL,
+            "automation_sufficiency": "PARTIAL",
+            "automatic_decision": False,
+            "manual_reason": warning,
+            "manual_review_reason": warning,
+            "program_slug": program,
+            "track_slug": track or "department",
+            "curriculum_version": cohort,
+            "source_assertion_id": requirement_id,
+            "assertion_id": requirement_id,
+            "source_reference": f"{source['source_reference']}:pool:{_pool_token(bucket)}",
+            "source_url": source["source_url"],
+            "source_file": source["source_file"],
+            "research_file": source["research_file"],
+            "pdf_page": source["pdf_page"],
+            "printed_page": source["printed_page"],
+            "page": source["pdf_page"],
+            "pages": source["pages"],
+            "table_location": source["table_location"],
+            "original_clause": clause,
+            "original_text": clause,
+            "source": {**source, "source_reference": f"{source['source_reference']}:pool:{_pool_token(bucket)}", "original_clause": clause},
+            "provenance": {
+                **source,
+                "assertion_id": requirement_id,
+                "source_reference": f"{source['source_reference']}:pool:{_pool_token(bucket)}",
+                "original_clause": clause,
+                "pool_id": pool["id"],
+                "required_credits": float(amount),
+                "evidence_state": evidence_state,
+                "coverage_state": PARTIAL,
+                "automatic_decision": False,
+                "manual_reason": warning,
+            },
+        }
+        requirements.append(requirement)
+    return pools, requirements
 
 
 def _enrich_minor_assertions(assertions: list[dict[str, Any]], source: Mapping[str, Any], label: str, metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1963,14 +7075,20 @@ def _build_curriculum(kind: str, cohort: str, program: str, track: str | None) -
     is_minor = kind in {_MINOR_TARGET_ROLE, "minor", "minor_target"}
     if is_primary:
         assertions = _primary_assertions(program, cohort, track)
-        conflict = bool(_primary_conflict_assertions(program, cohort))
+        conflict = any(
+            bool(item.get("blocks_decision", item.get("evidence_state") == CONFLICTED))
+            for item in _primary_conflict_assertions(program, cohort)
+            if isinstance(item, Mapping)
+        )
         evidence_state = CONFLICTED if conflict else VERIFIED
-        # Every configured primary section is intentionally PARTIAL until the
-        # global allocator models all choices, zero-credit gates and teacher
-        # certification branches.  A partial source-backed catalog is useful
-        # for explanation, but it is never PASS-eligible.
-        coverage = PARTIAL
         source_meta = _primary_evidence(cohort, program)
+        # Coverage is scoped to this programme section.  A handbook may stay
+        # PARTIAL overall because another department or a teacher-certification
+        # branch is unresolved, while a fully transcribed Earth section can be
+        # COMPLETE on its own evidence.
+        coverage = source_meta.get("coverage_state", PARTIAL)
+        if conflict:
+            coverage = PARTIAL
         warning = "官方表格存在衝突，不能自動宣告主修門檻完整。" if conflict else source_meta.get("manual_reason", "")
     elif is_minor:
         catalog, minor_metadata = _minor_catalog(cohort, program, track)
@@ -1984,38 +7102,136 @@ def _build_curriculum(kind: str, cohort: str, program: str, track: str | None) -
             for item in assertions
         )
         evidence_state = CONFLICTED if row_conflict or assertion_conflict else VERIFIED
-        # The 20-credit math structure is transcribed for each named year;
-        # The 113 value conflict is retained at both row and curriculum
-        # level: unrelated named rows remain inspectable, but the scope is
-        # never PASS-eligible while an official course value is ambiguous.
-        # Earth/CS and APC 111–114 retain PARTIAL at the curriculum level
-        # because their source has dynamic or unnamed portions.
-        coverage = COMPLETE if program == "math" or (program == "apc" and cohort == "115") else PARTIAL
+        # Every ordinary secondary catalogue is now backed by its own
+        # year/track contract.  Individual course approval and server-owned
+        # offering checks remain runtime gates; they do not make a complete
+        # source transcription look like a missing catalogue.
+        coverage = COMPLETE if not minor_metadata.get("manual_review_reasons") else PARTIAL
         warning = "; ".join(str(item) for item in minor_metadata.get("manual_review_reasons", ()) if item)
     else:
         assertions, evidence_state, coverage, warning = _double_assertions(program, cohort, track)
     if is_primary:
         thresholds = _base_thresholds(program, cohort, track)
         catalog = _course_catalog(program, cohort, kind, track, coverage)
-        extra_metadata: dict[str, Any] = {}
+        source_meta = _primary_evidence(cohort, program)
+        course_pools, pool_requirements = _primary_pool_bundle(cohort, program, track, source_meta)
+        university_requirements, non_credit_requirements = _primary_university_requirement_rows(
+            cohort,
+            program,
+            track,
+            course_pools,
+            source_meta,
+        )
+        # Keep every zero-credit department row visible in the dedicated
+        # non-credit metadata as well.  They remain exact rows in the catalog
+        # for identity/provenance, while this projection lets the service
+        # enforce their completion gates without treating them as credits.
+        non_credit_requirements = [
+            *non_credit_requirements,
+            *[
+                deepcopy(row)
+                for row in catalog
+                if isinstance(row, Mapping) and bool(row.get("is_zero_credit"))
+            ],
+        ]
+        extra_metadata: dict[str, Any] = {
+            "course_pools": course_pools,
+            "pools": deepcopy(course_pools),
+            "pool_requirements": pool_requirements,
+            "university_requirements": university_requirements,
+            "university_pool_requirements": deepcopy(university_requirements),
+            "non_credit_requirements": non_credit_requirements,
+        }
+        if program == "cs":
+            primary_catalog = _cs_primary_catalog(cohort)
+            extra_metadata.update(
+                {
+                    "cs_primary_catalog": primary_catalog,
+                    "primary_elective_rollups": (
+                        {
+                            "rollup_group_id": "cs_primary_elective_54",
+                            "required_credits": 54,
+                            "component_requirement_ids": (
+                                f"cs.primary.{cohort}.alpha",
+                                f"cs.primary.{cohort}.beta_remainder",
+                            ),
+                            "presentation_only": True,
+                        },
+                    ),
+                }
+            )
     elif is_minor:
         # Keep the aggregate rules separate from the individual rows.  The
         # extra metadata is intentionally descriptive and is consumed by the
         # service gate, never by a renderer-side recalculation.
         thresholds = {"total": 20 if program in {"apc", "cs", "math"} else 24}
-        if program == "apc" and cohort in {"111", "112", "113", "114"}:
-            thresholds.update({"fixed_base_credits": 16, "unnamed_required_credits": 4})
+        if program == "apc":
+            thresholds.update(
+                {
+                    "fixed_base_credits": 20 if cohort == "115" else 16,
+                    "remaining_required_credits": 0 if cohort == "115" else 4,
+                }
+            )
         if program == "earth":
-            thresholds.update({"credit_total": 24, "zero_credit_gate": True})
+            thresholds.update({"credit_total": 24, "zero_credit_gate": False})
         if program == "cs":
             thresholds.update({"mandatory_credits": 6, "other_course_credits": 14})
         if program == "math":
-            thresholds.update({"calculus_credits": 8, "elective_credits": 12})
-        extra_metadata = minor_metadata
+            thresholds.update(
+                {
+                    "calculus_credits": 8,
+                    "elective_credits": 12,
+                    "elective_maximum_credits": 20,
+                }
+            )
+        course_pools = _catalog_pool_projection(kind, cohort, program, track, catalog)
+        extra_metadata = {
+            **minor_metadata,
+            "course_pools": course_pools,
+            "pools": deepcopy(course_pools),
+            "pool_requirements": [
+                deepcopy(row)
+                for row in catalog
+                if isinstance(row, Mapping) and row.get("eligible_pool_ids")
+            ],
+            "non_credit_requirements": [
+                deepcopy(row)
+                for row in catalog
+                if isinstance(row, Mapping) and bool(row.get("is_zero_credit"))
+            ],
+        }
     else:
         thresholds = _double_thresholds(program, cohort, track)
         catalog = _course_catalog(program, cohort, kind, track, coverage)
-        extra_metadata = {}
+        course_pools = _catalog_pool_projection(kind, cohort, program, track, catalog)
+        if not course_pools:
+            # Aggregate-only Earth/Math target pages still deserve an
+            # explicit, empty pool and quota row.  This keeps the gap visible
+            # to the allocator without inventing a target course list.
+            course_pools, catalog = _unresolved_target_pool_bundle(
+                kind,
+                cohort,
+                program,
+                track,
+                thresholds,
+                assertions,
+                evidence_state,
+                warning or "官方目標頁未提供可安全逐課配置的課程池。",
+            )
+        extra_metadata = {
+            "course_pools": course_pools,
+            "pools": deepcopy(course_pools),
+            "pool_requirements": [
+                deepcopy(row)
+                for row in catalog
+                if isinstance(row, Mapping) and row.get("eligible_pool_ids")
+            ],
+            "non_credit_requirements": [
+                deepcopy(row)
+                for row in catalog
+                if isinstance(row, Mapping) and bool(row.get("is_zero_credit"))
+            ],
+        }
     citations = []
     for item in assertions:
         source = item.get("source") or {}
@@ -2052,6 +7268,16 @@ def _build_curriculum(kind: str, cohort: str, program: str, track: str | None) -
         "program_slug": program,
         "track": _TRACK_DISPLAY.get(track) if track else None,
         "track_slug": track or ("department" if is_minor else None),
+        **(
+            {
+                "student_type": "non_teacher",
+                "primary_domain_slug": track,
+                "primary_domain_required": track in _MATH_PRIMARY_TRACKS.get(cohort, ()),
+                "available_primary_domain_slugs": tuple(_MATH_PRIMARY_TRACKS.get(cohort, ())),
+            }
+            if is_primary and program == "math"
+            else {}
+        ),
         "program_type": "單主修" if is_primary else "輔系" if is_minor else _DOUBLE_MAJOR,
         "thresholds": thresholds,
         "requirements": deepcopy(thresholds),
@@ -2096,17 +7322,27 @@ def _build_registry() -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for cohort in _SUPPORTED_COHORTS:
         for program in ("earth", "apc", "cs", "math"):
-            tracks = ["earth_environment", "life_science"] if program == "earth" else ["physics", "chemistry"] if program == "apc" else [None]
-            for track in tracks:
+            if program == "earth":
+                primary_tracks = ["earth_environment", "life_science"]
+            elif program == "apc":
+                primary_tracks = ["physics", "chemistry"]
+            elif program == "math":
+                primary_tracks = list(_MATH_PRIMARY_TRACKS.get(cohort, ())) or [None]
+            else:
+                primary_tracks = [None]
+            for track in primary_tracks:
                 primary = _build_curriculum("primary", cohort, program, track)
-                target = _build_curriculum("double_major_target", cohort, program, track)
+                # Double-major and minor Math scopes remain department-level;
+                # only the primary role receives the 113+ domain axis.
+                target_track = track if program in {"earth", "apc"} else None
+                target = _build_curriculum("double_major_target", cohort, program, target_track)
                 result[primary["curriculum_id"]] = primary
-                result[target["curriculum_id"]] = target
+                result.setdefault(target["curriculum_id"], target)
                 # Minor targets are department-level for Earth/CS/Math and
                 # track-level for APC.  Keep all 25 year scopes independent.
                 minor_track = track if program == "apc" else None
                 minor = _build_curriculum(_MINOR_TARGET_ROLE, cohort, program, minor_track)
-                result[minor["curriculum_id"]] = minor
+                result.setdefault(minor["curriculum_id"], minor)
     return result
 
 
@@ -2218,7 +7454,24 @@ def _parse_id(value: Any, *, kind: str | None = None, cohort: Any = None, progra
             return None
     if parsed_kind != _MINOR_TARGET_ROLE and parsed_program == "apc" and parsed_track not in {"physics", "chemistry"}:
         return None
-    if parsed_kind != _MINOR_TARGET_ROLE and parsed_program in {"cs", "math"}:
+    if parsed_kind != _MINOR_TARGET_ROLE and parsed_program == "math":
+        # 111/112 keep the department-level primary ID.  From 113 onward
+        # the handbook has three (or, in 115, two) mutually exclusive primary
+        # domains.  A bare ID must therefore fail closed instead of silently
+        # choosing the first domain or merging all domain requirements.
+        allowed_math_tracks = _MATH_PRIMARY_TRACKS.get(str(parsed_cohort), ())
+        if parsed_kind == "primary":
+            if parsed_cohort in {"111", "112"}:
+                if parsed_track is not None:
+                    return None
+                parsed_track = None
+            elif parsed_track not in allowed_math_tracks:
+                return None
+        elif parsed_track is not None:
+            return None
+        else:
+            parsed_track = None
+    elif parsed_kind != _MINOR_TARGET_ROLE and parsed_program == "cs":
         if parsed_track is not None:
             return None
         parsed_track = None
