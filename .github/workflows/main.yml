@@ -18,13 +18,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-      - name: Deploy to u11310019
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN_U11310019 }}
-        run: |
-          git remote add hf-u11310019 https://u11310019:${HF_TOKEN}@huggingface.co/spaces/u11310019/Utaipei-credit-checker
-          git push hf-u11310019 main --force
-
       - name: Deploy to Sapphirejimmy
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN_SAPPHIREJIMMY }}
