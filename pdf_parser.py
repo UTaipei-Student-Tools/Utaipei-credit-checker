@@ -529,19 +529,86 @@ def _parse_transcript_document(doc):
     def page_contains_course_rows(words):
         return any(w[4] in ("必", "選") for w in words)
 
-    def parse_page_words(words, y_tol=3):
+    def parse_page_words(words, y_tol=3, page_carry=""):
         rows = group_words_by_row(words, y_tol=y_tol)
         rows = merge_continuation_rows(rows)
         parsed = []
-        year_tokens = []
-        for word in words:
-            match = re.search(r"(?<!\d)(1\d{2})(?!\d)", word[4])
-            if match:
-                year_tokens.append((word[0], match.group(1)))
-        left_years = [value for x, value in year_tokens if x < 295]
-        right_years = [value for x, value in year_tokens if x >= 295]
-        left_year = left_years[0] if left_years else ""
-        right_year = right_years[0] if right_years else left_year
+        term_issues = []
+
+        def stream_header_values(part_words):
+            """Return only explicit ``NNN學年`` markers in one column row."""
+
+            compact = re.sub(r"\s+", "", "".join(word[4] for word in part_words))
+            # Identity and cumulative-summary rows contain 學年 as ordinary
+            # prose.  They are not term headers for the course table.
+            if any(marker in compact for marker in ("入學", "列印", "累計", "排名", "修習", "實得", "操行")):
+                return []
+
+            values = []
+            for word in part_words:
+                token = re.sub(r"\s+", "", str(word[4] or ""))
+                match = re.fullmatch(r"(1\d{2})學年(?:度)?", token)
+                if match:
+                    values.append(match.group(1))
+            if values:
+                return values
+
+            # Some PDF producers split the year and 學年 into separate words.
+            # Restrict the fallback to the same structured marker so ordinary
+            # dates and arbitrary three-digit course tokens never set a year.
+            return [
+                match.group(1)
+                for match in re.finditer(r"(?<!\d)(1\d{2})學年(?:度)?(?!\d)", compact)
+            ]
+
+        def assign_stream(side_words, side_name, initial_year):
+            current_year = str(initial_year or "")
+            row_years = {}
+            for row in rows:
+                part_words = [word for word in row["words"] if side_words(word)]
+                if not part_words:
+                    continue
+                header_values = stream_header_values(sorted(part_words, key=lambda word: word[0]))
+                compact = re.sub(r"\s+", "", "".join(word[4] for word in part_words))
+                if header_values:
+                    unique_values = list(dict.fromkeys(header_values))
+                    if len(unique_values) > 1:
+                        term_issues.append(
+                            f"{side_name}欄同一列出現互相衝突的學年標題。"
+                        )
+                        current_year = ""
+                    else:
+                        next_year = unique_values[0]
+                        if current_year and int(next_year) < int(current_year):
+                            term_issues.append(
+                                f"{side_name}欄學年標題由{current_year}倒退至{next_year}。"
+                            )
+                        current_year = next_year
+                elif (
+                    "學年" in compact
+                    and compact
+                    and not any(
+                        marker in compact
+                        for marker in ("入學", "列印", "累計", "排名", "修習", "實得", "操行")
+                    )
+                ):
+                    term_issues.append(f"{side_name}欄有無法辨識的學年標題。")
+                    current_year = ""
+                row_years[id(row)] = current_year
+            return row_years, current_year
+
+        left_year_by_row, left_final_year = assign_stream(
+            lambda word: word[0] < 295,
+            "左",
+            page_carry,
+        )
+        # The right column begins after the left stream's final header.  This
+        # matches pages where the right table starts with continuation rows.
+        right_year_by_row, right_final_year = assign_stream(
+            lambda word: word[0] >= 295,
+            "右",
+            left_final_year,
+        )
         exclude_exact = {"科目名稱", "累計班排名/人數/百分比", "附", "註", "成績註記"}
         exclude_contains = [
             "修習學分",
@@ -641,6 +708,9 @@ def _parse_transcript_document(doc):
                     and not is_page_number
                     and is_valid_course_row(name, ctype, s1_cred, s1_score, s2_cred, s2_score, full_row_text)
                 ):
+                    left_year = left_year_by_row.get(id(row), "")
+                    if not left_year:
+                        term_issues.append("左欄課程列前沒有可驗證的學年標題。")
                     cd = build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, left_year)
                     if cd:
                         parsed.append(cd)
@@ -673,17 +743,28 @@ def _parse_transcript_document(doc):
                     and not is_page_number
                     and is_valid_course_row(name, ctype, s1_cred, s1_score, s2_cred, s2_score, full_row_text)
                 ):
+                    right_year = right_year_by_row.get(id(row), "")
+                    if not right_year:
+                        term_issues.append("右欄課程列前沒有可驗證的學年標題。")
                     cd = build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, right_year)
                     if cd:
                         parsed.append(cd)
 
-        return parsed
+        return parsed, right_final_year, term_issues
 
     parse_candidates = []
     for ytol in (3, 6, 9, 12, 18):
         raw_courses = []
+        term_issues = []
+        page_carry = ""
         for page in all_pages:
-            raw_courses.extend(parse_page_words(page.get_text("words"), y_tol=ytol))
+            page_courses, page_carry, page_issues = parse_page_words(
+                page.get_text("words"),
+                y_tol=ytol,
+                page_carry=page_carry,
+            )
+            raw_courses.extend(page_courses)
+            term_issues.extend(page_issues)
         candidate_courses = split_two_semester_courses(raw_courses)
         parse_candidates.append(
             {
@@ -691,6 +772,11 @@ def _parse_transcript_document(doc):
                 "courses": candidate_courses,
                 "totals": _totals_from_courses(candidate_courses),
                 "duplicate_rows": _duplicate_course_rows(candidate_courses),
+                "term_assignment": {
+                    "fatal": bool(term_issues),
+                    "issues": list(dict.fromkeys(term_issues)),
+                    "final_year": page_carry,
+                },
             }
         )
 
@@ -725,6 +811,7 @@ def _parse_transcript_document(doc):
     parsed_course_totals = selected_candidate["totals"]
     parsed_total = parsed_course_totals["completed_attempted_credits"]
     duplicate_rows = selected_candidate["duplicate_rows"]
+    term_assignment = selected_candidate["term_assignment"]
     missing_fields = [key for key in ("name", "student_id", "department", "admission_year") if student_info.get(key) in ("", "未辨識")]
     course_code_missing = sum(1 for course in parsed_courses if not course.get("course_code"))
     department_metadata_missing = sum(1 for course in parsed_courses if not course.get("offering_department"))
@@ -745,6 +832,11 @@ def _parse_transcript_document(doc):
         # These fields are warnings for the title-based Earth/Life evaluator,
         # but they are an explicit identity limitation for other programs.
         identity_warnings.append(warning)
+    if term_assignment["fatal"]:
+        detail = "；".join(term_assignment["issues"])
+        warning = f"成績單課程學年／學期判定失敗：{detail}"
+        diagnostic_warnings.append(warning)
+        fatal_warnings.append(warning)
 
     reconciliation_issues = []
     attempted_conflict = bool(reported_totals["attempted_conflict"])
@@ -881,6 +973,7 @@ def _parse_transcript_document(doc):
         "reported_total_candidates": reported_totals["attempted_candidates"],
         "reported_earned_total_candidates": reported_totals["earned_candidates"],
         "reported_in_progress_total_candidates": reported_totals["in_progress_candidates"],
+        "term_assignment": term_assignment,
         "parsed_total": parsed_total,
         "parsed_all_total": parsed_course_totals["all_course_credits"],
         "parsed_earned_total": parsed_course_totals["earned_credits"],

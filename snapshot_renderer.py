@@ -2165,6 +2165,9 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     .snapshot-kicker, .snapshot-context, .snapshot-muted { color: var(--snapshot-muted); font-size: .84rem; }
     .snapshot-kicker { margin: .25rem 0 0; }
     .snapshot-context { border-bottom: 1px solid var(--snapshot-border); padding: .65rem 0 1rem; }
+    .snapshot-source-credit-note { background: var(--snapshot-card); border: 1px solid var(--snapshot-border); border-inline-start: .25rem solid var(--snapshot-action); border-radius: .55rem; margin: .75rem 0; padding: .7rem .9rem; }
+    .snapshot-source-credit-note strong { display: block; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+    .snapshot-source-credit-note small { color: var(--snapshot-muted); display: block; margin-top: .2rem; }
     .snapshot-card { background: var(--snapshot-card); border: 1px solid var(--snapshot-border); border-radius: .85rem; margin-block: .75rem; padding: 1rem; }
     .snapshot-metrics { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); margin-block: 1rem; }
     .snapshot-metric { background: var(--snapshot-card); border: 1px solid var(--snapshot-border); border-radius: .7rem; display: grid; gap: .15rem; padding: .75rem; }
@@ -2254,6 +2257,7 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     statistics_schema = _escape(summary.get("statistics_schema"))
     statistics_digest = _escape(summary.get("statistics_digest"))
     input_state = _input_confirmation_label(summary.get("input_confirmation_state"))
+    source_earned = _public_credit(summary.get("source_earned_credits"), "需要補資料")
     unallocated = _public_credit(summary.get("unallocated_credits"), "需要補資料")
     required_total_number = _decimal(required_total)
     todo_number = _decimal(todo_count)
@@ -2265,6 +2269,7 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     )
     current_credit_rows = (
         f'<tr><th scope="row">有效學分</th><td><strong>{_escape(effective_credits)} 學分</strong></td></tr>'
+        f'<tr><th scope="row">成績單實得學分</th><td><strong>{_escape(source_earned)} 學分</strong></td></tr>'
         f'<tr><th scope="row">尚未配置</th><td><strong>{_escape(unallocated)} 學分</strong></td></tr>'
     )
     return (
@@ -2274,6 +2279,8 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         f'<p class="snapshot-kicker">依已確認的成績資料整理 · 更新於 {_escape(_format_evaluated_at(view.get("evaluated_at")))}</p></div>'
         f'<span class="snapshot-badge {_status_class(view.get("verdict"))}">{_escape(public_verdict)}</span></header>'
         f'<p class="snapshot-context">{context_markup}</p>'
+        f'<p class="snapshot-source-credit-note"><strong>成績單實得學分：{_escape(source_earned)} 學分</strong>'
+        '<small>來源成績單總額；修習中課程不計入實得學分，與有效學分及畢業判定分開。</small></p>'
         '<div class="snapshot-metrics">'
         f'{_metric("有效學分", f"{effective_credits} 學分", "依已確認課程採計")}'
         f'{_metric("尚缺學分", f"{missing_credits} 學分", "依主修總學分門檻計算")}'

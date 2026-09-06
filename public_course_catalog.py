@@ -132,6 +132,35 @@ def normalize_course_name(value: Any) -> str:
     return text.casefold()
 
 
+_AG102_CATEGORY_PREFIX_RE = re.compile(r"^\[[^\[\]]+\]")
+_AG102_CATEGORY_PREFIXES = {
+    "[通選公民]": "公民素養與社會探索領域",
+    "[通選人文]": "人文與文化思考領域",
+    "[通選自然]": "自然、生命與科技領域",
+    "[通選藝術]": "藝術與美感領域",
+    "[共同選修]": "共同選修",
+}
+
+
+def _ag102_catalog_lookup_name(value: Any) -> tuple[str, str]:
+    """Return an exact catalog title and the optional reviewed AG102 tag.
+
+    AG102 may put one of the reviewed category labels in front of the course
+    title.  The label is only a lookup aid and a consistency check; it is not
+    itself evidence for a public category or any other membership.
+    """
+
+    text = unicodedata.normalize("NFKC", _text(value)).strip()
+    match = _AG102_CATEGORY_PREFIX_RE.match(text)
+    if match is None:
+        return text, ""
+    prefix = normalize_course_name(match.group(0))
+    category = _AG102_CATEGORY_PREFIXES.get(prefix, "")
+    if not category:
+        return text, ""
+    return text[match.end() :].strip(), category
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -1138,6 +1167,7 @@ def resolve_public_evidence(
     term = _text(row.get("term"))
     course_code = _text(row.get("course_code") or row.get("official_course_code"))
     course_name = _text(row.get("course_name") or row.get("name"))
+    catalog_lookup_name, tagged_category = _ag102_catalog_lookup_name(course_name)
     credits = row.get("credits", 0)
     if catalog is None:
         catalog = load_public_course_catalog()
@@ -1149,7 +1179,7 @@ def resolve_public_evidence(
     candidates = catalog.lookup(
         term=term,
         course_code=course_code,
-        course_name=course_name,
+        course_name=catalog_lookup_name,
         credits=credits,
         section=row.get("section"),
     )
@@ -1172,6 +1202,8 @@ def resolve_public_evidence(
         category_state, official_category = _property_state([_text(item.get("official_category")) for item in candidates])
         college_state, official_college = _property_state([_text(item.get("college")) for item in candidates])
         department_state, department_unit = _property_state([_text(item.get("department_unit")) for item in candidates])
+        if tagged_category and category_state == VERIFIED and official_category != tagged_category:
+            category_state, official_category = CONFLICTED, ""
         reasons = []
     if public_identity_state != VERIFIED:
         reasons.append("PUBLIC_CATALOG_IDENTITY_CONFLICT")
@@ -1277,7 +1309,7 @@ def resolve_public_evidence(
         uncertain.append("official_department")
     completion_memberships = _official_completion_memberships(
         handbook_metadata,
-        course_name=course_name,
+        course_name=catalog_lookup_name,
         credits=credits,
         official_code=official_code,
         official_code_state=code_state,
@@ -1295,7 +1327,7 @@ def resolve_public_evidence(
     it_state, it_rows, _all_listed = catalog.it_for_candidates(
         candidates,
         term=term,
-        course_name=course_name,
+        course_name=catalog_lookup_name,
         credits=credits,
     )
     it_ids = {_text(item.get("membership_id")) for item in it_rows if _text(item.get("membership_id"))}
