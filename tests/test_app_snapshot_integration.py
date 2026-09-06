@@ -381,6 +381,243 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
         self.assertTrue(any(item.code == "COHORT_MISMATCH" for item in mismatched.diagnostics))
         self.assertEqual(mismatched.state, ConfirmationState.UNCONFIRMED)
 
+    def test_import_preview_is_escaped_and_excludes_opaque_source_fields(self):
+        rows = tuple(
+            NormalizedCourseRow(
+                course_code="C&1" if index == 0 else f"C{index}",
+                course_name="<script>alert(1)</script>" if index == 0 else f"課程{index}",
+                credits=credits,
+                earned_credits=credits,
+                status="COMPLETED",
+                term=f"114-{index + 1}",
+                grade="A+",
+                attempt_group="PRIVATE-ATTEMPT-GROUP",
+                department="PRIVATE-DEPARTMENT",
+                course_type="PRIVATE-COURSE-TYPE",
+            )
+            for index, credits in enumerate((2.0, 2.0, 2.0, 2.0, 1.0))
+        )
+        confirmation = CourseConfirmation(
+            rows=rows,
+            fingerprint="preview-fingerprint",
+            state=ConfirmationState.PARSED,
+        )
+
+        markup = app._imported_course_preview_markup(confirmation)
+
+        self.assertIn("class='snapshot-import-preview'", markup)
+        self.assertIn("data-row-count='5'", markup)
+        self.assertIn("data-earned-credits='9'", markup)
+        self.assertEqual(markup.count("<tbody><tr>"), 1)
+        self.assertEqual(markup.count("<tr>"), 6)  # header plus five imported rows
+        self.assertIn("解析實得學分小計 <strong>9</strong> 學分", markup)
+        self.assertIn("待確認／僅供核對", markup)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", markup)
+        self.assertIn("C&amp;1", markup)
+        self.assertNotIn("<script>", markup)
+        self.assertNotIn("PRIVATE-ATTEMPT-GROUP", markup)
+        self.assertNotIn("PRIVATE-DEPARTMENT", markup)
+        self.assertNotIn("PRIVATE-COURSE-TYPE", markup)
+        self.assertIn("已修畢", markup)
+
+    def test_import_preview_preserves_zero_credit_rows_and_next_action(self):
+        row = NormalizedCourseRow(
+            course_code="LIFE-0",
+            course_name="大學生活學習與輔導",
+            credits=0.0,
+            earned_credits=0.0,
+            status="COMPLETED",
+            term="111-1",
+        )
+        confirmation = CourseConfirmation(
+            rows=(row,),
+            fingerprint="zero-preview-fingerprint",
+            state=ConfirmationState.PARSED,
+        )
+
+        markup = app._imported_course_preview_markup(confirmation)
+
+        self.assertIn("data-row-count='1'", markup)
+        self.assertIn("data-earned-credits='0'", markup)
+        self.assertIn("<strong>0</strong> 學分", markup)
+        self.assertIn(">0</td>", markup)
+        self.assertIn("請檢視課程列並按「確認目前成績列」", markup)
+
+    def test_empty_import_preview_does_not_claim_zero_earned_credits(self):
+        markup = app._imported_course_preview_markup(None)
+
+        self.assertIn("data-row-count='0'", markup)
+        self.assertIn("data-earned-credits=''", markup)
+        self.assertIn("解析實得學分小計 <strong>需要補資料</strong>", markup)
+        self.assertNotIn("<strong>0</strong> 學分", markup)
+
+    def test_import_preview_keeps_fingerprint_mismatch_pending(self):
+        row = NormalizedCourseRow(
+            course_code="AG102",
+            course_name="普通課程",
+            credits=2.0,
+            earned_credits=2.0,
+            status="COMPLETED",
+            term="114-1",
+        )
+        fingerprint = app.fingerprint_course_rows((row,))
+        confirmation = CourseConfirmation(
+            rows=(row,),
+            fingerprint=fingerprint,
+            state=ConfirmationState.CONFIRMED,
+            confirmed_fingerprint="different-fingerprint",
+        )
+
+        markup = app._imported_course_preview_markup(confirmation)
+
+        self.assertIn("data-preview-state='pending'", markup)
+        self.assertIn("確認內容已變更或尚未固定", markup)
+        self.assertNotIn("data-preview-state='confirmed'", markup)
+
+    def test_main_keeps_unreleased_rows_in_preview_and_clears_formal_cache(self):
+        row = NormalizedCourseRow(
+            course_code="AG102",
+            course_name="普通課程",
+            credits=2.0,
+            earned_credits=2.0,
+            status="COMPLETED",
+            term="114-1",
+        )
+        fingerprint = app.fingerprint_course_rows((row,))
+        cases = (
+            CourseConfirmation(
+                rows=(row,), fingerprint=fingerprint, state=ConfirmationState.PARSED
+            ),
+            CourseConfirmation(
+                rows=(row,),
+                fingerprint=fingerprint,
+                state=ConfirmationState.STALE,
+                confirmed_fingerprint=fingerprint,
+            ),
+            CourseConfirmation(
+                rows=(row,),
+                fingerprint=fingerprint,
+                state=ConfirmationState.UNCONFIRMED,
+                diagnostics=(InputDiagnostic(code="PARSER_INCOMPLETE", message="需確認"),),
+            ),
+            CourseConfirmation(
+                rows=(row,),
+                fingerprint=fingerprint,
+                state=ConfirmationState.CONFIRMED,
+                confirmed_fingerprint="different-fingerprint",
+            ),
+        )
+
+        for confirmation in cases:
+            with self.subTest(state=confirmation.state.value):
+                calls: list[object] = []
+                marker_states: list[bool] = []
+                fake_st = SimpleNamespace(
+                    session_state={
+                        "_decision_snapshot_cache_key": "stale-key",
+                        "_decision_snapshot_cache_value": object(),
+                        "_snapshot_artifact_cache": {"snapshot_id": "stale"},
+                        "_exports_ready": True,
+                        "_analysis_exported": True,
+                    }
+                )
+
+                with patch.object(app, "st", fake_st), patch.object(
+                    app, "setup_page"
+                ), patch.object(app, "render_header_card"), patch.object(
+                    app, "render_setup_panel", return_value={
+                        "has_transcript": True,
+                        "primary_curriculum_id": "primary:114:cs",
+                    }
+                ), patch.object(app, "collapse_sidebar_if_needed"), patch.object(
+                    app, "_parser_confirmation", return_value=confirmation
+                ), patch.object(
+                    app, "_render_confirmation_editor", side_effect=lambda value: value
+                ), patch.object(
+                    app,
+                    "_render_imported_course_preview",
+                    side_effect=lambda value: calls.append(value),
+                ), patch.object(
+                    app,
+                    "_render_analysis_state_marker",
+                    side_effect=lambda *, active=None: marker_states.append(bool(active)),
+                ), patch.object(
+                    app,
+                    "_evaluate_cached_snapshot",
+                    side_effect=AssertionError("unreleased rows must not evaluate"),
+                ):
+                    app.main()
+
+                self.assertEqual(calls, [confirmation])
+                self.assertEqual(marker_states, [True])
+                self.assertIsNone(fake_st.session_state["_decision_snapshot_cache_key"])
+                self.assertIsNone(fake_st.session_state["_decision_snapshot_cache_value"])
+                self.assertIsNone(fake_st.session_state["_snapshot_artifact_cache"])
+                self.assertFalse(fake_st.session_state["_exports_ready"])
+                self.assertFalse(fake_st.session_state["_analysis_exported"])
+
+    def test_main_evaluates_confirmed_rows_once_including_zero_credit_rows(self):
+        row = NormalizedCourseRow(
+            course_code="LIFE-0",
+            course_name="大學生活學習與輔導",
+            credits=0.0,
+            earned_credits=0.0,
+            status="COMPLETED",
+            term="111-1",
+        )
+        fingerprint = app.fingerprint_course_rows((row,))
+        confirmation = CourseConfirmation(
+            rows=(row,),
+            fingerprint=fingerprint,
+            state=ConfirmationState.CONFIRMED,
+            confirmed_fingerprint=fingerprint,
+        )
+        fake_st = SimpleNamespace(session_state={})
+        evaluated: list[EvaluationRequest] = []
+        rendered: list[object] = []
+
+        def evaluate_once(request):
+            evaluated.append(request)
+            return object()
+
+        with patch.object(app, "st", fake_st), patch.object(app, "setup_page"), patch.object(
+            app, "render_header_card"
+        ), patch.object(
+            app,
+            "render_setup_panel",
+            return_value={"has_transcript": True, "primary_curriculum_id": "primary:114:cs"},
+        ), patch.object(app, "collapse_sidebar_if_needed"), patch.object(
+            app, "_parser_confirmation", return_value=confirmation
+        ), patch.object(app, "_render_confirmation_editor", side_effect=lambda value: value), patch.object(
+            app, "_evaluate_cached_snapshot", side_effect=evaluate_once
+        ), patch.object(
+            app, "_render_snapshot_outputs", side_effect=lambda value: rendered.append(value)
+        ), patch.object(app, "_render_analysis_state_marker"):
+            app.main()
+
+        self.assertEqual(len(evaluated), 1)
+        self.assertEqual(evaluated[0].confirmed_course_rows, (row,))
+        self.assertTrue(evaluated[0].transcript_confirmed)
+        self.assertEqual(len(rendered), 1)
+
+    def test_unconfirmed_analysis_marker_stays_active_without_export(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "_parsed_confirmation": SimpleNamespace(rows=(object(),)),
+                "_analysis_exported": False,
+            }
+        )
+        rendered: list[str] = []
+
+        with patch.object(app, "st", fake_st), patch.object(
+            app, "render_html", side_effect=lambda markup, **_kwargs: rendered.append(markup)
+        ):
+            app._render_analysis_state_marker(active=True)
+
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("data-analysis-active='true'", rendered[0])
+        self.assertIn("data-exported='false'", rendered[0])
+
 
 if __name__ == "__main__":
     unittest.main()

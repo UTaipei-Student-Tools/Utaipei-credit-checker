@@ -709,21 +709,28 @@ def _assert_analysis_flow(page: Page, fixture: Path, output_dir: Path) -> dict[s
         "has_masked_student": "Z9••••99" in confirmation_text,
     }
     assert "Z999999999" not in page.locator("body").inner_text()
-    page.locator(".snapshot-report").wait_for(state="visible", timeout=30_000)
-    previous_snapshot_id = page.locator(".snapshot-report").get_attribute("data-snapshot-id")
+    preview = page.locator(".snapshot-import-preview")
+    preview.wait_for(state="visible", timeout=30_000)
+    preview_row_count = int(preview.get_attribute("data-row-count") or "-1")
+    preview_earned_credits = float(preview.get_attribute("data-earned-credits") or "-1")
+    assert preview_row_count == 5
+    assert preview.locator("tbody tr").count() == 5
+    assert preview_earned_credits == 9
+    preview_text = preview.inner_text()
+    assert "待確認" in preview_text
+    assert "僅供核對" in preview_text
+    assert page.locator(".snapshot-report").count() == 0
     confirm.click()
     page.wait_for_function(
-        """previousId => {
+        """() => {
         const reports = [...document.querySelectorAll('.snapshot-report')];
           const report = reports.at(-1);
           return reports.length === 1
             && report.dataset.snapshotId
-            && report.dataset.snapshotId !== previousId
             && report?.innerText.includes('計算結果')
             && report?.innerText.includes('資料確認：')
             && report.querySelectorAll('.snapshot-requirement-expander').length > 0;
         }""",
-        arg=previous_snapshot_id,
         timeout=30_000,
     )
 

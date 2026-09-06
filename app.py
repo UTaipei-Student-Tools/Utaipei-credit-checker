@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping
+from html import escape as _escape_html
 from typing import Any
 
 import streamlit as st
@@ -22,6 +24,7 @@ from input_confirmation import (
     ConfirmationState,
     CourseConfirmation,
     InputDiagnostic,
+    NormalizedCourseRow,
     confirm_confirmation,
     edit_confirmation,
     fingerprint_course_rows,
@@ -608,6 +611,125 @@ _EDITOR_STATUS_CODES = {
 _EDITOR_STATUS_CODES.update({"已修畢": "COMPLETED", "不及格": "FAILED", "未修課": "NOT_TAKEN"})
 
 
+def _preview_number(value: object, *, fallback: str = "—") -> str:
+    """Format one normalized finite number for the import-only preview."""
+
+    if isinstance(value, bool):
+        return fallback
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if not math.isfinite(number) or number < 0:
+        return fallback
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _preview_text(value: object, *, fallback: str = "—") -> str:
+    """Escape one scalar normalized field before putting it in HTML."""
+
+    if isinstance(value, bool):
+        return _escape_html(fallback)
+    text = str(value).strip() if isinstance(value, (str, int, float)) else ""
+    return _escape_html(text or fallback)
+
+
+def _imported_course_preview_markup(confirmation: CourseConfirmation | object) -> str:
+    """Build a static, safe course table for data that is not formally released.
+
+    This projection deliberately accepts only ``NormalizedCourseRow`` fields.
+    It is a review aid for parsed or edited input, so it never contains
+    attempt grouping, parser payloads, student identity, or graduation status.
+    """
+
+    raw_rows = getattr(confirmation, "rows", ())
+    rows = tuple(row for row in raw_rows if isinstance(row, NormalizedCourseRow))
+    state = getattr(getattr(confirmation, "state", None), "value", "")
+    valid = bool(getattr(confirmation, "valid", False))
+    state_key = str(state or "UNCONFIRMED").strip().upper()
+    released_rows = (
+        release_formal_attempts(confirmation, confirmation.fingerprint)
+        if isinstance(confirmation, CourseConfirmation)
+        else ()
+    )
+    formally_released = bool(released_rows)
+    if state_key == ConfirmationState.STALE.value:
+        next_action = "來源資料已變更，請重新檢視並確認課程列；目前僅供核對。"
+    elif not valid:
+        next_action = "資料列仍需修正或補齊後才能確認；目前僅供核對。"
+    elif state_key == ConfirmationState.CONFIRMED.value and not formally_released:
+        next_action = "確認內容已變更或尚未固定，請重新檢視並確認；目前僅供核對。"
+    elif state_key != ConfirmationState.CONFIRMED.value:
+        next_action = "請檢視課程列並按「確認目前成績列」；目前僅供核對。"
+    else:
+        next_action = "課程列已確認，正式分析會使用這份固定資料。"
+
+    earned_total = sum(
+        float(row.earned_credits)
+        for row in rows
+        if isinstance(row.earned_credits, (int, float))
+        and not isinstance(row.earned_credits, bool)
+        and math.isfinite(float(row.earned_credits))
+    )
+    row_count = len(rows)
+    earned_display = _preview_number(earned_total) if rows else "需要補資料"
+    earned_attribute = _preview_number(earned_total) if rows else ""
+    preview_state = "confirmed" if formally_released else "pending"
+    headers = ("課名", "課號", "學期", "課程學分", "實得學分", "狀態")
+    header_html = "".join(
+        f"<th scope='col' style='border-bottom:1px solid #CBD5E1;padding:.55rem .6rem;text-align:start;white-space:nowrap'>{_escape_html(title)}</th>"
+        for title in headers
+    )
+    row_html: list[str] = []
+    for row in rows:
+        status_key = str(row.status or "UNKNOWN").strip().upper().replace("-", "_").replace(" ", "_")
+        status = _EDITOR_STATUS_LABELS.get(status_key, "需要補資料")
+        cells = (
+            _preview_text(row.course_name, fallback="未標示課程"),
+            _preview_text(row.course_code),
+            _preview_text(row.term, fallback="學期待補"),
+            _preview_number(row.credits),
+            _preview_number(row.earned_credits),
+            _escape_html(status),
+        )
+        row_html.append(
+            "<tr>"
+            + "".join(
+                f"<td style='border-bottom:1px solid #E2E8F0;padding:.55rem .6rem;text-align:start;vertical-align:top'>{cell}</td>"
+                for cell in cells
+            )
+            + "</tr>"
+        )
+    if not row_html:
+        row_html.append(
+            "<tr><td colspan='6' style='padding:.7rem .6rem;text-align:start'>"
+            "目前沒有可預覽的課程列；請重新上傳或改用手動輸入。"
+            "</td></tr>"
+        )
+    return (
+        "<section class='snapshot-import-preview' data-preview-state='"
+        f"{preview_state}' data-row-count='{row_count}' data-earned-credits='{earned_attribute}'>"
+        "<h2 class='snapshot-import-preview-title'>匯入課程預覽</h2>"
+        f"<p class='snapshot-import-preview-summary'>已匯入 <strong>{row_count}</strong> 列課程；"
+        f"解析實得學分小計 <strong>{earned_display}</strong> 學分。"
+        "</p>"
+        "<p class='snapshot-import-preview-note'>待確認／僅供核對；上述小計不是畢業學分，確認前不會產生正式判定。</p>"
+        f"<p class='snapshot-import-preview-next-action'>{_escape_html(next_action)}</p>"
+        "<div class='snapshot-import-preview-scroll' style='max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch'>"
+        "<table aria-label='匯入課程預覽' style='border-collapse:collapse;width:100%;min-width:46rem'>"
+        f"<thead><tr>{header_html}</tr></thead><tbody>{''.join(row_html)}</tbody></table>"
+        "</div></section>"
+    )
+
+
+def _render_imported_course_preview(confirmation: CourseConfirmation | object) -> None:
+    """Render the static confirmation preview without entering formal analysis."""
+
+    render_html(_imported_course_preview_markup(confirmation), ui=st)
+
+
 def _editor_display_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Translate normalized course rows for the editable student table."""
 
@@ -907,6 +1029,18 @@ def main():
         st.info("完成上方設定後，請上傳歷年成績單 PDF，或使用校務系統帳密即時抓取；確認資料後這裡會顯示學分進度。")
         return
 
+    # Parsed, stale, invalid, or fingerprint-mismatched rows are useful for
+    # review but are not formal attempts.  Keep them visible in a static
+    # preview while clearing any previous snapshot and stopping before the
+    # service boundary.  A released zero-credit course is still a real row,
+    # so the non-empty check intentionally uses the released tuple only.
+    released_rows = _confirmed_rows(confirmation)
+    if not released_rows:
+        _clear_snapshot_caches()
+        _render_imported_course_preview(confirmation)
+        _render_analysis_state_marker(active=True)
+        return
+
     primary_id = str(sidebar_state.get("primary_curriculum_id") or "")
     if not primary_id or primary_id in {f"primary:{year}:math" for year in ("113", "114", "115")}:
         _clear_snapshot_caches()
@@ -914,7 +1048,6 @@ def main():
         st.info("請完成主修設定；數學系 113 學年度起須選擇主修專業領域，再按「套用設定」。")
         return
 
-    released_rows = _confirmed_rows(confirmation)
     request = _build_evaluation_request(sidebar_state, confirmation, released_rows=released_rows)
 
     # This is intentionally the only production evaluation call in this file.

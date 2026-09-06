@@ -144,6 +144,187 @@ def test_no_id_ge_uses_exact_public_category_and_ignores_caller_membership_claim
     assert evidence.candidate_source_refs
 
 
+@pytest.mark.parametrize(
+    ("term", "course_name", "prefix", "category", "membership"),
+    (
+        (
+            "113-1",
+            "臺北城市散步旅行",
+            "[通選公民]",
+            "公民素養與社會探索領域",
+            "ge_civic",
+        ),
+        (
+            "113-1",
+            "政府運作與國會監督",
+            "[通選公民]",
+            "公民素養與社會探索領域",
+            "ge_civic",
+        ),
+        (
+            "113-2",
+            "日本旅行與日本文化",
+            "[通選人文]",
+            "人文與文化思考領域",
+            "ge_humanities",
+        ),
+        (
+            "114-1",
+            "生命科學與人生",
+            "[通選自然]",
+            "自然、生命與科技領域",
+            "ge_nature",
+        ),
+        (
+            "114-1",
+            "生活哲學與藝術",
+            "[通選藝術]",
+            "藝術與美感領域",
+            "ge_art",
+        ),
+        (
+            "114-2",
+            "建築史",
+            "[通選人文]",
+            "人文與文化思考領域",
+            "ge_humanities",
+        ),
+        (
+            "111-1",
+            "西班牙語(一)",
+            "[共同選修]",
+            "共同選修",
+            "ge_common_elective",
+        ),
+    ),
+)
+def test_ag102_allowlisted_category_prefix_uses_exact_catalog_identity(
+    term,
+    course_name,
+    prefix,
+    category,
+    membership,
+):
+    catalog = load_public_course_catalog()
+    plain = resolve_public_evidence(
+        {"term": term, "course_name": course_name, "credits": 2},
+        catalog=catalog,
+    )
+    tagged_row = {"term": term, "course_name": f"{prefix}{course_name}", "credits": 2}
+    tagged = resolve_public_evidence(tagged_row, catalog=catalog)
+
+    assert tagged_row["course_name"] == f"{prefix}{course_name}"
+    assert tagged.public_identity_state == plain.public_identity_state == "VERIFIED"
+    assert tagged.candidate_source_refs == plain.candidate_source_refs
+    assert tagged.official_course_code == plain.official_course_code
+    assert tagged.official_category == category
+    assert tagged.official_category_state == "VERIFIED"
+    assert tagged.verified_memberships == plain.verified_memberships
+    assert membership in tagged.verified_memberships
+    assert "university_common_excluded_from_free" in tagged.verified_memberships
+
+
+def test_ag102_prefix_category_conflict_does_not_create_tag_membership():
+    catalog = PublicCourseCatalog.from_records(
+        (
+            {
+                "term": "113-1",
+                "course_name": "衝突分類課程",
+                "credits": 2,
+                "hours": 2,
+                "official_course_code": "CONFLICT-1",
+                "section": "01",
+                "official_category": "公民素養與社會探索領域",
+                "source_reference": "public-course:synthetic:conflict",
+                "source_url": "https://my.utaipei.edu.tw/synthetic/conflict",
+            },
+        ),
+        covered_terms=("113-1",),
+    )
+
+    evidence = resolve_public_evidence(
+        {"term": "113-1", "course_name": "[通選人文]衝突分類課程", "credits": 2},
+        catalog=catalog,
+    )
+
+    assert evidence.public_identity_state == "VERIFIED"
+    assert evidence.official_category_state == "CONFLICTED"
+    assert evidence.official_category == ""
+    assert "ge_humanities" not in evidence.verified_memberships
+    assert "ge_civic" not in evidence.verified_memberships
+
+
+def test_compile_attempts_wires_tagged_ge_to_the_server_owned_pool():
+    metadata = {
+        "ge-civic-policy": {
+            "generic": True,
+            "policy_rule": "official_category_policy",
+            "policy_state": "VERIFIED",
+            "pool_id": "pool:ge_civic",
+            "membership_ids": ("ge_civic",),
+            "policy_predicate": {"category": "公民素養與社會探索領域"},
+        },
+    }
+    row = NormalizedCourseRow(
+        course_code="",
+        course_name="[通選公民]臺北城市散步旅行",
+        credits=2,
+        earned_credits=2,
+        status="COMPLETED",
+        term="113-1",
+        course_type="",
+    )
+
+    attempts, safe_rows = _compile_attempts((row,), metadata)
+
+    assert len(attempts) == 1
+    assert attempts[0].identity_status == "UNKNOWN"
+    assert any(
+        item[0] == "pool:ge_civic"
+        and item[1] == "VERIFIED"
+        and item[3] == "public_catalog"
+        for item in attempts[0].pool_membership_evidence
+    )
+    assert "ge_civic" in safe_rows[attempts[0].attempt_id]["public_catalog"]["verified_memberships"]
+
+
+def test_ag102_fake_prefix_and_wrong_term_remain_unresolved():
+    catalog = PublicCourseCatalog.from_records(
+        (
+            {
+                "term": "113-1",
+                "course_name": "標記課程",
+                "credits": 2,
+                "hours": 2,
+                "official_course_code": "TAG-1",
+                "section": "01",
+                "official_category": "公民素養與社會探索領域",
+                "source_reference": "public-course:synthetic:tag",
+                "source_url": "https://my.utaipei.edu.tw/synthetic/tag",
+            },
+        ),
+        covered_terms=("113-1", "113-2"),
+    )
+
+    fake_prefix = resolve_public_evidence(
+        {"term": "113-1", "course_name": "[通選偽造]標記課程", "credits": 2},
+        catalog=catalog,
+    )
+    wrong_term = resolve_public_evidence(
+        {"term": "113-2", "course_name": "[通選公民]標記課程", "credits": 2},
+        catalog=catalog,
+    )
+    standalone_prefix = resolve_public_evidence(
+        {"term": "113-1", "course_name": "[通選公民]", "credits": 2},
+        catalog=catalog,
+    )
+
+    for evidence in (fake_prefix, wrong_term, standalone_prefix):
+        assert evidence.public_identity_state == "UNKNOWN"
+        assert "PUBLIC_CATALOG_NO_EXACT_MATCH" in evidence.reasons
+        assert evidence.verified_memberships == ()
+
+
 def test_lookup_is_term_bound_and_does_not_borrow_another_term():
     catalog = load_public_course_catalog()
     terms_by_code: defaultdict[str, set[str]] = defaultdict(set)

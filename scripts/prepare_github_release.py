@@ -94,6 +94,7 @@ GITHUB_EXTRA_FILES: tuple[str, ...] = (
     "tests/test_synthetic_transcript_fixture.py",
     "tests/test_transcript_only_portal.py",
     "tests/test_transcript_reconciliation.py",
+    "tests/test_transcript_year_layout.py",
     "tests/test_university_cohort_rules.py",
     "tests/test_release_helpers.py",
 )

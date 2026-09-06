@@ -210,6 +210,56 @@ def test_renderer_uses_semantic_tables_for_courses_and_credit_categories():
     assert 'class="snapshot-course"' in output
 
 
+def test_renderer_keeps_source_earned_separate_from_effective_credits(monkeypatch):
+    snapshot = _snapshot()
+    import snapshot_renderer
+
+    original_projection = snapshot_renderer.build_snapshot_projection
+
+    def source_and_effective_are_distinct(value):
+        projection = dict(original_projection(value))
+        summary = dict(projection["summary"])
+        summary.update(
+            {
+                "source_earned_credits": "87",
+                "counted_exclusive_credits": "70",
+                "recognized_credits": "70",
+                "effective_recognized_credits": "70",
+            }
+        )
+        projection["summary"] = summary
+        return projection
+
+    monkeypatch.setattr(snapshot_renderer, "build_snapshot_projection", source_and_effective_are_distinct)
+    output = render_snapshot(snapshot)
+
+    assert "成績單實得學分：87 學分" in output
+    assert '<th scope="row">成績單實得學分</th><td><strong>87 學分</strong></td>' in output
+    assert '<th scope="row">有效學分</th><td><strong>70 學分</strong></td>' in output
+    assert "修習中課程不計入實得學分" in output
+    assert "成績單實得學分：0 學分" not in output
+
+
+def test_renderer_does_not_guess_zero_when_source_earned_is_missing(monkeypatch):
+    snapshot = _snapshot()
+    import snapshot_renderer
+
+    original_projection = snapshot_renderer.build_snapshot_projection
+
+    def without_source_earned(value):
+        projection = dict(original_projection(value))
+        summary = dict(projection["summary"])
+        summary.pop("source_earned_credits", None)
+        projection["summary"] = summary
+        return projection
+
+    monkeypatch.setattr(snapshot_renderer, "build_snapshot_projection", without_source_earned)
+    output = render_snapshot(snapshot)
+
+    assert "成績單實得學分：需要補資料 學分" in output
+    assert "成績單實得學分：0 學分" not in output
+
+
 def test_renderer_maps_confirmation_state_and_hides_undefined_required_progress(monkeypatch):
     snapshot = _snapshot()
     import snapshot_renderer

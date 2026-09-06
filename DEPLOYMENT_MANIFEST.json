@@ -1,21 +1,21 @@
 {
-  "bundle_digest": "sha256:11ffc39cbdef7293a6830956e5b5a5d3e8bc7800e9de7586c1ca796641abdab5",
+  "bundle_digest": "sha256:25da3638b2dff158df846ccde3808495b5a19d91e31bc0fe3e477f47c94cbc56",
   "files": {
     ".streamlit/config.toml": {
       "bytes": 91,
       "sha256": "aa244078f01d5259d17e297f7d039bf664824668fdc2bfde557ae355324426f5"
     },
     "README.md": {
-      "bytes": 14152,
-      "sha256": "bd805e3edaa1efe2c42e4507215950f0bb7814c0774758b9fb806cd7fac8e23c"
+      "bytes": 14863,
+      "sha256": "2116506ce6246b0889fff82004881899782550124d422de30ed8a9f7225afdf3"
     },
     "allocation_engine.py": {
       "bytes": 157486,
       "sha256": "4b3f7bec2346ab6b75b8c8c80c85d5812af9ac968e3d0dfdb82ea8893ce64819"
     },
     "app.py": {
-      "bytes": 40900,
-      "sha256": "da0bc0ff1836c7d891f2b82bed3e827231c5b88033cbb795ddd3307d04866004"
+      "bytes": 47246,
+      "sha256": "3378876e2d002869af76a9405819b24033189fce8aa21b5b42785293d8789f7f"
     },
     "application_resolution.py": {
       "bytes": 70289,
@@ -70,8 +70,8 @@
       "sha256": "16801e570794c06d0d7aadc63c9b305f7984b646d58ed01f060a894c42adbb78"
     },
     "pdf_parser.py": {
-      "bytes": 54412,
-      "sha256": "bc2806c3187c90761049c0e9d1c05ecc9a38b48966c0eb7264a418041ec00e43"
+      "bytes": 58694,
+      "sha256": "ce89cc8b7525237ff42462903dad851f22902f1d59da0aeff12fd43a823168a3"
     },
     "policy_audit.py": {
       "bytes": 51938,
@@ -82,8 +82,8 @@
       "sha256": "98a0de05fc08a3ed6d992a65d88d59c313d540e66f00362c9a0945f741212fd7"
     },
     "public_course_catalog.py": {
-      "bytes": 59169,
-      "sha256": "0747bf20fdb900cc4f0a98945586917802ad11e8cf5933101a5b3bffa572febc"
+      "bytes": 60513,
+      "sha256": "232eb5bfe5fd474d6ae84a03a59130dfcb60c310ae82d21954453e4f936a2f7f"
     },
     "pyproject.toml": {
       "bytes": 226,
@@ -142,8 +142,8 @@
       "sha256": "1fe4b3d5d915c9e612682f4dd42a6ea888b27a46bda3eabdb4c63b5e49bd8d05"
     },
     "snapshot_renderer.py": {
-      "bytes": 121194,
-      "sha256": "534cbb89fbf25e5e3e8b7ff0192ad3d3993d68bb4b93de33f7fca8e8bcb85081"
+      "bytes": 122119,
+      "sha256": "626db19470f8b8d731255b290f7a5664e0a538801f032c9fb005aa01851f919f"
     },
     "static/icons/apple-touch-icon.png": {
       "bytes": 17488,
