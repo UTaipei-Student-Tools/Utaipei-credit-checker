@@ -32,6 +32,11 @@ from scraper import (
     PortalErrorCode,
     fetch_transcript,
 )
+from policy_audit import (
+    get_primary_program_options,
+    get_primary_requirements,
+    normalize_primary_program,
+)
 from snapshot_renderer import clean_student_facing_text, format_handbook_citation
 
 _PORTAL_STATE_KEY = "_utaipei_portal_state"
