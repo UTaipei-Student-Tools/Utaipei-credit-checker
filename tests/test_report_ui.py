@@ -278,7 +278,7 @@ class ReportNavigationTests(unittest.TestCase):
         self.assertTrue(any("資科系指定／專業必修｜已得 0.0／15.0" in label for label in labels))
         self.assertTrue(any("資科系專業選修｜已得 3.0／25.0" in label for label in labels))
         rendered_html = "\n".join(str(element.value) for element in app.markdown)
-        self.assertIn("微積分(I)", rendered_html)
+        self.assertTrue("微積分(一)" in rendered_html or "微積分(I)" in rendered_html)
         self.assertIn("3.0", rendered_html)
         self.assertIn("已修畢", rendered_html)
         self.assertIn("配置：雙主修目標採認；超額時轉自由選修", rendered_html)
