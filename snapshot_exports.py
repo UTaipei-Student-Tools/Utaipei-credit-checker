@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import unicodedata
 from collections.abc import Mapping
 from html import unescape
 from typing import Any
@@ -43,12 +44,16 @@ from snapshot_renderer import (
     _unallocated_course_guidance,
     _unallocated_course_items,
     build_snapshot_view,
+    clean_student_facing_text,
+    format_handbook_citation,
     sanitize_snapshot_value,
+    translate_requirement_blocker,
 )
 
+PASS = "PASS"
+FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 NOT_APPLICABLE = "NOT_APPLICABLE"
-
 _EXPORT_SCHEMA = "snapshot-export.v1"
 _CSV_FIELDS = (
     "snapshot_id",
@@ -328,7 +333,7 @@ def build_allocation_csv(snapshot: DecisionSnapshot) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-def _student_source_text(items: Any) -> str:
+def _student_source_text(items: Any, view_provenance: Any = None) -> str:
     """Turn provenance records into a short Chinese reference for students."""
 
     references: list[str] = []
@@ -340,9 +345,16 @@ def _student_source_text(items: Any) -> str:
         source_items = items
     else:
         source_items = ()
+    if not source_items and view_provenance:
+        if isinstance(view_provenance, (list, tuple)):
+            source_items = view_provenance
+        elif isinstance(view_provenance, Mapping):
+            source_items = (view_provenance,)
     for item in source_items:
         if not isinstance(item, Mapping):
-            reference = _public_reason(item, "規則來源尚待補充")
+            raw_text = _text(item)
+            formatted = format_handbook_citation(raw_text) if ":" in raw_text else raw_text
+            reference = _public_reason(formatted, "規則來源尚待補充")
             if reference != "規則來源尚待補充":
                 references.append(f"來源：{reference}")
             continue
@@ -352,26 +364,27 @@ def _student_source_text(items: Any) -> str:
         pages = _text(item.get("pages") or item.get("page") or item.get("pdf_page") or item.get("printed_page"))
         clause = _text(item.get("original_clause") or item.get("original_text"))
         if location:
-            parts.append(f"位置：{location}")
+            parts.append(f"位置：{format_handbook_citation(location)}")
         elif source_file:
-            parts.append(f"文件：{source_file}")
+            parts.append(f"文件：{format_handbook_citation(source_file)}")
         if pages:
             parts.append(f"頁碼：{pages}")
         if clause:
-            parts.append(f"條文：{_public_reason(clause, '規則條文')}")
+            parts.append(f"條文：{format_handbook_citation(_public_reason(clause, '規則條文'))}")
         if not parts:
             reference = _text(item.get("source_reference") or item.get("evidence_reference"))
             if reference:
-                parts.append(f"來源：{_public_reason(reference, '規則來源已保留於稽核資料')}")
+                formatted_ref = format_handbook_citation(reference) if ":" in reference else reference
+                parts.append(f"來源：{_public_reason(formatted_ref, '規則來源已保留於稽核資料')}")
         if parts:
-            references.append("；".join(parts))
-    return "；".join(dict.fromkeys(references)) or "規則來源尚待補充"
+            references.append(clean_student_facing_text("；".join(parts)))
+    return clean_student_facing_text("；".join(dict.fromkeys(references))) or "規則來源尚待補充"
 
 
 def _student_context_text(view: Mapping[str, Any]) -> str:
     """Return the renderer's identity context without HTML markup."""
 
-    return unescape(_public_context_markup(view)).replace("　·　", "；")
+    return clean_student_facing_text(unescape(_public_context_markup(view)).replace("　·　", "；"))
 
 
 def _student_next_step(requirement: Mapping[str, Any]) -> str:
@@ -379,12 +392,12 @@ def _student_next_step(requirement: Mapping[str, Any]) -> str:
     if status == "PASS":
         return "目前已完成；請保留這份成績資料。"
     blockers = [
-        _public_reason(item, "資料仍需人工核對")
+        _public_reason(item, "資料仍需人工核對", requirement=requirement)
         for item in requirement.get("blockers", ())
         if _text(item)
     ]
     if blockers:
-        return "；".join(dict.fromkeys(blockers))
+        return clean_student_facing_text("；".join(dict.fromkeys(blockers)))
     if status in {UNKNOWN, "NOT_APPLICABLE"}:
         return "請查看規則來源並補充可核對的資料。"
     return "請查看要求明細，確認尚缺課程或學分。"
@@ -392,9 +405,13 @@ def _student_next_step(requirement: Mapping[str, Any]) -> str:
 
 def _student_gate_next_step(result: Mapping[str, Any]) -> str:
     status = _text(result.get("status"), UNKNOWN).upper()
-    blockers = _result_blockers(result)
+    blockers = [
+        _public_reason(item, "資料仍需人工核對")
+        for item in _result_blockers(result)
+        if _text(item)
+    ]
     if blockers:
-        return "；".join(dict.fromkeys(blockers))
+        return clean_student_facing_text("；".join(dict.fromkeys(blockers)))
     if status == "PASS":
         return "目前已符合此項門檻；請保留規則來源。"
     if status == "FAIL":
@@ -404,12 +421,18 @@ def _student_gate_next_step(result: Mapping[str, Any]) -> str:
 
 def _student_non_credit_row(view: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, str]:
     status = _public_status_label(result.get("status"), PUBLIC_PENDING)
-    name = _public_reason(
-        result.get("name") or result.get("label") or result.get("requirement_id"),
-        "非學分門檻",
-    )
+    raw_name = result.get("name") or result.get("label") or result.get("requirement_id")
+    raw_name_str = _text(raw_name).strip()
+    if raw_name_str == "28030":
+        name = "大學生活學習與輔導"
+    elif raw_name_str == "07140":
+        name = "服務學習"
+    else:
+        name = _public_reason(raw_name, "非學分門檻")
     progress = _non_credit_progress_text(result)
-    blockers = "；".join(_result_blockers(result)) or "依已確認資料檢查"
+    raw_blockers = _result_blockers(result)
+    blockers = "；".join(_public_reason(b, "依已確認資料檢查") for b in raw_blockers) or "依已確認資料檢查"
+    blockers = clean_student_facing_text(blockers)
     coverage = _public_reason(result.get("coverage_state", result.get("coverage")), "來源尚未完整")
     evidence = _public_reason(result.get("evidence_state", result.get("evidence")), "來源尚未核對")
     courses = _matched_gate_courses(view, result)
@@ -441,7 +464,9 @@ def _student_subset_row(view: Mapping[str, Any], result: Mapping[str, Any]) -> d
     name = _subset_name(result)
     progress = _subset_progress_text(result)
     unknown = _public_credit(result.get("unknown_candidate_credits"), "0")
-    reason = "；".join(_result_blockers(result)) or (f"另有 {unknown} 學分候選仍待核對" if unknown != "0" else "依規則指定的學分採計結果檢查")
+    raw_blockers = _result_blockers(result)
+    reason = "；".join(_public_reason(b, "依規則指定的學分採計結果檢查") for b in raw_blockers) or (f"另有 {unknown} 學分候選仍待核對" if unknown != "0" else "依規則指定的學分採計結果檢查")
+    reason = clean_student_facing_text(reason)
     provenance_state = "；".join(
         _public_reason(value, "需要核對來源")
         for value in (
@@ -519,6 +544,18 @@ def _student_unallocated_row(view: Mapping[str, Any], item: Mapping[str, Any]) -
 def _student_csv_rows(view: Mapping[str, Any]) -> list[dict[str, str]]:
     """Build detail rows from the same projection used by the HTML report."""
 
+    snapshot_reminders: list[str] = []
+    for item in view.get("blockers", ()):
+        if _text(item):
+            snapshot_reminders.append(_public_reason(item, "資料仍需人工核對"))
+    for item in view.get("warnings", ()):
+        if _text(item):
+            snapshot_reminders.append(_public_reason(item, "資料仍需人工核對"))
+    for item in view.get("remediation_suggestions", ()):
+        if _text(item):
+            snapshot_reminders.append(_public_reason(item, "請查看要求明細與規則來源"))
+    reminders_str = "；".join(dict.fromkeys(snapshot_reminders))
+
     rows: list[dict[str, str]] = []
     for requirement in view.get("requirements", ()):
         if not isinstance(requirement, Mapping):
@@ -534,8 +571,11 @@ def _student_csv_rows(view: Mapping[str, Any]) -> list[dict[str, str]]:
         coverage = _public_reason(requirement.get("coverage_state"), "來源尚未完整")
         evidence = _public_reason(requirement.get("evidence_state"), "來源尚未核對")
         data_state = f"{coverage}；{evidence}"
-        source = _student_source_text(requirement.get("rule_provenance", ()))
+        source = _student_source_text(requirement.get("rule_provenance", ()), view.get("rule_provenance", ()))
         next_step = _student_next_step(requirement)
+        if reminders_str:
+            next_step = f"{next_step}；{reminders_str}"
+        next_step = clean_student_facing_text(next_step)
         courses = [item for item in requirement.get("courses", ()) if isinstance(item, Mapping)]
         if not courses:
             courses = [{}]
@@ -570,36 +610,25 @@ def _student_csv_rows(view: Mapping[str, Any]) -> list[dict[str, str]]:
                     "下一步": next_step,
                 }
             )
-    rows.extend(_student_unallocated_row(view, item) for item in _student_unallocated_courses(view))
-    rows.extend(_student_non_credit_row(view, item) for item in _non_credit_result_rows(view))
-    rows.extend(_student_subset_row(view, item) for item in _subset_result_rows(view))
-    if rows:
-        return rows
-    fallback = {
-        field: ("目前沒有可顯示的要求，請先確認成績資料。" if field == "下一步" else "需要補資料")
-        for field in _STUDENT_CSV_FIELDS
-    }
-    fallback["報表編號"] = _text(view.get("snapshot_id"), "需要補資料")
-    return [fallback]
+    for result in _non_credit_result_rows(view):
+        rows.append(_student_non_credit_row(view, result))
+    for result in _subset_result_rows(view):
+        rows.append(_student_subset_row(view, result))
+    for item in _student_unallocated_courses(view):
+        rows.append(_student_unallocated_row(view, item))
+    return rows
 
 
 def build_student_allocation_csv(snapshot: DecisionSnapshot) -> bytes:
-    """Return a Chinese, student-facing detail CSV from one snapshot."""
+    """Return an Excel-safe, student-facing UTF-8-BOM CSV."""
 
     view = build_snapshot_view(snapshot)
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=_STUDENT_CSV_FIELDS, lineterminator="\n")
+    writer = csv.DictWriter(output, fieldnames=_STUDENT_CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
     writer.writeheader()
     for row in _student_csv_rows(view):
-        writer.writerow({field: _csv_cell(row.get(field, "")) for field in _STUDENT_CSV_FIELDS})
+        writer.writerow({field: _csv_cell(clean_student_facing_text(row.get(field, ""))) for field in _STUDENT_CSV_FIELDS})
     return output.getvalue().encode("utf-8-sig")
-
-
-def build_audit_json(snapshot: DecisionSnapshot) -> bytes:
-    """Return a deterministic UTF-8 audit JSON export."""
-
-    payload = build_snapshot_export_payload(snapshot)
-    return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
 def _pdf_lines(payload: Mapping[str, Any]) -> list[str]:
@@ -607,9 +636,8 @@ def _pdf_lines(payload: Mapping[str, Any]) -> list[str]:
     course_counts = payload.get("course_counts") if isinstance(payload.get("course_counts"), Mapping) else {}
     requirement_counts = payload.get("requirement_counts") if isinstance(payload.get("requirement_counts"), Mapping) else {}
     lines = [
-        "北市大畢業通｜可稽核分析摘要",
-        f"DecisionSnapshot：{_text(payload.get('snapshot_id'))}",
-        f"評估時間：{_text(payload.get('evaluated_at'))}",
+        "北市大畢業通｜畢業審查快照",
+        f"快照編號：{_text(payload.get('snapshot_id'), MANUAL_LABEL)}",
         f"判定：{_text(payload.get('verdict'), 'UNKNOWN')}",
         f"統計 schema／digest：{_text(payload.get('_statistics_schema'), 'decision-statistics.v2')}／{_text(payload.get('_statistics_digest'), MANUAL_LABEL)}",
         "",
@@ -785,6 +813,34 @@ _STUDENT_ADMIN_LABELS = {
 }
 
 
+def _cjk_visual_length(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in ("F", "W") else 1 for c in s)
+
+
+def _format_cjk_col(text: Any, visual_width: int, align: str = "left") -> str:
+    s = str(text if text is not None else "").strip()
+    cur_len = _cjk_visual_length(s)
+    if cur_len > visual_width:
+        truncated: list[str] = []
+        acc = 0
+        for c in s:
+            w = 2 if unicodedata.east_asian_width(c) in ("F", "W") else 1
+            if acc + w > visual_width - 1:
+                break
+            truncated.append(c)
+            acc += w
+        s = "".join(truncated) + "…"
+        cur_len = _cjk_visual_length(s)
+    pad = " " * max(0, visual_width - cur_len)
+    if align == "right":
+        return pad + s
+    if align == "center":
+        left_pad = " " * (max(0, visual_width - cur_len) // 2)
+        right_pad = " " * (max(0, visual_width - cur_len) - len(left_pad))
+        return left_pad + s + right_pad
+    return s + pad
+
+
 def _student_decision_lines(view: Mapping[str, Any], labels: Mapping[str, str]) -> list[str]:
     decisions = view.get("decisions") if isinstance(view.get("decisions"), Mapping) else {}
     lines: list[str] = []
@@ -800,167 +856,314 @@ def _student_decision_lines(view: Mapping[str, Any], labels: Mapping[str, str]) 
     return lines
 
 
-def _student_pdf_lines(view: Mapping[str, Any]) -> list[str]:
+def _student_pdf_blocks(view: Mapping[str, Any]) -> list[dict[str, Any]]:
     summary = view.get("summary") if isinstance(view.get("summary"), Mapping) else {}
     required_progress = summary.get("required_progress") if isinstance(summary.get("required_progress"), Mapping) else {}
     effective = _public_credit(summary.get("counted_exclusive_credits"), "需要補資料")
     missing = _public_credit(summary.get("missing_credits"), "需要補資料")
-    lines = [
-        "北市大畢業通｜學分進度",
-        f"報表編號：{_text(view.get('snapshot_id'), '需要補資料')}",
-        _student_context_text(view),
-        f"資料更新：{_format_evaluated_at(view.get('evaluated_at')) or '時間待補'}",
-        "",
-        "摘要",
-        f"有效學分：{effective} 學分",
-        f"尚缺學分：{missing} 學分",
-        f"必修進度：{_text(required_progress.get('completed'), '需要補資料')}／{_text(required_progress.get('required'), '需要補資料')} 項；待辦 {_text(summary.get('todo_count'), '需要補資料')} 項",
-        f"修習中：{_text(summary.get('in_progress'), '需要補資料')} 門",
-        f"成績單實得學分：{_public_credit(summary.get('source_earned_credits'), '需要補資料')} 學分",
-        "",
-        "計算結果",
+
+    # 6 metrics
+    raw_tot = (
+        summary.get("required_graduation_credits")
+        if summary.get("required_graduation_credits") != MANUAL_LABEL
+        else view.get("statistics", {}).get("total_graduation_credits")
+        or summary.get("aggregate_credit_progress", {}).get("required_credits")
+        or "128"
+    )
+    tot_str = _text(raw_tot).strip()
+    total_credits = f"{tot_str} 學分" if tot_str and "學分" not in tot_str else (tot_str or "128 學分")
+
+    context_obj = view.get("context") if isinstance(view.get("context"), Mapping) else {}
+    sec_kind = _text(context_obj.get("secondary_kind")).lower()
+    decisions = view.get("decisions") if isinstance(view.get("decisions"), Mapping) else {}
+    dm_decision = decisions.get("double_major_qualification") or decisions.get("formal_double_major_award") or {}
+    dm_decision_status = _text(dm_decision.get("status")) if isinstance(dm_decision, Mapping) else ""
+    dm_status = summary.get("double_major_status") or dm_decision_status or "NOT_APPLICABLE"
+    is_dm = sec_kind in {"double_major", "doublemajor"} or dm_status not in {"NOT_APPLICABLE", "不適用", ""}
+    if is_dm:
+        dm_display = f"雙主修審查：{_public_status_label(dm_status)}"
+    elif sec_kind == "minor":
+        dm_display = "輔系修習中"
+    else:
+        dm_display = "不適用（未修習雙主修）"
+
+    nc_results = _non_credit_result_rows(view)
+    if nc_results:
+        nc_done = sum(1 for r in nc_results if _text(r.get("status")).upper() == PASS)
+        nc_display = f"{nc_done}／{len(nc_results)} 項"
+    else:
+        nc_display = "全數通過"
+
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": "北市大畢業通｜學分進度"},
+        {"type": "text", "text": f"報表編號：{_text(view.get('snapshot_id'), '需要補資料')}"},
+        {"type": "text", "text": _student_context_text(view)},
+        {"type": "text", "text": f"資料更新：{_format_evaluated_at(view.get('evaluated_at')) or '時間待補'}"},
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "摘要"},
+        {"type": "text", "text": f"總學分：{total_credits}"},
+        {"type": "text", "text": f"已修得：{effective} 學分（有效學分）"},
+        {"type": "text", "text": f"尚缺：{missing} 學分（尚缺學分）"},
+        {"type": "text", "text": f"主修進度：{_text(required_progress.get('completed'), '需要補資料')}／{_text(required_progress.get('required'), '需要補資料')} 項（必修進度；待辦 {_text(summary.get('todo_count'), '需要補資料')} 項）"},
+        {"type": "text", "text": f"雙主修進度：{dm_display}"},
+        {"type": "text", "text": f"非學分門檻：{nc_display}"},
+        {"type": "text", "text": f"修習中：{_text(summary.get('in_progress'), '需要補資料')} 門"},
+        {"type": "text", "text": f"成績單實得學分：{_public_credit(summary.get('source_earned_credits'), '需要補資料')} 學分"},
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "計算結果"},
     ]
-    lines.extend(_student_decision_lines(view, _STUDENT_CALCULATION_LABELS) or ["目前沒有可顯示的計算結果。"])
-    lines.extend(("", "行政資訊"))
-    lines.extend(_student_decision_lines(view, _STUDENT_ADMIN_LABELS) or ["目前沒有可顯示的行政資訊。"])
+    calc_lines = _student_decision_lines(view, _STUDENT_CALCULATION_LABELS) or ["目前沒有可顯示的計算結果。"]
+    for cl in calc_lines:
+        blocks.append({"type": "text", "text": cl})
+
+    blocks.append({"type": "text", "text": ""})
+    blocks.append({"type": "text", "text": "行政資訊"})
+    admin_lines = _student_decision_lines(view, _STUDENT_ADMIN_LABELS) or ["目前沒有可顯示的行政資訊。"]
+    for al in admin_lines:
+        blocks.append({"type": "text", "text": al})
+
     non_credit_results = _non_credit_result_rows(view)
     if non_credit_results:
-        lines.extend(("", "非學分門檻"))
+        blocks.append({"type": "text", "text": ""})
+        blocks.append({"type": "text", "text": "非學分門檻"})
         for result in non_credit_results:
-            name = _public_reason(
-                result.get("name") or result.get("label") or result.get("requirement_id"),
-                "非學分門檻",
-            )
+            raw_name = result.get("name") or result.get("label") or result.get("requirement_id")
+            raw_name_str = _text(raw_name).strip()
+            if raw_name_str == "28030":
+                name = "大學生活學習與輔導"
+            elif raw_name_str == "07140":
+                name = "服務學習"
+            else:
+                name = _public_reason(raw_name, "非學分門檻")
             status = _public_status_label(result.get("status"), PUBLIC_PENDING)
-            lines.extend(
-                (
-                    f"{name}｜狀態：{status}｜完成進度：{_non_credit_progress_text(result)}",
-                    f"已完成學期／項目：{_result_values(result.get('completed_terms'), fallback='尚無')}；修習中：{_result_values(result.get('in_progress_terms'), fallback='目前沒有')}",
-                    "學分計算：這項門檻不另外增加學分；課程學分仍依原類別採計。",
-                    f"下一步：{_student_gate_next_step(result)}",
-                    f"規則來源：{_student_source_text(_result_source_items(result))}",
-                )
-            )
-            lines.extend(f"採用課程：{_gate_course_text(course)}" for course in _matched_gate_courses(view, result))
+            blocks.append({"type": "text", "text": f"{name}｜狀態：{status}｜完成進度：{_non_credit_progress_text(result)}"})
+            blocks.append({"type": "text", "text": f"已完成學期／項目：{_result_values(result.get('completed_terms'), fallback='尚無')}；修習中：{_result_values(result.get('in_progress_terms'), fallback='目前沒有')}"})
+            blocks.append({"type": "text", "text": "學分計算：這項門檻不另外增加學分；課程學分仍依原類別採計。"})
+            blocks.append({"type": "text", "text": f"下一步：{_student_gate_next_step(result)}"})
+            blocks.append({"type": "text", "text": f"規則來源：{_student_source_text(_result_source_items(result))}"})
+            for course in _matched_gate_courses(view, result):
+                blocks.append({"type": "text", "text": f"採用課程：{_gate_course_text(course)}"})
+
     subset_results = _subset_result_rows(view)
     if subset_results:
-        lines.extend(("", "學分採計條件"))
+        blocks.append({"type": "text", "text": ""})
+        blocks.append({"type": "text", "text": "學分採計條件"})
         for result in subset_results:
             name = _subset_name(result)
             status = _public_status_label(result.get("status"), PUBLIC_PENDING)
             unknown = _public_credit(result.get("unknown_candidate_credits"), "0")
             unknown_note = f"；另有 {unknown} 學分候選仍待核對" if unknown != "0" else ""
-            lines.extend(
-                (
-                    f"{name}｜狀態：{status}｜子條件進度：{_subset_progress_text(result)}{unknown_note}",
-                    "學分計算：依各項規則指定的已採計課程檢查，不另增加或重複計算學分。",
-                    f"下一步：{_student_gate_next_step(result)}",
-                    f"規則來源：{_student_source_text(_result_source_items(result))}",
-                )
-            )
-    lines.extend(("", "各類別學分"))
+            blocks.append({"type": "text", "text": f"{name}｜狀態：{status}｜子條件進度：{_subset_progress_text(result)}{unknown_note}"})
+            blocks.append({"type": "text", "text": "學分計算：依各項規則指定的已採計課程檢查，不另增加或重複計算學分。"})
+            blocks.append({"type": "text", "text": f"下一步：{_student_gate_next_step(result)}"})
+            blocks.append({"type": "text", "text": f"規則來源：{_student_source_text(_result_source_items(result))}"})
+
+    blocks.append({"type": "text", "text": ""})
+    blocks.append({"type": "text", "text": "各類別學分"})
     by_bucket = summary.get("by_bucket") if isinstance(summary.get("by_bucket"), Mapping) else {}
     if by_bucket:
-        lines.extend(
-            f"{_public_bucket_label(key)}：{_public_credit(value, '需要補資料')} 學分"
-            for key, value in sorted(by_bucket.items(), key=lambda item: str(item[0]))
-        )
+        for key, value in sorted(by_bucket.items(), key=lambda item: str(item[0])):
+            blocks.append({"type": "text", "text": f"{_public_bucket_label(key)}：{_public_credit(value, '需要補資料')} 學分"})
     else:
-        lines.append("目前沒有可顯示的分類學分。")
-    lines.extend(("", "各項畢業要求"))
+        blocks.append({"type": "text", "text": "目前沒有可顯示的分類學分。"})
+
+    blocks.append({"type": "text", "text": ""})
+    blocks.append({"type": "text", "text": "各項畢業要求"})
     cs_rollup = _cs_elective_rollup(view)
     if cs_rollup:
-        lines.extend((
-            f"資科系選修：{cs_rollup['effective_credits']}／54 學分；{_public_status_label(cs_rollup['status'])}",
-            "包含甲類指定課程32學分與乙類選修22學分，以下明細不再額外加計。",
-            "",
-        ))
+        blocks.append({"type": "text", "text": f"資科系選修：{cs_rollup['effective_credits']}／54 學分；{_public_status_label(cs_rollup['status'])}"})
+        blocks.append({"type": "text", "text": "包含甲類指定課程32學分與乙類選修22學分，以下明細不再額外加計。"})
+        blocks.append({"type": "text", "text": ""})
+
     for requirement in view.get("requirements", ()):
         if not isinstance(requirement, Mapping):
             continue
         name = _text(requirement.get("name"), "未命名要求")
         kind = _text(requirement.get("kind"))
         title = f"{name}（{kind}）" if kind else name
-        lines.extend(
-            (
-                title,
-                f"狀態：{_public_status_label(requirement.get('status'))}；已採計／要求：{_public_credit(requirement.get('effective_credits'), '需要補資料')}／{_public_credit(requirement.get('required_credits'), '需要補資料')} 學分；尚缺：{_public_credit(requirement.get('deficit'), '需要補資料')} 學分",
-                f"資料狀態：{_public_reason(requirement.get('coverage_state'), '來源尚未完整')}；{_public_reason(requirement.get('evidence_state'), '來源尚未核對')}",
-                f"下一步：{_student_next_step(requirement)}",
-                f"規則條件：{_public_condition(requirement.get('choice_condition'))}",
-                f"規則來源：{_student_source_text(requirement.get('rule_provenance', ())) }",
-            )
-        )
+        blocks.append({"type": "text", "text": title})
+        blocks.append({"type": "text", "text": f"狀態：{_public_status_label(requirement.get('status'))}；已採計／要求：{_public_credit(requirement.get('effective_credits'), '需要補資料')}／{_public_credit(requirement.get('required_credits'), '需要補資料')} 學分；尚缺：{_public_credit(requirement.get('deficit'), '需要補資料')} 學分"})
+        blocks.append({"type": "text", "text": f"資料狀態：{_public_reason(requirement.get('coverage_state'), '來源尚未完整')}；{_public_reason(requirement.get('evidence_state'), '來源尚未核對')}"})
+        blocks.append({"type": "text", "text": f"下一步：{_student_next_step(requirement)}"})
+        blocks.append({"type": "text", "text": f"規則條件：{_public_condition(requirement.get('choice_condition'))}"})
+        req_provenance = requirement.get("rule_provenance", ()) or view.get("rule_provenance", ())
+        blocks.append({"type": "text", "text": f"規則來源：{_student_source_text(req_provenance)}"})
+
         eligible_courses = requirement.get("eligible_courses", ())
         if eligible_courses:
-            lines.append("指定課程：")
+            blocks.append({"type": "text", "text": "指定課程："})
             for option in eligible_courses:
                 if isinstance(option, Mapping):
                     option_name = _public_course_value(option.get("course_name"))
                     option_id = _public_course_value(option.get("course_id"))
                     label = option_name or option_id or "課程名稱待補"
                     suffix = f"（{option_id}）" if option_name and option_id else ""
-                    lines.append(f"  - {label}{suffix}")
+                    blocks.append({"type": "text", "text": f"  - {label}{suffix}"})
+
         courses = [course for course in requirement.get("courses", ()) if isinstance(course, Mapping)]
         if courses:
-            lines.append("課程明細：")
+            blocks.append({"type": "text", "text": "課程明細："})
+            blocks.append({"type": "table_header"})
             for course in courses:
                 course_id = _public_course_value(course.get("course_id"))
-                course_title = _public_course_value(course.get("course_name"), "課程名稱待補")
-                if course_id:
-                    course_title = f"{course_title}（{course_id}）"
+                course_name = _public_course_value(course.get("course_name"), "課程名稱待補")
+                if course_id and course_id != course_name:
+                    course_name = f"{course_name}（{course_id}）"
                 course_term = (
                     "尚未修課"
                     if course.get("is_not_attempted") or _text(course.get("status")).upper() in {"NOT_ATTEMPTED", "NOT_TAKEN"}
                     else _text(course.get("academic_term"), "學期待補")
                 )
-                lines.append(
-                    "  - "
-                    + "；".join(
-                        (
-                            course_title,
-                            f"學期：{course_term}",
-                            f"狀態：{_public_status_label(course.get('status'))}",
-                            f"課程學分：{_public_credit(course.get('source_credits'), '待補')}",
-                            f"本要求採計：{_public_credit(course.get('used_credits'), '待補')}",
-                            f"尚未配置：{_public_credit(course.get('unallocated_credits'), '0')} 學分",
-                            f"採計用途：{_public_reason(course.get('allocation_kind_label'), '採計用途待補')}",
-                            f"原因：{_public_reason(course.get('allocation_reason'), '目前沒有可由規則安全確認的採計方式')}",
-                        )
-                    )
-                )
-        lines.append("")
+                status_label = _public_status_label(course.get("status"))
+                source_cr = _public_credit(course.get("source_credits"), "0")
+                used_cr = _public_credit(course.get("used_credits"), "0")
+                earned_cr = _public_credit(course.get("earned_credits"), source_cr)
+                grade = _text(course.get("grade")).strip()
+                if not grade:
+                    st_u = _text(course.get("status")).upper()
+                    if st_u in {PASS, "COMPLETED"}:
+                        grade = "通過"
+                    elif st_u in {"IN_PROGRESS", "IP"}:
+                        grade = "修習中"
+                    elif st_u in {FAIL, "FAILED"}:
+                        grade = "未通過"
+                    else:
+                        grade = "—"
+                cat = _text(course.get("category")).strip()
+                if not cat:
+                    cat = _text(requirement.get("kind")) or _public_bucket_label(requirement.get("bucket")) or "必修"
+
+                purpose = _public_reason(course.get("allocation_kind_label"), "")
+                reason = _public_reason(course.get("allocation_reason"), "")
+                notes = []
+                if purpose and purpose != "採計用途待補":
+                    notes.append(f"採計用途：{purpose}")
+                if reason and reason != "目前沒有可由規則安全確認的採計方式":
+                    notes.append(f"原因：{reason}")
+
+                blocks.append({
+                    "type": "table_row",
+                    "term": course_term,
+                    "name": course_name,
+                    "grade": grade,
+                    "earned": earned_cr,
+                    "used": used_cr,
+                    "category": cat,
+                    "status": status_label,
+                    "notes": notes,
+                })
+        blocks.append({"type": "text", "text": ""})
+
     unallocated_courses = _student_unallocated_courses(view)
     if unallocated_courses:
-        lines.extend(("", "尚未採計課程"))
+        blocks.append({"type": "text", "text": ""})
+        blocks.append({"type": "text", "text": "尚未採計課程"})
+        blocks.append({"type": "table_header"})
         for item in unallocated_courses:
             row = _student_unallocated_row(view, item)
             course_id = f"（{row['課程代碼']}）" if row["課程代碼"] else ""
-            lines.append(
-                "  - "
-                + "；".join(
-                    (
-                        f"{row['課程名稱'] or '課程名稱待補'}{course_id}",
-                        f"學期：{row['修課學期']}",
-                        f"狀態：{row['修課狀態']}",
-                        f"課程學分：{row['課程學分']}",
-                        f"目前採計：{row['本要求採計']}",
-                        f"尚未配置：{row['尚未配置學分']} 學分",
-                        f"可能用途：{row['採計用途']}",
-                        f"原因：{row['採計原因']}",
-                    )
-                )
-            )
-    lines.extend(("待辦與提醒",))
+            course_name = f"{row['課程名稱'] or '課程名稱待補'}{course_id}"
+            course_term = row["修課學期"]
+            status_label = row["修課狀態"]
+            earned_cr = row["課程學分"]
+            used_cr = row["本要求採計"]
+            cat = "尚未配置"
+            grade = "通過" if "已完成" in status_label or "通過" in status_label else ("修習中" if "修習中" in status_label else "—")
+            notes = []
+            if row.get("採計用途"):
+                notes.append(f"採計用途：{row['採計用途']}")
+            if row.get("採計原因"):
+                notes.append(f"原因：{row['採計原因']}")
+            blocks.append({
+                "type": "table_row",
+                "term": course_term,
+                "name": course_name,
+                "grade": grade,
+                "earned": earned_cr,
+                "used": used_cr,
+                "category": cat,
+                "status": status_label,
+                "notes": notes,
+            })
+
+    blocks.append({"type": "text", "text": "待辦與提醒"})
+    provenance = view.get("rule_provenance", ())
+    if provenance:
+        prov_text = _student_source_text(provenance)
+        if prov_text and prov_text != "規則來源尚待補充":
+            blocks.append({"type": "text", "text": f"規則來源：{prov_text}"})
     blockers = view.get("blockers", ())
     warnings = view.get("warnings", ())
     suggestions = view.get("remediation_suggestions", ())
-    lines.extend(f"- {_public_reason(item, '資料仍需人工核對')}" for item in blockers if _text(item))
-    lines.extend(f"- {_public_reason(item, '資料仍需人工核對')}" for item in warnings if _text(item))
-    lines.extend(f"- {_public_reason(item, '請查看要求明細與規則來源')}" for item in suggestions if _text(item))
+    for item in blockers:
+        if _text(item):
+            blocks.append({"type": "text", "text": f"- {_public_reason(item, '資料仍需人工核對')}"})
+    for item in warnings:
+        if _text(item):
+            blocks.append({"type": "text", "text": f"- {_public_reason(item, '資料仍需人工核對')}"})
+    for item in suggestions:
+        if _text(item):
+            blocks.append({"type": "text", "text": f"- {_public_reason(item, '請查看要求明細與規則來源')}"})
     if not (blockers or warnings or suggestions):
-        lines.append("目前沒有其他待辦。")
+        blocks.append({"type": "text", "text": "目前沒有其他待辦。"})
+
+    return blocks
+
+
+def _student_pdf_lines(view: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for block in _student_pdf_blocks(view):
+        btype = block.get("type")
+        if btype == "text":
+            lines.append(block.get("text", ""))
+        elif btype == "table_header":
+            lines.append("  " + " ".join((
+                _format_cjk_col("學期", 8),
+                _format_cjk_col("課名", 16),
+                _format_cjk_col("成績", 5, align="center"),
+                _format_cjk_col("修得", 5, align="right"),
+                _format_cjk_col("採計", 5, align="right"),
+                _format_cjk_col("類別", 8),
+                _format_cjk_col("狀態／備註", 10),
+            )))
+            lines.append("  " + " ".join((
+                "─" * 4,
+                "─" * 8,
+                "─" * 3,
+                "─" * 3,
+                "─" * 3,
+                "─" * 4,
+                "─" * 5,
+            )))
+        elif btype == "table_row":
+            row_str = "  " + " ".join((
+                _format_cjk_col(block["term"], 8),
+                _format_cjk_col(block["name"], 16),
+                _format_cjk_col(block["grade"], 5, align="center"),
+                _format_cjk_col(block["earned"], 5, align="right"),
+                _format_cjk_col(block["used"], 5, align="right"),
+                _format_cjk_col(block["category"], 8),
+                _format_cjk_col(block["status"], 10),
+            ))
+            lines.append(row_str)
+            if block.get("notes"):
+                lines.append(f"    ↳ {'；'.join(block['notes'])}")
     return lines
+
+
+def _truncate_cjk(text: str, max_width: float, fontname: str, fontsize: float, fitz_mod: Any) -> str:
+    if not text:
+        return ""
+    if fitz_mod.get_text_length(text, fontname=fontname, fontsize=fontsize) <= max_width:
+        return text
+    ellipsis = "…"
+    el_w = fitz_mod.get_text_length(ellipsis, fontname=fontname, fontsize=fontsize)
+    truncated = []
+    for c in text:
+        if fitz_mod.get_text_length("".join(truncated) + c, fontname=fontname, fontsize=fontsize) + el_w > max_width:
+            break
+        truncated.append(c)
+    return "".join(truncated) + ellipsis
 
 
 def build_student_pdf(snapshot: DecisionSnapshot) -> bytes:
@@ -974,19 +1177,89 @@ def build_student_pdf(snapshot: DecisionSnapshot) -> bytes:
 
     document = fitz.open()
     page_width, page_height = fitz.paper_size("a4")
-    margin = 42
-    line_height = 15
+    margin = 42.0
+    line_height = 15.0
     font_size = 9.5
     page = document.new_page(width=page_width, height=page_height)
-    y = margin
-    for raw_line in _student_pdf_lines(view):
-        wrapped = _wrap_pdf_line(raw_line or " ", fitz, width=page_width - 2 * margin, fontsize=font_size)
-        for chunk in wrapped:
-            if y + line_height > page_height - margin:
+    y = 48.0
+
+    # Pass 1: Render blocks
+    for block in _student_pdf_blocks(view):
+        btype = block.get("type")
+        if btype == "text":
+            raw_text = block.get("text", "")
+            clean_line = clean_student_facing_text(raw_text or " ")
+            if not clean_line.strip():
+                y += 6.0
+                continue
+            wrapped = _wrap_pdf_line(clean_line, fitz, width=page_width - 2 * margin, fontsize=font_size)
+            for chunk in wrapped:
+                if y + line_height > page_height - 55.0:
+                    page = document.new_page(width=page_width, height=page_height)
+                    y = margin + 12.0
+                if raw_text in {"摘要", "計算結果", "行政資訊", "非學分門檻", "學分採計條件", "各類別學分", "各項畢業要求", "尚未採計課程", "待辦與提醒"}:
+                    page.insert_text((margin, y), chunk, fontsize=10.5, fontname="china-t", color=(0.06, 0.09, 0.16))
+                    y += 3.0
+                    page.draw_line((margin, y), (page_width - margin, y), color=(0.85, 0.88, 0.92), width=0.5)
+                    y += line_height
+                else:
+                    page.insert_text((margin, y), chunk, fontsize=font_size, fontname="china-t", color=(0.06, 0.09, 0.16))
+                    y += line_height
+        elif btype == "table_header":
+            if y + 2 * line_height > page_height - 55.0:
                 page = document.new_page(width=page_width, height=page_height)
-                y = margin
-            page.insert_text((margin, y), chunk, fontsize=font_size, fontname="china-t", color=(0.06, 0.09, 0.16))
+                y = margin + 12.0
+            headers = [
+                (42.0, "學期"),
+                (96.0, "課名"),
+                (268.0, "成績"),
+                (306.0, "修得"),
+                (344.0, "採計"),
+                (382.0, "類別"),
+                (442.0, "狀態／備註"),
+            ]
+            for col_x, title in headers:
+                page.insert_text((col_x, y), title, fontsize=9.0, fontname="china-t", color=(0.25, 0.28, 0.35))
+            y += 4.0
+            page.draw_line((margin, y), (page_width - margin, y), color=(0.8, 0.83, 0.87), width=0.75)
+            y += 12.0
+        elif btype == "table_row":
+            notes = block.get("notes", [])
+            needed = line_height * (2 if notes else 1)
+            if y + needed > page_height - 55.0:
+                page = document.new_page(width=page_width, height=page_height)
+                y = margin + 12.0
+            name_str = clean_student_facing_text(block.get("name", ""))
+            name_text = _truncate_cjk(name_str, 170.0, fontname="china-t", fontsize=8.5, fitz_mod=fitz)
+            cols = [
+                (42.0, clean_student_facing_text(block.get("term", ""))),
+                (96.0, name_text),
+                (268.0, clean_student_facing_text(block.get("grade", ""))),
+                (306.0, clean_student_facing_text(block.get("earned", ""))),
+                (344.0, clean_student_facing_text(block.get("used", ""))),
+                (382.0, clean_student_facing_text(block.get("category", ""))),
+                (442.0, clean_student_facing_text(block.get("status", ""))),
+            ]
+            for col_x, val in cols:
+                page.insert_text((col_x, y), val, fontsize=8.5, fontname="china-t", color=(0.08, 0.1, 0.14))
             y += line_height
+            if notes:
+                note_str = "    ↳ " + "；".join(notes)
+                clean_note = clean_student_facing_text(note_str)
+                page.insert_text((42.0, y), clean_note, fontsize=8.0, fontname="china-t", color=(0.35, 0.4, 0.45))
+                y += line_height
+
+    # Pass 2: Footers & Headers
+    total_pages = len(document)
+    for idx, p in enumerate(document):
+        if idx > 0:
+            p.insert_text((margin, 25), "北市大畢業通｜學分進度與畢業審查", fontsize=8.0, fontname="china-t", color=(0.5, 0.53, 0.57))
+            p.draw_line((margin, 30), (page_width - margin, 30), color=(0.88, 0.9, 0.93), width=0.5)
+        footer_text = f"北市大畢業通 · 第 {idx + 1} 頁 / 共 {total_pages} 頁"
+        footer_width = fitz.get_text_length(footer_text, fontname="china-t", fontsize=8.0)
+        p.insert_text(((page_width - footer_width) / 2.0, page_height - 25), footer_text, fontsize=8.0, fontname="china-t", color=(0.5, 0.53, 0.57))
+        p.draw_line((margin, page_height - 35), (page_width - margin, page_height - 35), color=(0.88, 0.9, 0.93), width=0.5)
+
     document.set_metadata(
         {
             "title": "北市大畢業通｜學分進度",
@@ -998,6 +1271,12 @@ def build_student_pdf(snapshot: DecisionSnapshot) -> bytes:
     result = document.tobytes()
     document.close()
     return result
+
+
+def build_audit_json(snapshot: DecisionSnapshot) -> bytes:
+    """Return an immutable JSON byte string representing the audit export payload."""
+    payload = build_snapshot_export_payload(snapshot)
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 # Friendly aliases used by the application integration layer.

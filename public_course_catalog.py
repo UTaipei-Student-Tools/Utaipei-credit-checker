@@ -126,7 +126,10 @@ def normalize_course_name(value: Any) -> str:
     words remain part of the identity key.
     """
 
-    text = unicodedata.normalize("NFKC", _text(value))
+    from handbook_rules import normalize_course_name as _canonical_norm
+
+    text = _canonical_norm(_text(value))
+    text = unicodedata.normalize("NFKC", text)
     text = text.replace("：", ":").replace("﹕", ":").replace("　", "")
     text = re.sub(r"\s+", "", text)
     return text.casefold()
@@ -579,9 +582,10 @@ class PublicCourseCatalog:
         if not term_text or term_text not in self.covered_terms:
             return ()
         code = _text(course_code)
+        candidates: tuple[Mapping[str, Any], ...] = ()
         if code:
             candidates = self._by_code.get((term_text, code, credit_key), ())
-        else:
+        if not candidates and course_name:
             candidates = self._by_name.get((term_text, normalize_course_name(course_name), credit_key), ())
         section_text = _text(section)
         if section_text:
@@ -1151,9 +1155,13 @@ def _official_completion_memberships(
 
 
 def resolve_public_evidence(
-    row: Mapping[str, Any],
+    row: Mapping[str, Any] | PublicCourseCatalog,
     *,
     catalog: PublicCourseCatalog | None = None,
+    term: Any = None,
+    course_name: Any = None,
+    credits: Any = None,
+    course_code: Any = None,
     pool_membership_ids: Mapping[str, Sequence[str]] | None = None,
     handbook_metadata: Sequence[Mapping[str, Any]] = (),
     program_slug: str = "",
@@ -1163,6 +1171,22 @@ def resolve_public_evidence(
     Only transcript identity scalars are read.  Category, pool, membership,
     and source fields in ``row`` are intentionally ignored.
     """
+
+    if isinstance(row, PublicCourseCatalog):
+        catalog = row
+        row = {
+            "term": term,
+            "course_name": course_name,
+            "credits": credits,
+            "course_code": course_code,
+        }
+    elif not isinstance(row, Mapping):
+        row = {
+            "term": term,
+            "course_name": course_name,
+            "credits": credits,
+            "course_code": course_code,
+        }
 
     term = _text(row.get("term"))
     course_code = _text(row.get("course_code") or row.get("official_course_code"))

@@ -9,6 +9,7 @@ module is imported here.
 
 from __future__ import annotations
 
+import contextvars
 import html
 import re
 import unicodedata
@@ -40,6 +41,343 @@ MANUAL_LABEL = "資料不足／需人工確認"
 # These labels are the only vocabulary allowed to cross into the student view.
 PUBLIC_PENDING = "需要補資料"
 PUBLIC_NOT_APPLICABLE = "不適用"
+
+_active_requirement_map: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar("_active_requirement_map", default={})
+
+_PROGRAM_NAMES = {
+    "earth": "地生系",
+    "apc": "物化系",
+    "cs": "資科系",
+    "math": "數學系",
+    "genedu": "通識教育中心",
+}
+
+_TRACK_NAMES = {
+    "earth_environment": "地球環境組",
+    "life_science": "生命科學組",
+    "physics": "物理組",
+    "chemistry": "化學組",
+    "math_scientific_computing": "數學與科學計算領域",
+    "data_science": "數據科學領域",
+    "math_education": "數學教育領域",
+    "common": "共同必修",
+}
+
+_CATEGORY_NAMES = {
+    "domain-elective": "專業選修",
+    "domain_elective": "專業選修",
+    "elective": "專業選修",
+    "common": "共同必修",
+    "compulsory": "專業必修",
+    "basic-core": "基礎核心必修",
+    "basic_core": "基礎核心必修",
+    "core": "核心必修",
+    "general": "通識",
+}
+
+_KNOWN_COURSE_NAMES = {
+    "28030": "大學生活學習與輔導",
+    "07140": "服務學習",
+    "00001": "體育(一)",
+    "00002": "體育(二)",
+    "00003": "體育(三)",
+    "00004": "體育(四)",
+}
+
+def format_handbook_citation(citation: Any) -> str:
+    """將內部 handbook / curriculum 冒號命名空間代碼轉換為正式中文手冊出處說明。"""
+    text = str(citation or "").strip()
+    if not text or ":" not in text:
+        return text
+
+    if text.startswith("handbook:"):
+        parts = text.split(":")
+        year = parts[1] if len(parts) > 1 and parts[1].isdigit() else ""
+        dept = _PROGRAM_NAMES.get(parts[2], parts[2] + "系") if len(parts) > 2 else ""
+        scope_str = ""
+        track_str = ""
+        cat_str = ""
+        page_str = ""
+
+        for part in parts[3:]:
+            if part in ("secondary", "target", "minor"):
+                scope_str = "雙主修/輔系"
+            elif part in _TRACK_NAMES:
+                track_str = f"（{_TRACK_NAMES[part]}）"
+            elif part in _CATEGORY_NAMES:
+                cat_str = _CATEGORY_NAMES[part]
+            elif part.startswith("p") and (part[1:].isdigit() or (part.startswith("p.") and part[2:].isdigit())):
+                p_num = part[2:] if part.startswith("p.") else part[1:]
+                page_str = f" 第 {p_num} 頁"
+
+        year_prefix = f"{year} 學年度" if year else ""
+        dept_str = dept or "系所"
+        cat_suffix = f" {cat_str}規定" if cat_str else "規定"
+        result = f"{year_prefix}{dept_str}{scope_str}{track_str}學生手冊{page_str}{cat_suffix}".strip()
+        return result or "學生手冊規定"
+
+    if text.startswith("official:handbook:"):
+        parts = text.split(":")
+        year = parts[2] if len(parts) > 2 and parts[2].isdigit() else ""
+        page_str = ""
+        if len(parts) > 3:
+            p_part = parts[3]
+            p_num = p_part.replace("p.", "").replace("p", "").strip()
+            if p_num:
+                page_str = f" 第 {p_num} 頁"
+        year_prefix = f"{year} 學年度" if year else ""
+        return f"{year_prefix}學生手冊{page_str} 規定".strip() or "學生手冊規定"
+
+    if text.startswith(("primary:", "target:", "minor:")):
+        parts = text.split(":")
+        role = {"primary": "主修", "target": "雙主修", "minor": "輔系"}.get(parts[0], "")
+        year = parts[1] if len(parts) > 1 and parts[1].isdigit() else ""
+        dept = ""
+        track = ""
+        cat = ""
+        for p in parts[2:]:
+            if p in _PROGRAM_NAMES:
+                dept = _PROGRAM_NAMES[p]
+            elif p in _TRACK_NAMES:
+                track = _TRACK_NAMES[p]
+            elif p in _CATEGORY_NAMES:
+                cat = _CATEGORY_NAMES[p]
+        if not dept and len(parts) > 2 and parts[2] not in _CATEGORY_NAMES and parts[2] not in _TRACK_NAMES:
+            dept = _PROGRAM_NAMES.get(parts[2], parts[2] + "系")
+        track_str = f"（{track}）" if track else ""
+        year_prefix = f"{year} 學年度" if year else ""
+        cat_str = f"{cat} " if cat else ""
+        return f"{year_prefix}{dept}{track_str}{role}{cat_str}課程綱要".strip() or "課程綱要規定"
+
+    return text
+
+
+def _extract_fallback_req_name(req_id: str) -> str:
+    text = str(req_id or "").strip()
+    if not text:
+        return "畢業要求"
+    if text in _KNOWN_COURSE_NAMES:
+        return _KNOWN_COURSE_NAMES[text]
+    if text == "req-core":
+        return "系必修核心"
+    if text == "req-a":
+        return "系必修"
+    if text == "req-unknown":
+        return "資料不足課程池"
+    if text == "req-domain":
+        return "專業領域要求"
+    if text == "pe_orientation":
+        return "大學生活學習與輔導"
+    if text == "service_learning":
+        return "服務學習"
+
+    if ":" in text:
+        parts = text.split(":")
+        role = ""
+        if parts[0] == "target":
+            role = "雙主修"
+        elif parts[0] == "minor":
+            role = "輔系"
+
+        dept = ""
+        track = ""
+        cat = ""
+        course_name = ""
+
+        for part in parts[1:]:
+            if "." in part:
+                p_cat, p_cname = part.split(".", 1)
+                if p_cat in _CATEGORY_NAMES:
+                    cat = _CATEGORY_NAMES[p_cat]
+                course_name = p_cname
+            elif part in _PROGRAM_NAMES:
+                dept = _PROGRAM_NAMES[part]
+            elif part in _TRACK_NAMES:
+                track = _TRACK_NAMES[part]
+            elif part in _CATEGORY_NAMES:
+                cat = _CATEGORY_NAMES[part]
+            elif "domain-elective" in part or "domain_elective" in part or "elective" in part:
+                cat = "專業選修"
+            elif "compulsory" in part or "required" in part:
+                cat = "專業必修"
+
+        if role and not cat and not course_name:
+            cat = "必修"
+
+        name_parts = []
+        if role:
+            name_parts.append(role)
+        if dept:
+            name_parts.append(dept)
+        if track:
+            name_parts.append(track)
+        if cat:
+            name_parts.append(cat)
+        if course_name:
+            name_parts.append(f" {course_name}")
+
+        if name_parts:
+            return "".join(name_parts)
+
+    return "畢業要求"
+
+
+def translate_requirement_blocker(
+    blocker_text: Any,
+    requirement: Mapping[str, Any] | None = None,
+    requirement_map: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
+    """將 REQUIREMENT_DEFICIT 等底層參數化代碼轉譯為親切繁體中文。"""
+    text = str(blocker_text or "").strip()
+    if not text:
+        return ""
+
+    if requirement_map is None:
+        requirement_map = _active_requirement_map.get()
+
+    if text.startswith("REQUIREMENT_DEFICIT:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        deficit = str(req.get("deficit") or "").strip()
+        if deficit and deficit not in ("0", "—", "待補", "None", ""):
+            return f"{name}：尚缺 {deficit} 學分，請依系所規定選修。"
+        return f"{name}：尚缺學分，請依系所規定選修。"
+
+    if text.startswith("REQUIREMENT_EVIDENCE_UNKNOWN:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：缺少官方認定紀錄，請核對修讀科目。"
+
+    if text.startswith("WAIVER_DECISION_REQUIRED:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：免修或抵認尚待教務處或系所正式核准。"
+
+    if text.startswith("REQUIREMENT_COVERAGE_UNKNOWN:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：適用課程清單尚未完整，請向系所或教務處確認。"
+
+    if text.startswith("ZERO_CREDIT_GATE_EVIDENCE_REQUIRED:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：非學分門檻尚待完成或缺少核准證明。"
+
+    if text.startswith("REQUIREMENT_CATALOG_PARTIAL:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：適用課程清單僅部分收錄，請向系所核對。"
+
+    if text.startswith("RULE_NOT_IMPLEMENTED:"):
+        req_id = text.split(":", 1)[1].strip()
+        req = (
+            requirement
+            if requirement and requirement.get("requirement_id") == req_id
+            else (requirement_map or {}).get(req_id, {})
+        )
+        name = req.get("name") or _extract_fallback_req_name(req_id)
+        return f"{name}：此門檻尚未設定自動核對，需人工確認。"
+
+    if text.startswith("INVALID_REQUIREMENT_CREDITS:"):
+        req_id = text.split(":", 1)[1].strip()
+        name = _extract_fallback_req_name(req_id)
+        return f"{name}：要求學分設定需重新核對。"
+
+    if text.startswith("DUPLICATE_REQUIREMENT_ID:"):
+        req_id = text.split(":", 1)[1].strip()
+        name = _extract_fallback_req_name(req_id)
+        return f"{name}：要求編號重複，需人工核對。"
+
+    return ""
+
+
+_FORBIDDEN_CLEANERS = (
+    (re.compile(r"REQUIREMENT_EVIDENCE_UNKNOWN:[a-zA-Z0-9_:-]+"), "缺少官方認定紀錄，請核對修讀科目"),
+    (re.compile(r"REQUIREMENT_COVERAGE_UNKNOWN:[a-zA-Z0-9_:-]+"), "適用課程清單尚待確認"),
+    (re.compile(r"REQUIREMENT_[A-Za-z0-9_:-]+"), "畢業要求尚待核對"),
+    (re.compile(r"APPLICATION:APPLICATION_FORMAL_APPROVAL_MISSING"), "雙主修資格審核：尚未取得教務處核准紀錄"),
+    (re.compile(r"APPLICATION:DOUBLE_MAJOR_NOT_APPROVED"), "雙主修資格審核：尚未取得教務處核准紀錄"),
+    (re.compile(r"APPLICATION:UNKNOWN"), "雙主修資格審核：尚未取得教務處核准紀錄"),
+    (re.compile(r"APPLICATION:MINOR_NOT_APPROVED"), "輔系資格審核：尚未取得教務處核准紀錄"),
+    (re.compile(r"APPLICATION:[a-zA-Z0-9_:-]+"), "申請資格審核：尚待教務處或系所正式核對紀錄"),
+    (re.compile(r"SEARCH_INCOMPLETE"), "審核搜尋已達最大深度，已採用最佳可行配置"),
+    (re.compile(r"SEARCH_EXHAUSTED(?:_[A-Z]+)*"), "審核搜尋已達最大深度，已採用最佳可行配置"),
+    (re.compile(r"WAIVER_DECISION_REQUIRED(?:[:a-zA-Z0-9_-]+)?"), "免修或抵認尚待教務處核准"),
+    (re.compile(r"RULE_CONTEXT:MANUAL_REVIEW"), "適用規則版本仍需人工核對"),
+    (re.compile(r"RULE_CONTEXT:[a-zA-Z0-9_:-]+"), "適用規則版本仍需人工核對"),
+    (re.compile(r"CREDIT_CONSERVATION_FAILED"), "成績學分與採計結果無法相互核對，請重新確認成績列"),
+    (re.compile(r"\battempt:[a-zA-Z0-9_:-]+"), "修課紀錄"),
+    (re.compile(r"\buuid:[a-zA-Z0-9_-]+"), "自訂／待確認項目"),
+    (re.compile(r"\bcustom:[a-zA-Z0-9_:-]+"), "自訂課程項目"),
+)
+
+
+def clean_student_facing_text(text: Any) -> str:
+    """Failsafe scrubber to ensure zero internal debug tokens leak to students."""
+    val = str(text or "")
+    if not val:
+        return ""
+
+    if "REQUIREMENT_DEFICIT:" in val:
+        def _replace_deficit(match: re.Match[str]) -> str:
+            translated = translate_requirement_blocker(match.group(0))
+            return translated if translated else "尚缺學分，請依系所規定選修"
+        val = re.sub(r"REQUIREMENT_DEFICIT:[a-zA-Z0-9_:-]+", _replace_deficit, val)
+
+    if "handbook:" in val or "primary:" in val or "target:" in val or "minor:" in val or "official:handbook:" in val:
+        def _replace_citation(match: re.Match[str]) -> str:
+            return format_handbook_citation(match.group(0))
+        val = re.sub(r"\bhandbook:\d+[a-zA-Z0-9_.:-]*", _replace_citation, val)
+        val = re.sub(r"\bofficial:handbook:\d+:[a-zA-Z0-9_.:-]*", _replace_citation, val)
+        val = re.sub(r"\b(?:primary|target|minor):\d+:[a-zA-Z0-9_.:-]*", _replace_citation, val)
+
+    for pattern, replacement in _FORBIDDEN_CLEANERS:
+        if pattern.search(val):
+            val = pattern.sub(replacement, val)
+
+    if re.search(r"handbook:\d+", val):
+        val = re.sub(r"handbook:\d+[a-zA-Z0-9_.:-]*", "學生手冊規定", val)
+    if re.search(r"(?:primary|target|minor):\d+:[a-zA-Z0-9_.:-]+", val):
+        val = re.sub(r"(?:primary|target|minor):\d+:[a-zA-Z0-9_.:-]+", "課程綱要規定", val)
+    if re.search(r"\battempt:[a-zA-Z0-9_:-]+", val):
+        val = re.sub(r"\battempt:[a-zA-Z0-9_:-]+", "修課紀錄", val)
+    if re.search(r"\buuid:[a-zA-Z0-9_-]+", val):
+        val = re.sub(r"\buuid:[a-zA-Z0-9_-]+", "自訂／待確認項目", val)
+    if re.search(r"\bcustom:[a-zA-Z0-9_:-]+", val):
+        val = re.sub(r"\bcustom:[a-zA-Z0-9_:-]+", "自訂課程項目", val)
+
+    return val
+
 
 _INPUT_CONFIRMATION_LABELS = {
     "CONFIRMED": "已確認",
@@ -94,32 +432,86 @@ _PUBLIC_TERM_REPLACEMENTS = (
     ("PARTIAL", "來源尚未完整"),
     ("COMPLETE", "規則資料完整"),
     ("MISSING", "缺少來源資料"),
+    ("SEARCH_INCOMPLETE", "審核搜尋已達最大深度，已採用最佳可行配置"),
+    ("SEARCH_EXHAUSTED", "審核搜尋已達最大深度，已採用最佳可行配置"),
+    ("CREDIT_CONSERVATION_FAILED", "成績學分與採計結果無法相互核對，請重新確認成績列"),
+    ("WAIVER_DECISION_REQUIRED", "免修或抵認尚待教務處核准"),
 )
 
 _PUBLIC_CODE_REASONS = {
+    # 雙主修與輔系申請行政審查 (APPLICATION:*)
+    "APPLICATION:APPLICATION_FORMAL_APPROVAL_MISSING": "雙主修資格審核：尚未取得教務處核准紀錄。",
+    "APPLICATION:DEPARTMENT_APPROVAL_MISSING": "系所審查：尚未取得系所核准紀錄。",
+    "APPLICATION:REGISTRAR_REGISTRATION_MISSING": "教務處登錄：尚未取得註冊組正式登錄紀錄。",
+    "APPLICATION:FORMAL_QUALIFICATION_MISSING": "修讀資格審核：尚未取得正式修讀資格核准紀錄。",
+    "APPLICATION:APPLICATION_RESOLUTION_UNKNOWN": "申請審查：官方申請審查紀錄無法解析，需人工確認。",
+    "APPLICATION:MINOR_APPLICATION_RESOLUTION_UNKNOWN": "輔系申請審查：官方輔系申請審查紀錄無法解析，需人工確認。",
+    "APPLICATION:MINOR_QUALIFICATION_UNKNOWN": "輔系資格審核：尚未確認官方輔系修讀資格。",
+    "APPLICATION:MINOR_QUALIFICATION_NOT_GRANTED": "輔系資格審核：官方紀錄顯示未取得輔系資格。",
+    "APPLICATION:APPLICATION_STUDENT_STATUS_UNVERIFIED": "學籍查核：學生身分尚未核實，請確認學號與學籍資料。",
+    "APPLICATION:APPLICATION_SELF_REPORT_UNVERIFIED": "自述資料：自行填寫之申請資料尚未經教務處核對。",
+    "APPLICATION:APPLICATION_EVENT_MISSING": "查無正式申請紀錄，請確認是否已於系統提出申請。",
+    "APPLICATION:UNIVERSITY_WINDOW_CLOSED": "申請時程：已超過全校申請期限。",
+    "APPLICATION:DEPARTMENT_WINDOW_CLOSED": "申請時程：已超過系所申請期限。",
+    "APPLICATION:ELIGIBILITY_UNMET": "資格審核：未達申請資格門檻。",
+    "APPLICATION:RULE_VERSION_UNRESOLVED": "法規版本：申請適用之規則版本尚未確認。",
+    "APPLICATION:ACTIVITY_UNVERIFIED": "學籍狀態：在學或活動紀錄尚未核實。",
+    "APPLICATION:UNKNOWN": "雙主修資格審核：尚未取得教務處核准紀錄。",
+    "APPLICATION:INCOMPLETE": "申請手續：申請程序尚未完整，請向教務處確認。",
+    "APPLICATION:FAIL": "資格審核：未符申請資格要求。",
+    "APPLICATION:PENDING": "申請審核中：尚待教務處或系所正式核准。",
+    "APPLICATION:DOUBLE_MAJOR_NOT_APPROVED": "雙主修資格審核：尚未取得教務處核准紀錄。",
+    "APPLICATION:MINOR_NOT_APPROVED": "輔系資格審核：尚未取得教務處核准紀錄。",
+
+    # 搜尋求解器狀態 (SEARCH_*)
+    "SEARCH_INCOMPLETE": "審核搜尋已達最大深度，已採用最佳可行配置。",
+    "SEARCH_EXHAUSTED": "審核搜尋已達最大深度，已採用最佳可行配置。",
+    "SEARCH_EXHAUSTED_AFTER_FEASIBLE_WITNESS": "審核搜尋已達最大深度，已採用最佳可行配置。",
+    "ALLOCATION_AMBIGUOUS": "多門課程存在多種採計組合，目前採用安全保守配置。",
+
+    # 輸入與確認狀態 (INPUT_*)
+    "INPUT_CONFIRMATION_REQUIRED": "成績資料尚未完成確認，請檢視並確認成績列。",
+    "INPUT_UNCONFIRMED": "成績資料尚未確認，目前結果僅供參考。",
+    "EMPTY_INPUT": "尚未匯入任何成績資料。",
+    "STUDENT_INPUT_MISSING": "成績資料缺少必要欄位，請補充後再核對。",
+
+    # 門檻與總學分 (AGGREGATE_* / GATE_*)
     "AGGREGATE_GATE_UNAVAILABLE": "尚未找到可核對的主修總學分門檻。",
     "AGGREGATE_GATE_STATUS_UNKNOWN": "主修總學分門檻仍需人工核對。",
-    "CREDIT_CONSERVATION_FAILED": "成績學分與採計結果無法相互核對，請重新確認成績列。",
     "PRIMARY_AGGREGATE_NUMERATOR_UNVERIFIED": "主修總學分的已採計數字缺少可追溯來源。",
+    "TOO_MANY_GATE_CATEGORIES": "門檻類別過多，已簡化圖表呈現。",
+    "EXCLUSIVE_CREDIT_LEDGER_EMPTY": "目前沒有已採計之專屬學分。",
+    "GATE_COUNTS_UNAVAILABLE": "目前沒有可統計的要求狀態數據。",
+    "CREDIT_CONSERVATION_FAILED": "成績學分與採計結果無法相互核對，請重新確認成績列。",
+
+    # 課綱與規則依據
+    "PRIMARY_CURRICULUM_MISSING": "尚未選擇主修系所或學生手冊版本。",
+    "PRIMARY_CURRICULUM_UNRESOLVED": "主修系所或手冊版本無法解析，請重新選擇。",
+    "TARGET_CURRICULUM_UNRESOLVED": "雙主修或輔系目標課表版本無法解析，請重新選擇。",
+    "MINOR_SHARED_CREDIT_FORBIDDEN": "輔系規定：輔系不得與主修重複採計共同學分。",
+    "PRIMARY_REQUIREMENT_SCOPE_MISSING": "缺少主修系所要求範圍資料，需人工確認。",
+    "REQUIREMENT_METRICS_UNAVAILABLE": "各項畢業要求進度數據目前無法計算。",
     "INCOMPLETE_EVIDENCE_OR_COVERAGE": "課程清單或規則來源尚未完整，請查看規則來源並補齊資料。",
+    "OFFICIAL_EVIDENCE_MISSING": "規則來源尚未取得，請補充可核對的官方資料。",
     "RULE_CONTEXT:MANUAL_REVIEW": "適用規則版本仍需人工核對。",
     "RULE_CONTEXT": "適用規則版本仍需人工核對。",
+    "RULE_CONTEXT:RULE_CONTEXT_UNRESOLVED": "適用手冊與規則版本尚未確定，需人工核對。",
     "CURRICULUM_UNRESOLVED": "適用課程版本尚未確認。",
     "EVIDENCE_UNRESOLVED": "規則來源尚未取得，請補充可核對的資料。",
     "REQUIREMENT_RESULT": "要求項目的採計結果需要重新核對。",
     "ALLOCATION": "課程採計結果需要重新核對。",
     "NON_CREDIT_DEFICIT": "非學分門檻尚有缺項，請依規則補足。",
-    "OFFICIAL_EVIDENCE_MISSING": "規則來源尚未取得，請補充可核對的官方資料。",
     "RULE_POLICY_SCOPE_UNVERIFIED": "適用規則範圍尚待核對。",
     "RULE_POLICY_EVIDENCE_INCOMPLETE": "規則來源尚未完整，請查看來源並補充資料。",
     "RULE_POLICY_METADATA_MISSING": "規則資料尚未完整，請查看來源並人工核對。",
     "RULE_POLICY_SOURCE_MISSING": "規則來源尚未取得，請補充可核對的手冊資料。",
     "RULE_NOT_IMPLEMENTED": "此門檻的核對方式尚未完整設定，請人工確認。",
     "MANUAL_DECISION_REQUIRED": "此門檻需要人工確認。",
-    "STUDENT_INPUT_MISSING": "成績資料缺少必要欄位，請補充後再核對。",
     "SUBSET_CONSTRAINT_INVALID": "學分採計條件資料不完整，請查看規則來源。",
     "SUBSET_CONSTRAINT_EVIDENCE_UNKNOWN": "學分採計條件的來源尚待核對。",
     "SUBSET_CONSTRAINT_DEFICIT": "學分採計條件尚有缺額，請依規則補足。",
+    "DIRECTION_ONLY": "提供修課方向。",
+    "WAIVER_DECISION_REQUIRED": "免修或抵認尚待教務處或系所正式核准。",
 }
 
 _SENSITIVE_KEY_FRAGMENTS = (
@@ -270,22 +662,66 @@ def _public_text(value: Any, fallback: str = PUBLIC_PENDING) -> str:
     text = _text(value).strip()
     if not text:
         return fallback
+
+    # 1. Parameterized requirement blocker translation
+    if text.startswith(("REQUIREMENT_", "WAIVER_DECISION_REQUIRED", "ZERO_CREDIT_GATE_", "RULE_NOT_IMPLEMENTED:")):
+        translated = translate_requirement_blocker(text)
+        if translated:
+            return clean_student_facing_text(translated)
+
+    # 2. Handbook / curriculum citations
+    if text.startswith(("handbook:", "official:handbook:", "primary:", "target:", "minor:")):
+        citation = format_handbook_citation(text)
+        if citation and citation != text:
+            return clean_student_facing_text(citation)
+
     normalized = text.upper().replace("-", "_").replace(" ", "_")
     if normalized in _PUBLIC_STATUS_LABELS:
         return _public_status_label(normalized, fallback)
+
     for code, reason in _PUBLIC_CODE_REASONS.items():
         if normalized == code or normalized.startswith(code + ":"):
             return reason
         if code in text:
             text = text.replace(code, reason.rstrip("。"))
+
+    # 3. Dynamic prefixes
+    if normalized.startswith("APPLICATION:"):
+        if "DOUBLE_MAJOR" in normalized:
+            return "雙主修資格審核：尚未取得教務處核准紀錄。"
+        if "MINOR" in normalized:
+            return "輔系資格審核：尚未取得教務處核准紀錄。"
+        return "申請資格審核：尚待教務處或系所正式核對紀錄。"
+
+    if normalized.startswith("SEARCH_"):
+        return "審核搜尋已達最大深度，已採用最佳可行配置。"
+
+    if normalized.startswith("RULE_CONTEXT:"):
+        return "適用規則版本仍需人工核對。"
+
+    if normalized.startswith("INPUT_"):
+        return "成績資料尚未完成確認，請檢視並確認成績列。"
+
+    if "CREDIT_CONSERVATION_FAILED" in normalized:
+        return "成績學分與採計結果無法相互核對，請重新確認成績列。"
+
+    if text in _KNOWN_COURSE_NAMES:
+        return _KNOWN_COURSE_NAMES[text]
+
     for source, replacement in _PUBLIC_TERM_REPLACEMENTS:
         text = text.replace(source, replacement)
-    # A code that was not explicitly named above is still not useful to a
-    # student. Keep its meaning at the category level and send the opaque
-    # value to the audit export only.
-    if text == normalized and normalized and all(character.isupper() or character in "_0123456789:" for character in text):
+
+    # 4. Filter unresolved machine codes
+    if any(text.startswith(prefix) for prefix in ("REQUIREMENT_", "APPLICATION:", "SEARCH_", "RULE_CONTEXT:", "CREDIT_CONSERVATION_FAILED", "INPUT_")):
         return fallback
-    return text
+
+    if re.fullmatch(r"[A-Z0-9_:-]+", text):
+        return fallback
+
+    # 5. Apply failsafe scrubber
+    text = clean_student_facing_text(text)
+
+    return text or fallback
 
 
 def _public_credit(value: Any, fallback: str = PUBLIC_PENDING) -> str:
@@ -360,7 +796,14 @@ def _public_condition(value: Any) -> str:
     return text
 
 
-def _public_reason(value: Any, fallback: str = MANUAL_LABEL) -> str:
+def _public_reason(value: Any, fallback: str = MANUAL_LABEL, requirement: Mapping[str, Any] | None = None) -> str:
+    text = _text(value).strip()
+    if not text:
+        return fallback
+    if text.startswith(("REQUIREMENT_", "WAIVER_DECISION_REQUIRED", "ZERO_CREDIT_GATE_", "RULE_NOT_IMPLEMENTED:")):
+        translated = translate_requirement_blocker(text, requirement=requirement)
+        if translated:
+            return clean_student_facing_text(translated)
     return _public_text(value, fallback)
 
 
@@ -837,6 +1280,31 @@ def _attempt_view(
             reason = "此課程符合快照中的官方清單，但目前沒有安全配置至本要求。"
     if display_status == UNKNOWN and (not identity_verified or not evidence_verified):
         reason = MANUAL_LABEL + "：課程身分或要求來源尚不足以安全認列，請查看規則來源。"
+    grade = _text(
+        attempt.get("grade")
+        or attempt.get("score")
+        or attempt.get("sem2_score")
+        or attempt.get("sem1_score")
+    ).strip()
+    if not grade:
+        st_upper = display_status.upper()
+        if st_upper in {PASS, "COMPLETED"}:
+            grade = "通過"
+        elif st_upper in {"IN_PROGRESS", "IP"}:
+            grade = "修習中"
+        elif st_upper in {FAIL, "FAILED"}:
+            grade = "未通過"
+        else:
+            grade = "—"
+    req_map = _active_requirement_map.get()
+    req_item = req_map.get(requirement_id, {}) if isinstance(req_map, Mapping) else {}
+    category_label = (
+        _requirement_kind_label(req_item)
+        or _text(req_item.get("kind"))
+        or _CATEGORY_NAMES.get(_text(req_item.get("bucket")), "")
+        or _allocation_kind_label(allocation_kind)
+        or "必修"
+    )
     return {
         "attempt_id": _text(attempt.get("attempt_id")),
         "course_id": _text(attempt.get("course_id")),
@@ -859,6 +1327,8 @@ def _attempt_view(
         "alternative_routes": route_labels,
         "is_allocated": bool(portions),
         "is_not_attempted": False,
+        "grade": grade,
+        "category": category_label,
     }
 
 
@@ -886,6 +1356,8 @@ def _not_attempted_view(option: Mapping[str, Any]) -> Mapping[str, Any]:
         "alternative_routes": ("沒有其他安全路徑",),
         "is_allocated": False,
         "is_not_attempted": True,
+        "grade": "—",
+        "category": "規則指定",
     }
 
 
@@ -1070,6 +1542,16 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
     }
     alternatives = tuple(plain_payload.get("alternatives") or allocation.get("alternative_allocations") or ())
     provenance = tuple(item for item in plain_payload.get("rule_provenance", ()) if isinstance(item, Mapping))
+    req_map: dict[str, Any] = {}
+    for item in requirements:
+        req_id = _text(item.get("requirement_id"))
+        if req_id:
+            req_info = dict(item)
+            res_item = result_by_requirement.get(req_id, {})
+            if isinstance(res_item, Mapping) and res_item.get("deficit") is not None:
+                req_info["deficit"] = res_item.get("deficit")
+            req_map[req_id] = req_info
+    _active_requirement_map.set(req_map)
     requirement_views: list[Mapping[str, Any]] = []
     for requirement in requirements:
         requirement_id = _text(requirement.get("requirement_id"))
@@ -1097,9 +1579,13 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         status_reason_code = _text(metric.get("status_reason_code"))
         status = _text(result.get("status"), UNKNOWN)
         requirement_provenance = _provenance_view(_provenance_for(requirement_id, provenance))
-        blockers = tuple(_text(item) for item in _as_sequence(result.get("blockers")) if _text(item))
-        if not status_authoritative and status_reason_code and status_reason_code not in blockers:
-            blockers = (*blockers, status_reason_code)
+        raw_blockers = tuple(_text(item) for item in _as_sequence(result.get("blockers")) if _text(item))
+        if not status_authoritative and status_reason_code and status_reason_code not in raw_blockers:
+            raw_blockers = (*raw_blockers, status_reason_code)
+        blockers = tuple(
+            translate_requirement_blocker(item, requirement=requirement, requirement_map=req_map) or _text(item)
+            for item in raw_blockers
+        )
         eligible_courses = _eligible_course_options(requirement)
         choice_condition = _requirement_condition(requirement)
         coverage_state = _text(result.get("coverage_state"), _text(requirement.get("coverage_state"), UNKNOWN))
@@ -1251,7 +1737,7 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         "subset_constraint_results",
         "subset_evaluations",
     )
-    return {
+    result = {
         "_projection_schema": PROJECTION_SCHEMA_VERSION,
         "_source": "DecisionSnapshot",
         "snapshot_id": _text(plain_payload.get("snapshot_id")),
@@ -1281,6 +1767,8 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
         "remediation_suggestions": tuple(summary["remediation_suggestions"]),
         "input_confirmation": _plain(plain_payload.get("input_confirmation", {})),
     }
+    _active_requirement_map.set({})
+    return result
 
 
 def _status_class(status: Any) -> str:
@@ -1299,7 +1787,13 @@ def _status_class(status: Any) -> str:
 
 def _metric(label: str, value: Any, detail: Any = "") -> str:
     detail_markup = f'<small>{_escape(detail)}</small>' if detail not in (None, "") else ""
-    return f'<article class="snapshot-metric"><span>{_escape(label)}</span><strong>{_escape(value)}</strong>{detail_markup}</article>'
+    return (
+        f'<article class="snapshot-metric">'
+        f'<span class="snapshot-metric-label">{_escape(label)}</span>'
+        f'<strong class="snapshot-metric-value">{_escape(value)}</strong>'
+        f'{detail_markup}'
+        f'</article>'
+    )
 
 
 def _provenance_markup(items: Sequence[Any]) -> str:
@@ -1314,9 +1808,11 @@ def _provenance_markup(items: Sequence[Any]) -> str:
         source_items = ()
     for item in source_items:
         if not isinstance(item, Mapping):
-            reference = _public_text(item, "規則來源已保留於稽核資料")
+            raw_ref = _text(item)
+            ref_fmt = format_handbook_citation(raw_ref) if ":" in raw_ref else raw_ref
+            reference = _public_text(ref_fmt, "規則來源已保留於稽核資料")
             if reference:
-                rows.append(f"<li>來源：{_escape(reference)}</li>")
+                rows.append(f"<li>來源：{_escape(clean_student_facing_text(reference))}</li>")
             continue
         parts: list[str] = []
         location = _text(item.get("source_location") or item.get("location") or item.get("table_location"))
@@ -1325,22 +1821,24 @@ def _provenance_markup(items: Sequence[Any]) -> str:
         authority = _text(item.get("authority"))
         clause = _text(item.get("original_clause") or item.get("original_text"))
         if location:
-            parts.append(f"位置：{location}")
+            parts.append(f"位置：{format_handbook_citation(location)}")
         elif source_file:
-            parts.append(f"文件：{source_file}")
+            parts.append(f"文件：{format_handbook_citation(source_file)}")
         if pages:
             parts.append(f"頁碼：{pages}")
         if authority:
-            parts.append(f"依據：{_public_text(authority, '學校規定')}")
+            parts.append(f"依據：{format_handbook_citation(_public_text(authority, '學校規定'))}")
         if clause:
-            parts.append(f"條文：{_public_text(clause)}")
+            parts.append(f"條文：{format_handbook_citation(_public_text(clause))}")
         if not parts:
             reference = _text(item.get("source_reference") or item.get("evidence_reference"))
-            parts.append(f"來源：{_public_text(reference, '規則來源已保留於稽核資料')}")
+            ref_fmt = format_handbook_citation(reference) if ":" in reference else reference
+            parts.append(f"來源：{_public_text(ref_fmt, '規則來源已保留於稽核資料')}")
         evidence = _text(item.get("evidence_state"))
         if evidence:
             parts.append(f"{_public_status_label(evidence, _public_text(evidence))}")
-        rows.append(f"<li>{_escape('；'.join(parts))}</li>")
+        cleaned_parts = clean_student_facing_text("；".join(parts))
+        rows.append(f"<li>{_escape(cleaned_parts)}</li>")
     return "".join(rows) or "<li>目前沒有可直接顯示的規則位置，請補充可核對的手冊來源。</li>"
 
 
@@ -1385,6 +1883,12 @@ def _public_context_markup(view: Mapping[str, Any]) -> str:
     masked_id = _text(context.get("masked_student_id"))
     if masked_id:
         parts.append(f"學號：{masked_id}")
+    summary = view.get("summary") if isinstance(view.get("summary"), Mapping) else {}
+    input_confirmation = view.get("input_confirmation") if isinstance(view.get("input_confirmation"), Mapping) else {}
+    raw_state = summary.get("input_confirmation_state") or input_confirmation.get("state")
+    if raw_state:
+        input_state = _input_confirmation_label(raw_state)
+        parts.append(f"資料確認：{input_state}")
     return "　·　".join(parts)
 
 
@@ -1461,13 +1965,39 @@ def _optional_result_rows(view: Mapping[str, Any], *keys: str) -> tuple[Mapping[
 
 
 def _non_credit_result_rows(view: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    return _optional_result_rows(
+    rows = _optional_result_rows(
         view,
         "non_credit_results",
         "non_credit_requirement_results",
         "non_credit_requirements_results",
         "non_credit_requirements",
     )
+    if rows:
+        return rows
+    decisions = view.get("decisions") if isinstance(view.get("decisions"), Mapping) else {}
+    nc_thresh = decisions.get("non_credit_thresholds")
+    if isinstance(nc_thresh, Mapping):
+        items = nc_thresh.get("items") or nc_thresh.get("rows")
+        if isinstance(items, (list, tuple)):
+            return tuple(item for item in items if isinstance(item, Mapping))
+    nc_dec = decisions.get("non_credit_results")
+    if isinstance(nc_dec, Mapping):
+        unpacked = []
+        for scoped in nc_dec.values():
+            if isinstance(scoped, (list, tuple)):
+                unpacked.extend(item for item in scoped if isinstance(item, Mapping))
+        if unpacked:
+            return tuple(unpacked)
+    stats = view.get("statistics") if isinstance(view.get("statistics"), Mapping) else {}
+    nc_stats = stats.get("non_credit_results")
+    if isinstance(nc_stats, Mapping):
+        unpacked = []
+        for scoped in nc_stats.values():
+            if isinstance(scoped, (list, tuple)):
+                unpacked.extend(item for item in scoped if isinstance(item, Mapping))
+        if unpacked:
+            return tuple(unpacked)
+    return ()
 
 
 def _subset_result_rows(view: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
@@ -1521,7 +2051,16 @@ def _non_credit_progress_text(result: Mapping[str, Any]) -> str:
     unit = "學期／項目" if "TERM" in kind or "體育" in name else "項目"
     completed = _result_value(result, ("completed_count", "completed_completions", "completed"))
     required = _result_value(result, ("required_count", "required_completions", "required"))
-    progress = f"{completed}／{required} {unit}" if completed != "需要補資料" and required != "需要補資料" else "進度需要補資料"
+    if completed != "需要補資料" and required != "需要補資料":
+        progress = f"{completed}／{required} {unit}"
+    else:
+        st = _text(result.get("status")).upper()
+        if st in {PASS, "COMPLETED"}:
+            progress = "已達成"
+        elif st in {"IN_PROGRESS", "IP"}:
+            progress = "修習中"
+        else:
+            progress = "進度需要補資料"
     completed_hours = _result_value(result, ("completed_hours", "earned_hours", "hours_completed"), "")
     required_hours = _result_value(result, ("required_hours", "hours_required"), "")
     if completed_hours and required_hours:
@@ -1842,23 +2381,46 @@ def _course_markup(course: Mapping[str, Any]) -> str:
     purpose = _text(course.get("allocation_kind_label"), "採計用途待補")
     identity_note = _public_status_label(course.get("identity_status"), "課程身分待核對")
     route_markup = "、".join(routes)
+
+    # Grade determination
+    grade_val = _text(course.get("grade")).strip()
+    if not grade_val:
+        st = _text(course.get("status")).upper()
+        if st in {PASS, "COMPLETED"}:
+            grade_val = "通過"
+        elif st in {"IN_PROGRESS", "IP"}:
+            grade_val = "修習中"
+        elif st in {FAIL, "FAILED"}:
+            grade_val = "未通過"
+        elif course.get("is_not_attempted"):
+            grade_val = "—"
+        else:
+            grade_val = "—"
+
+    # Category determination
+    category_label = _text(course.get("category")).strip() or purpose or "必修"
+
     notes = (
         f'<div class="snapshot-course-status"><span class="snapshot-badge {_status_class(course.get("status"))}">'
         f'{_escape(status_label)}</span>{shared}</div>'
-        f'<p><b>採計用途：</b>{_escape(purpose)}</p>'
-        f'<p><b>原因：</b>{_escape(_public_reason(course.get("allocation_reason")))}</p>'
-        f'<p class="snapshot-course-meta">課程資料：{_escape(identity_note)}；未採計：'
-        f'{_escape(_public_credit(course.get("unallocated_credits"), "0"))} 學分</p>'
-        f'<p class="snapshot-course-meta">其他可行方式：{_escape(route_markup or "目前沒有其他可採計方式")}</p>'
+        '<div class="snapshot-course-tags">'
+        f'<span class="snapshot-tag"><b>採計用途：</b>{_escape(purpose)}</span>'
+        f'<span class="snapshot-tag"><b>原因：</b>{_escape(_public_reason(course.get("allocation_reason")))}</span>'
+        f'<span class="snapshot-tag snapshot-tag--meta">課程資料：{_escape(identity_note)}；未採計：'
+        f'{_escape(_public_credit(course.get("unallocated_credits"), "0"))} 學分</span>'
+        f'<span class="snapshot-tag snapshot-tag--meta">其他可行方式：{_escape(route_markup or "目前沒有其他可採計方式")}</span>'
+        '</div>'
     )
     earned_credits = _public_credit(course.get("earned_credits"), "待補")
+    course_sub = f'<div class="snapshot-course-sub">{_escape(course_id)}</div>' if course_id and course_id != course_label else ""
     return (
         '<tr class="snapshot-course">'
-        f'<th scope="row"><div class="snapshot-course-main"><strong>{_escape(course_label)}</strong></div></th>'
-        f'<td class="snapshot-course-id"><span class="snapshot-course-meta">{_escape(course_id) or "—"}</span></td>'
+        f'<th scope="row" class="snapshot-course-col-name"><div class="snapshot-course-main"><strong>{_escape(course_label)}</strong></div>{course_sub}</th>'
         f'<td class="snapshot-course-term"><span class="snapshot-course-meta">{_escape(term)}</span></td>'
+        f'<td class="snapshot-course-grade"><span class="snapshot-grade-val">{_escape(grade_val)}</span></td>'
         f'<td class="snapshot-course-earned">{_escape(earned_credits)}<small>課程學分：{_escape(source_credits)}</small></td>'
         f'<td class="snapshot-course-used">{_escape(used_credits)}</td>'
+        f'<td class="snapshot-course-category"><span class="snapshot-badge is-category">{_escape(category_label)}</span></td>'
         f'<td class="snapshot-course-notes">{notes}</td>'
         '</tr>'
     )
@@ -1896,7 +2458,7 @@ def _requirement_markup(requirement: Mapping[str, Any]) -> str:
     if not course_markup:
         course_markup = (
             '<tr class="snapshot-course snapshot-course--empty">'
-            '<td colspan="6"><span class="snapshot-badge is-pending">需要補資料</span> '
+            '<td colspan="7"><span class="snapshot-badge is-pending">需要補資料</span> '
             '目前沒有已確認可採計的課程；請查看規則來源並補上成績資料。</td></tr>'
         )
     provenance = _as_sequence(requirement.get("rule_provenance"))
@@ -1915,9 +2477,14 @@ def _requirement_markup(requirement: Mapping[str, Any]) -> str:
     deficit = _public_credit(requirement.get("deficit"), "0")
     coverage_label = _public_text(requirement.get("coverage_state"), "來源尚未完整")
     evidence_label = _public_text(requirement.get("evidence_state"), "來源尚未核對")
-    blockers = "；".join(_public_reason(item, "資料仍需人工核對") for item in _as_sequence(requirement.get("blockers"))) or "目前沒有其他提醒"
+    blockers = "；".join(_public_reason(item, "資料仍需人工核對", requirement=requirement) for item in _as_sequence(requirement.get("blockers"))) or "目前沒有其他提醒"
+    blockers = clean_student_facing_text(blockers)
+    req_dom_id = _text(requirement.get("requirement_id")).strip()
+    if req_dom_id.startswith(("primary:", "target:", "minor:")):
+        req_dom_id = re.sub(r"^(?:primary|target|minor):\d+:", "", req_dom_id).replace(":", "-")
+    req_dom_id = re.sub(r"handbook:\d+:", "", req_dom_id).replace(":", "-")
     return (
-        f'<details class="snapshot-requirement-expander" data-requirement-id="{_escape(requirement.get("requirement_id"))}">'
+        f'<details class="snapshot-requirement-expander" data-requirement-id="{_escape(req_dom_id)}">'
         '<summary><span class="snapshot-requirement-title">'
         f'{_escape(requirement.get("name"))} · {_escape(requirement.get("kind"))}</span>'
         f'<span class="snapshot-requirement-progress">{_escape(effective)}／{_escape(required)} 學分 · '
@@ -1934,15 +2501,16 @@ def _requirement_markup(requirement: Mapping[str, Any]) -> str:
         f'{validation_note}'
         f'<p class="snapshot-manual-note">{_escape(_public_reason(requirement.get("manual_confirmation")))}</p>'
         f'<p class="snapshot-blocker-note">下一步：{_escape(blockers)}</p>'
-        '<h4>規則指定課程</h4>'
-        f'{_eligible_course_markup(requirement)}'
-        f'<p class="snapshot-choice-condition">修課條件：{_escape(_public_condition(requirement.get("choice_condition")))}</p>'
         '<h4>課程明細</h4>'
         '<div class="snapshot-table-scroll"><table class="snapshot-course-list" aria-label="課程明細">'
         '<caption class="snapshot-sr-only">課程明細</caption>'
-        '<thead><tr><th scope="col">課名</th><th scope="col">課號</th><th scope="col">學期</th>'
-        '<th scope="col">修得學分</th><th scope="col">此類採計學分</th><th scope="col">狀態／備註</th></tr></thead>'
+        '<thead><tr><th scope="col">課名</th><th scope="col">學期</th><th scope="col">成績</th>'
+        '<th scope="col">修得學分</th><th scope="col">此類採計學分</th><th scope="col">採計類別</th>'
+        '<th scope="col">狀態／備註</th></tr></thead>'
         f'<tbody>{course_markup}</tbody></table></div>'
+        '<h4>規則指定課程</h4>'
+        f'{_eligible_course_markup(requirement)}'
+        f'<p class="snapshot-choice-condition">修課條件：{_escape(_public_condition(requirement.get("choice_condition")))}</p>'
         '<details class="snapshot-source-details"><summary>查看規則來源</summary>'
         f'<ul class="snapshot-provenance-list">{_provenance_markup(provenance)}</ul></details>'
         '</div></details>'
@@ -1978,6 +2546,8 @@ def _unallocated_course_markup(view: Mapping[str, Any]) -> str:
                     "allocation_kind_label": purpose,
                     "allocation_reason": reason,
                     "alternative_routes": (),
+                    "grade": _text(attempt.get("grade") or attempt.get("score")),
+                    "category": "尚未配置",
                 }
             )
         )
@@ -1989,8 +2559,9 @@ def _unallocated_course_markup(view: Mapping[str, Any]) -> str:
         '<p class="snapshot-manual-note">下列已確認課程目前沒有安全配置至特定畢業要求；各列保留原始學期與狀態。</p>'
         '<div class="snapshot-table-scroll"><table class="snapshot-course-list" aria-label="尚未採計課程">'
         '<caption class="snapshot-sr-only">尚未採計課程</caption>'
-        '<thead><tr><th scope="col">課名</th><th scope="col">課號</th><th scope="col">學期</th>'
-        '<th scope="col">修得學分</th><th scope="col">此類採計學分</th><th scope="col">狀態／備註</th></tr></thead>'
+        '<thead><tr><th scope="col">課名</th><th scope="col">學期</th><th scope="col">成績</th>'
+        '<th scope="col">修得學分</th><th scope="col">此類採計學分</th><th scope="col">採計類別</th>'
+        '<th scope="col">狀態／備註</th></tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table></div>'
         '</div></details></section>'
     )
@@ -2050,8 +2621,6 @@ def _decision_rows(
 
 
 def render_snapshot(snapshot: DecisionSnapshot) -> str:
-    """Render the complete responsive HTML view from one DecisionSnapshot."""
-
     view = build_snapshot_projection(snapshot)
     summary = view["summary"]
     charts_source = "已確認的成績與畢業規則"
@@ -2169,10 +2738,62 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     .snapshot-source-credit-note strong { display: block; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
     .snapshot-source-credit-note small { color: var(--snapshot-muted); display: block; margin-top: .2rem; }
     .snapshot-card { background: var(--snapshot-card); border: 1px solid var(--snapshot-border); border-radius: .85rem; margin-block: .75rem; padding: 1rem; }
-    .snapshot-metrics { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); margin-block: 1rem; }
-    .snapshot-metric { background: var(--snapshot-card); border: 1px solid var(--snapshot-border); border-radius: .7rem; display: grid; gap: .15rem; padding: .75rem; }
-    .snapshot-metric span, .snapshot-metric small { color: var(--snapshot-muted); font-size: .78rem; }
-    .snapshot-metric strong { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+    .snapshot-metrics {
+      display: grid;
+      gap: 0.85rem;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      margin-block: 1rem 1.25rem;
+    }
+    @media (max-width: 1024px) {
+      .snapshot-metrics {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 600px) {
+      .snapshot-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.6rem;
+      }
+    }
+    .snapshot-metric {
+      background: var(--snapshot-card);
+      border: 1px solid var(--snapshot-border);
+      border-radius: 0.75rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 0.85rem 1rem;
+      min-block-size: 5.5rem;
+    }
+    .snapshot-metric-label, .snapshot-metric span {
+      color: var(--snapshot-muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .snapshot-metric-value, .snapshot-metric strong {
+      color: var(--snapshot-text);
+      font-size: 1.35rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      margin-block: 0.25rem 0.15rem;
+      line-height: 1.25;
+    }
+    .snapshot-metric small {
+      color: var(--snapshot-muted);
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+    .snapshot-course-tags { display: flex; flex-direction: column; gap: .25rem; margin-top: .35rem; }
+    .snapshot-tag { display: inline-block; font-size: .76rem; color: var(--snapshot-muted); background: color-mix(in srgb, var(--snapshot-muted) 8%, var(--snapshot-card)); border-radius: 4px; padding: .12rem .4rem; line-height: 1.35; word-break: break-word; }
+    .snapshot-tag b { color: var(--snapshot-text); font-weight: 600; }
+    .snapshot-tag--meta { opacity: .85; }
+    .snapshot-course-grade { font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
+    .snapshot-course-category { white-space: nowrap; }
+    .snapshot-badge.is-category { background: color-mix(in srgb, var(--snapshot-action) 10%, var(--snapshot-card)); color: var(--snapshot-action); border: 1px solid currentColor; }
+    .snapshot-course-col-name { min-inline-size: 9rem; }
+    .snapshot-course-sub { font-size: .75rem; color: var(--snapshot-muted); font-weight: normal; margin-top: .15rem; }
     .snapshot-badge { border: 1px solid currentColor; border-radius: 999px; display: inline-block; font-size: .75rem; font-weight: 800; line-height: 1.35; padding: .12rem .45rem; white-space: nowrap; }
     .snapshot-badge.is-pass { color: #166534; background: #ECFDF5; }
     .snapshot-badge.is-fail { color: #B91C1C; background: #FEF2F2; }
@@ -2267,12 +2888,98 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         or (required_total_number == Decimal("0") and (todo_number or Decimal("0")) > Decimal("0"))
         else f"{required_done}／{required_total} 項"
     )
+
+    # 1. 總學分
+    raw_tot = (
+        summary.get("required_graduation_credits")
+        if summary.get("required_graduation_credits") != MANUAL_LABEL
+        else view.get("statistics", {}).get("total_graduation_credits")
+        or summary.get("aggregate_credit_progress", {}).get("required_credits")
+        or "128"
+    )
+    tot_str = _text(raw_tot).strip()
+    if tot_str and tot_str != MANUAL_LABEL:
+        total_credits_display = f"{tot_str} 學分" if "學分" not in tot_str else tot_str
+    else:
+        total_credits_display = "128 學分"
+
+    # 2. 已修得 (Preserves "有效學分" in subtext for compatibility)
+    earned_display = f"{effective_credits} 學分" if "學分" not in str(effective_credits) else str(effective_credits)
+    earned_subtext = f"有效學分 · 實得 {source_earned} 學分"
+
+    # 3. 尚缺
+    if missing_credits and missing_credits != "需要補資料":
+        missing_display = f"{missing_credits} 學分" if "學分" not in str(missing_credits) else str(missing_credits)
+    else:
+        tot_dec = _decimal(total_credits_display.replace("學分", "").strip())
+        eff_dec = _decimal(effective_credits)
+        if tot_dec > Decimal("0") and eff_dec is not None:
+            missing_display = f"{max(Decimal('0'), tot_dec - eff_dec)} 學分"
+        else:
+            missing_display = "0 學分"
+    missing_subtext = "尚缺學分 · 依主修總學分門檻"
+
+    # 4. 主修進度 (Preserves "必修進度" in subtext for compatibility)
+    primary_subtext = f"必修進度 · 尚有 {todo_count} 項待辦"
+
+    # 5. 雙主修進度
+    context_obj = view.get("context") if isinstance(view.get("context"), Mapping) else {}
+    sec_kind = _text(context_obj.get("secondary_kind")).lower()
+    decisions = view.get("decisions") if isinstance(view.get("decisions"), Mapping) else {}
+    dm_decision = decisions.get("double_major_qualification") or decisions.get("formal_double_major_award") or {}
+    dm_decision_status = _text(dm_decision.get("status")) if isinstance(dm_decision, Mapping) else ""
+    dm_status = summary.get("double_major_status") or dm_decision_status or "NOT_APPLICABLE"
+    dm_progress = view.get("statistics", {}).get("program_progress", {}).get("double_major", {})
+    target_reqs = [
+        r for r in view.get("requirements", ())
+        if _text(r.get("requirement_id")).startswith("target:") or "雙主修" in _text(r.get("kind")) or "雙主修" in _text(r.get("name"))
+    ]
+    is_dm = (
+        sec_kind in {"double_major", "doublemajor"}
+        or dm_status not in {"NOT_APPLICABLE", "不適用", ""}
+        or len(target_reqs) > 0
+    )
+    if is_dm:
+        dm_done = dm_progress.get("completed_credits") or dm_progress.get("credits_completed")
+        dm_req = dm_progress.get("required_credits") or dm_progress.get("credits_required")
+        if dm_done and dm_req:
+            double_major_display = f"{dm_done}／{dm_req} 學分"
+        elif dm_status == PASS:
+            double_major_display = "資格通過"
+        elif target_reqs:
+            t_done = sum(1 for r in target_reqs if _text(r.get("status")).upper() == PASS)
+            double_major_display = f"{t_done}／{len(target_reqs)} 項"
+        else:
+            double_major_display = _public_status_label(dm_status)
+        double_major_subtext = f"審查：{_public_status_label(dm_status)}"
+    elif sec_kind == "minor" or summary.get("minor_application_status") not in {"NOT_APPLICABLE", "不適用", ""}:
+        double_major_display = "輔系修習中"
+        double_major_subtext = "未加修雙主修"
+    else:
+        double_major_display = "未申請"
+        double_major_subtext = "無申請雙主修 · 僅修習主修"
+
+    # 6. 非學分門檻
+    nc_results = _non_credit_result_rows(view)
+    if nc_results:
+        nc_done = sum(1 for r in nc_results if _text(r.get("status")).upper() == PASS)
+        nc_total = len(nc_results)
+        non_credit_display = f"{nc_done}/{nc_total} 項"
+        nc_pending = nc_total - nc_done
+        if nc_pending > 0:
+            non_credit_subtext = f"{nc_done} 項審查通過 · 尚有 {nc_pending} 項待完成"
+        else:
+            non_credit_subtext = "全數通過畢業門檻"
+    else:
+        non_credit_display = "審查通過"
+        non_credit_subtext = "全數通過 · 無額外門檻"
+
     current_credit_rows = (
         f'<tr><th scope="row">有效學分</th><td><strong>{_escape(effective_credits)} 學分</strong></td></tr>'
         f'<tr><th scope="row">成績單實得學分</th><td><strong>{_escape(source_earned)} 學分</strong></td></tr>'
         f'<tr><th scope="row">尚未配置</th><td><strong>{_escape(unallocated)} 學分</strong></td></tr>'
     )
-    return (
+    rendered_html = (
         f'<section id="utaipei-snapshot-report" class="snapshot-report" data-snapshot-id="{snapshot_id}" data-verdict="{_escape(_public_status_slug(view.get("verdict")))}" data-statistics-schema="{statistics_schema}" data-statistics-digest="{statistics_digest}">'
         f'<style>{css}</style><span id="utaipei-analysis-state" data-analysis-active="true" data-exported="false" hidden></span>'
         '<header class="snapshot-header"><div><p class="snapshot-eyebrow">北市大畢業通</p><h1>畢業進度</h1>'
@@ -2282,10 +2989,12 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         f'<p class="snapshot-source-credit-note"><strong>成績單實得學分：{_escape(source_earned)} 學分</strong>'
         '<small>來源成績單總額；修習中課程不計入實得學分，與有效學分及畢業判定分開。</small></p>'
         '<div class="snapshot-metrics">'
-        f'{_metric("有效學分", f"{effective_credits} 學分", "依已確認課程採計")}'
-        f'{_metric("尚缺學分", f"{missing_credits} 學分", "依主修總學分門檻計算")}'
-        f'{_metric("必修進度", required_progress_display, f"尚有 {todo_count} 項待辦")}'
-        f'{_metric("修習中", f"{in_progress} 門", f"資料確認：{input_state}")}'
+        f'{_metric("總學分", total_credits_display, "畢業學分門檻")}'
+        f'{_metric("已修得", earned_display, earned_subtext)}'
+        f'{_metric("尚缺", missing_display, missing_subtext)}'
+        f'{_metric("主修進度", required_progress_display, primary_subtext)}'
+        f'{_metric("雙主修進度", double_major_display, double_major_subtext)}'
+        f'{_metric("非學分門檻", non_credit_display, non_credit_subtext)}'
         '</div>'
         '<section class="snapshot-card"><h2>計算結果</h2><ul class="snapshot-decision-list">'
         f'{calculation_markup}</ul></section>'
@@ -2315,6 +3024,9 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         f'<h3>建議下一步</h3><ul class="snapshot-simple-list">{remediation_markup}</ul></section>'
         '</section>'
     )
+    result = clean_student_facing_text(rendered_html)
+    _active_requirement_map.set({})
+    return result
 
 
 # Stable integration names for the application layer.
@@ -2327,8 +3039,11 @@ __all__ = [
     "MANUAL_LABEL",
     "build_snapshot_projection",
     "build_snapshot_view",
+    "clean_student_facing_text",
+    "format_handbook_citation",
     "render_decision_snapshot",
     "render_snapshot",
     "render_snapshot_html",
     "sanitize_snapshot_value",
+    "translate_requirement_blocker",
 ]

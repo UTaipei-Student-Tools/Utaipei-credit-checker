@@ -369,44 +369,147 @@ def parse_transcript_pdf(pdf_path):
 def _parse_transcript_document(doc):
     if len(doc) == 0:
         raise ValueError("PDF file is empty")
-
     all_pages = [page for page in doc]
     first_page_text = all_pages[0].get_text()
     detected = detect_department_track(first_page_text)
 
     # 1. Extract Student Information from the first page
-    student_info = {"name": "", "student_id": "", "department": "", "admission_year": "", "print_date": ""}
+    student_info = {
+        "name": "",
+        "student_id": "",
+        "department": "",
+        "admission_year": "",
+        "print_date": "",
+        "double_major": None,
+        "minor": None,
+    }
 
     text_blocks = all_pages[0].get_text("blocks")
     for block in text_blocks:
         text = block[4].strip()
         if "姓名:" in text or "姓名：" in text:
-            m = re.search(r"姓名：([^\s\n]+)", text)
+            m = re.search(r"姓名[：:]\s*([^\s\n]+)", text)
             if m:
                 student_info["name"] = m.group(1)
         if "學號:" in text or "學號：" in text:
-            m = re.search(r"學號：([^\s\n]+)", text)
+            m = re.search(r"學號[：:]\s*([^\s\n]+)", text)
             if m:
                 student_info["student_id"] = m.group(1)
-        if "地球環境暨生物資源學系" in text:
-            student_info["department"] = "地球環境暨生物資源學系"
-        if "入學年月:" in text or "入學年月：" in text:
-            m = re.search(r"入學年月：([^\s\n]+)", text)
+        if "系所:" in text or "系所：" in text:
+            m = re.search(r"系所[：:]\s*([^\s\n]+)", text)
             if m:
-                student_info["admission_year"] = m.group(1)
+                student_info["department"] = m.group(1)
+        elif "地球環境暨生物資源學系" in text and not student_info["department"]:
+            student_info["department"] = "地球環境暨生物資源學系"
+        if "雙主修:" in text or "雙主修：" in text:
+            m = re.search(r"雙主修[：:]\s*([^\s\n]+)", text)
+            raw_dm = m.group(1) if m else ""
+            if not raw_dm or raw_dm.startswith("[WEB") or raw_dm in {"無", "--", "none", "null"}:
+                m_before = re.search(r"([^\s\n]+)\s*\n\s*雙主修[：:]", text)
+                if m_before:
+                    raw_dm = m_before.group(1)
+            if raw_dm and raw_dm not in {"無", "--", "none", "null", ""} and not raw_dm.startswith("[WEB"):
+                status = "修習中" if "修習中" in raw_dm else ("已核准" if "核准" in raw_dm else "修習中")
+                clean_target = raw_dm.split("-")[0]
+                detected_dm = detect_department_track(clean_target)
+                dept = detected_dm["department"] or clean_target
+                track = detected_dm["track"]
+                if not track and "化學" in clean_target:
+                    track = "應用化學"
+                elif not track and "物理" in clean_target:
+                    track = "電子物理"
+                student_info["double_major"] = {
+                    "department": dept,
+                    "track": track,
+                    "status": status,
+                    "raw": raw_dm,
+                }
+        if "輔系:" in text or "輔系：" in text:
+            m = re.search(r"輔系[：:]\s*([^\s\n]+)", text)
+            raw_minor = m.group(1) if m else ""
+            if not raw_minor or raw_minor.startswith("[WEB") or raw_minor in {"無", "--", "none", "null"}:
+                m_before = re.search(r"([^\s\n]+)\s*\n\s*輔系[：:]", text)
+                if m_before:
+                    raw_minor = m_before.group(1)
+            if raw_minor and raw_minor not in {"無", "--", "none", "null", ""} and not raw_minor.startswith("[WEB"):
+                status = "修習中" if "修習中" in raw_minor else ("已核准" if "核准" in raw_minor else "修習中")
+                clean_target = raw_minor.split("-")[0]
+                detected_minor = detect_department_track(clean_target)
+                dept = detected_minor["department"] or clean_target
+                track = detected_minor["track"]
+                student_info["minor"] = {
+                    "department": dept,
+                    "track": track,
+                    "status": status,
+                    "raw": raw_minor,
+                }
+        if "入學年月:" in text or "入學年月：" in text:
+            m = re.search(r"入學年月[：:]\s*([^\s\n]+)", text)
+            if m:
+                raw_adm = m.group(1).strip()
+                greg_m = re.match(r"^(\d{4})[/-](\d{1,2})$", raw_adm)
+                if greg_m:
+                    roc_y = int(greg_m.group(1)) - 1911
+                    m_str = f"{int(greg_m.group(2)):02d}"
+                    student_info["admission_year"] = f"{roc_y}年{m_str}月"
+                else:
+                    student_info["admission_year"] = raw_adm
         if "列印日期" in text:
-            m = re.search(r"列印日期\(Date of Issue\)：([^\s\n]+)", text)
+            m = re.search(r"列印日期(?:\(Date of Issue\))?[：:]\s*([^\s\n]+)", text)
             if m:
                 student_info["print_date"] = m.group(1)
+
+    # Fallback to search first_page_text if blocks didn't catch double_major or minor
+    if not student_info["double_major"]:
+        m = re.search(r"雙主修[：:]\s*([^\s\n]+)", first_page_text)
+        if m:
+            raw_dm = m.group(1)
+            if raw_dm not in {"無", "--", "none", "null", ""} and not raw_dm.startswith("[WEB"):
+                status = "修習中" if "修習中" in raw_dm else ("已核准" if "核准" in raw_dm else "修習中")
+                clean_target = raw_dm.split("-")[0]
+                detected_dm = detect_department_track(clean_target)
+                dept = detected_dm["department"] or clean_target
+                track = detected_dm["track"]
+                if not track and "化學" in clean_target:
+                    track = "應用化學"
+                elif not track and "物理" in clean_target:
+                    track = "電子物理"
+                student_info["double_major"] = {
+                    "department": dept,
+                    "track": track,
+                    "status": status,
+                    "raw": raw_dm,
+                }
+    if not student_info["minor"]:
+        m = re.search(r"輔系[：:]\s*([^\s\n]+)", first_page_text)
+        if m:
+            raw_minor = m.group(1)
+            if raw_minor not in {"無", "--", "none", "null", ""} and not raw_minor.startswith("[WEB"):
+                status = "修習中" if "修習中" in raw_minor else ("已核准" if "核准" in raw_minor else "修習中")
+                clean_target = raw_minor.split("-")[0]
+                detected_minor = detect_department_track(clean_target)
+                dept = detected_minor["department"] or clean_target
+                track = detected_minor["track"]
+                student_info["minor"] = {
+                    "department": dept,
+                    "track": track,
+                    "status": status,
+                    "raw": raw_minor,
+                }
 
     # Never substitute another student's data when the PDF layout changes.
     for key in ("name", "student_id", "department", "admission_year", "print_date"):
         if not student_info[key]:
             student_info[key] = "未辨識"
+    primary_detected = detect_department_track(student_info["department"])
     if student_info["department"] == "未辨識" and detected["department"]:
         student_info["department"] = detected["department"]
-    student_info["department_family"] = detected["department"] or ""
-    student_info["track"] = detected["track"]
+    if primary_detected["department"]:
+        student_info["department_family"] = primary_detected["department"]
+        student_info["track"] = primary_detected["track"]
+    else:
+        student_info["department_family"] = detected["department"] or ""
+        student_info["track"] = detected["track"]
     detected_admission_cohort = detect_admission_cohort(student_info.get("admission_year"))
     student_info["admission_cohort"] = detected_admission_cohort
 

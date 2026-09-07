@@ -17,11 +17,6 @@ from handbook_rules import (
 )
 from input_confirmation import mask_student_id
 from pdf_parser import parse_transcript_pdf
-from policy_audit import (
-    get_primary_program_options,
-    get_primary_requirements,
-    normalize_primary_program,
-)
 from portal_scope import (
     TRANSCRIPT_SCOPE_KEY,
     build_transcript_scope,
@@ -37,6 +32,7 @@ from scraper import (
     PortalErrorCode,
     fetch_transcript,
 )
+from snapshot_renderer import clean_student_facing_text, format_handbook_citation
 
 _PORTAL_STATE_KEY = "_utaipei_portal_state"
 _PORTAL_CODE_KEY = "_utaipei_portal_code"
@@ -853,27 +849,138 @@ def _math_domain_label(curriculum_id):
 
 
 def _curriculum_label(curriculum_id):
+    if not curriculum_id:
+        return "自訂／待確認課表"
+
+    raw_str = str(curriculum_id).strip()
+    if not raw_str:
+        return "自訂／待確認課表"
+
+    # 1. Immediate fallback for UUIDs, custom schemes, and internal debug blocker tokens
+    if (
+        raw_str.startswith(("uuid:", "custom:"))
+        or any(
+            code in raw_str
+            for code in (
+                "REQUIREMENT_",
+                "APPLICATION:",
+                "SEARCH_",
+                "WAIVER_",
+                "RULE_CONTEXT:",
+                "CREDIT_CONSERVATION_",
+            )
+        )
+    ):
+        return "自訂／待確認課表"
+
+    # 2. Check formal handbook citations before registry lookup
+    if raw_str.startswith(("handbook:", "official:handbook:")):
+        formatted = format_handbook_citation(raw_str)
+        if formatted and formatted != raw_str and ":" not in formatted:
+            return formatted
+        return "自訂／待確認課表"
+
+    # 3. Registry lookup (guard against loose fuzzy matching for unrecognized tracks)
     try:
         record = get_curriculum(curriculum_id)
     except (KeyError, TypeError, ValueError):
-        return str(curriculum_id)
-    names = {"earth": "地生", "apc": "物化", "cs": "資科", "math": "數學"}
-    tracks = {
-        "earth_environment": "地球環境",
-        "life_science": "生命科學",
-        "physics": "物理組",
-        "chemistry": "化學組",
-        "math_scientific_computing": "數學與科學計算",
-        "data_science": "數據科學",
-        "math_education": "數學教育",
-    }
-    program = names.get(record.get("program_slug"), str(record.get("program") or "未命名系所"))
-    track = tracks.get(record.get("track_slug"))
-    target_marker = {
-        "double_major_target": "雙主修目標",
-        "minor_target": "輔系目標",
-    }.get(record.get("kind"), "主修")
-    return f"{record.get('version', '未知')}｜{target_marker}｜{program}{f'（{track}）' if track else ''}"
+        record = None
+
+    if isinstance(record, Mapping):
+        # Validate that if a specific track part was provided, it was recognized
+        raw_parts = [p.strip() for p in raw_str.replace("/", ":").split(":") if p.strip()]
+        valid_parts = {
+            str(record.get("version") or ""),
+            str(record.get("program_slug") or ""),
+            str(record.get("track_slug") or ""),
+            str(record.get("kind") or ""),
+            "primary",
+            "major",
+            "home",
+            "主修",
+            "minor",
+            "minor_target",
+            "secondary_minor",
+            "輔系",
+            "target",
+            "double_major",
+            "double_major_target",
+            "doublemajor",
+            "double",
+            "雙主修",
+            "dm",
+            "earth",
+            "apc",
+            "cs",
+            "math",
+            "地生",
+            "物化",
+            "資科",
+            "數學",
+            "earth_environment",
+            "life_science",
+            "physics",
+            "chemistry",
+            "department",
+            "math_scientific_computing",
+            "data_science",
+            "math_education",
+            "地球環境",
+            "生命科學",
+            "物理組",
+            "化學組",
+            "數學與科學計算",
+            "數據科學",
+            "數學教育",
+        }
+        valid_parts.discard("")
+        if any(not part.isdigit() and part not in valid_parts for part in raw_parts):
+            return "自訂／待確認課表"
+
+        names = {"earth": "地生", "apc": "物化", "cs": "資科", "math": "數學"}
+        tracks = {
+            "earth_environment": "地球環境",
+            "life_science": "生命科學",
+            "physics": "物理組",
+            "chemistry": "化學組",
+            "math_scientific_computing": "數學與科學計算",
+            "data_science": "數據科學",
+            "math_education": "數學教育",
+        }
+        program = names.get(record.get("program_slug"), str(record.get("program") or "未命名系所"))
+        track = tracks.get(record.get("track_slug"))
+        target_marker = {
+            "double_major_target": "雙主修目標",
+            "minor_target": "輔系目標",
+        }.get(record.get("kind"), "主修")
+        return f"{record.get('version', '未知')}｜{target_marker}｜{program}{f'（{track}）' if track else ''}"
+
+    # 4. Citation fallback for remaining patterns
+    formatted = format_handbook_citation(curriculum_id)
+    if formatted and formatted != raw_str and ":" not in formatted:
+        return formatted
+
+    # 5. Cleaned text fallback
+    cleaned = clean_student_facing_text(curriculum_id)
+    if (
+        cleaned
+        and cleaned != raw_str
+        and ":" not in cleaned
+        and not cleaned.startswith(("uuid:", "custom:", "自訂／待確認項目", "自訂課程項目"))
+        and not any(code in cleaned for code in ("REQUIREMENT_", "APPLICATION:", "SEARCH_"))
+    ):
+        return cleaned
+
+    # 6. Default fallback for any remaining colon, uuid, custom, or ascii slug
+    if (
+        ":" in raw_str
+        or raw_str.startswith(("uuid:", "custom:"))
+        or any(char.isascii() and char.isalpha() for char in raw_str)
+    ):
+        return "自訂／待確認課表"
+
+    return raw_str or "自訂／待確認課表"
+
 
 
 def _curriculum_years(kind):

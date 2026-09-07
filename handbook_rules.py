@@ -959,24 +959,38 @@ def get_credit_requirements(program="單主修", target_dept="", handbook_year=N
     return requirements
 
 
+_SEQUENCE_NUMERAL_MAP = {
+    "I": "一", "II": "二", "III": "三", "IV": "四", "V": "五", "VI": "六",
+    "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六",
+    "一": "一", "二": "二", "三": "三", "四": "四", "五": "五", "六": "六",
+}
+
+
 def normalize_course_name(name):
     """Normalize typography only; never erase semantic course identity.
 
-    NFKC safely aligns full-width punctuation and Unicode Roman glyphs.  The
-    sequence suffix, words such as ``實驗``/``含實驗``, and course subtitles
-    are otherwise preserved.  In particular, ``微積分`` remains distinct from
-    ``微積分(I)`` and ``微積分(II)``.
+    NFKC safely aligns full-width punctuation and Unicode Roman glyphs.
+    Parenthesized Roman numerals (I)~(VI) and Arabic numerals (1)~(6)
+    are standardized to Chinese numerals (一)~(六).  The sequence suffix,
+    words such as ``實驗``/``含實驗``, and course subtitles are otherwise
+    preserved.  In particular, ``微積分`` remains distinct from ``微積分(一)``.
     """
     if not name:
         return ""
     value = unicodedata.normalize("NFKC", str(name)).strip()
-    value = value.replace("：", ":")
-    value = re.sub(r"\[(?:◇|※|◎|§|▲|╳)\]", "", value)
+    value = value.replace("：", ":").replace("﹕", ":")
+    value = re.sub(r"\[?(?:◇|※|◎|§|▲|╳)\]?", "", value)
+    value = re.sub(r"^[◇※◎§▲╳★●■□◆☆]\s*", "", value)
     value = re.sub(r"\s+", "", value)
-    value = value.replace("英文(I)", "英文(一)").replace("英文(II)", "英文(二)").replace("英文(III)", "英文(三)")
-    value = value.replace("國文(I)", "國文(一)").replace("國文(II)", "國文(二)")
+
+    def _seq_repl(match):
+        token = match.group(1).upper()
+        chinese = _SEQUENCE_NUMERAL_MAP.get(token, token)
+        return f"({chinese})"
+
+    value = re.sub(r"\((I{1,3}|IV|V|VI|[1-6]|[一二三四五六])\)", _seq_repl, value, flags=re.IGNORECASE)
     value = re.sub(r"^(英文\([一二三]\))[:-].*", r"\1", value)
-    value = re.sub(r"\((?![IVXivx])[A-Za-z甲乙丙丁]\)$", "", value)
+    value = re.sub(r"\((?![IVXivx一二三四五六])[A-Za-z甲乙丙丁]\)$", "", value)
     if re.fullmatch(r"[\d./%]+", value):
         return ""
     if not re.search(r"[\u4e00-\u9fffA-Za-z]", value) and re.search(r"\d", value):

@@ -309,9 +309,6 @@ def _pool_course_entry(
             "common_elective",
             "domain_elective",
             "department_professional",
-            "common_alternative_1",
-            "common_alternative_2",
-            "common_alternative_3",
         },
         "apc": {
             "apc_common_compulsory",

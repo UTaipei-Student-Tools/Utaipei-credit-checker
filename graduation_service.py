@@ -54,8 +54,15 @@ from application_resolution import (
     resolve_minor_application_case,
     resolve_minor_award,
 )
-from curriculum_registry import get_curriculum, resolve_rule_context
+from curriculum_registry import (
+    _program_slug,
+    _track_slug,
+    get_curriculum,
+    list_curriculum_ids,
+    resolve_rule_context,
+)
 from decision_snapshot import DecisionSnapshot
+from handbook_rules import normalize_course_name
 from input_confirmation import (
     ConfirmationState,
     CourseConfirmation,
@@ -176,9 +183,12 @@ def _is_double_request(request: EvaluationRequest) -> bool:
 
 
 def _course_label(value: Any) -> str:
-    """Normalize punctuation/spacing only; never perform fuzzy matching."""
+    """Normalize punctuation/spacing and numerals; never perform fuzzy matching."""
 
-    return re.sub(r"\s+", "", _text(value)).replace("（", "(").replace("）", ")").casefold()
+    text = _text(value)
+    if not text:
+        return ""
+    return normalize_course_name(text).casefold()
 
 
 def _safe_provenance(record: Any, *, requirement_id: str = "", scope: str = "") -> dict[str, Any]:
@@ -1478,8 +1488,9 @@ def _context_request(request: EvaluationRequest, primary: Mapping[str, Any] | No
         "application_year": request.application_year,
         "application_semester": request.application_semester,
     }
-    if request.target_version:
-        result["target_curriculum_version"] = request.target_version
+    effective_target_version = request.target_version or _text((target or {}).get("curriculum_id"))
+    if effective_target_version:
+        result["target_curriculum_version"] = effective_target_version
     if request.target_curriculum_year:
         result["target_curriculum_year"] = request.target_curriculum_year
     if request.target_curriculum_evidence_id:
@@ -3465,7 +3476,7 @@ def _compile_attempts(
         identity = UNKNOWN
         row_kind, row_component_unspecified = row_component(row.course_type)
         row_credits = _positive_number(row.credits)
-        code_candidates = catalog_by_code.get(course_code, ()) if course_code else catalog_by_name.get((label, row_credits), ())
+        code_candidates = (catalog_by_code.get(course_code, ()) if course_code else ()) or catalog_by_name.get((label, row_credits), ())
         matching_candidates: list[tuple[Mapping[str, Any], str]] = []
         candidate_by_key: dict[tuple[Any, ...], Mapping[str, Any]] = {}
         for meta in code_candidates:
@@ -3570,10 +3581,22 @@ def _compile_attempts(
                 public_evidence = PublicCourseEvidence(reasons=("PUBLIC_CATALOG_UNAVAILABLE",))
         else:
             public_evidence = PublicCourseEvidence(reasons=("PUBLIC_CATALOG_UNAVAILABLE",))
+        if len(matching_candidates) > 1:
+            distinct_kinds = {c[1] for c in matching_candidates}
+            if len(distinct_kinds) == 1:
+                req_candidates = [c for c in matching_candidates if c[0].get("requirement_id")]
+                if req_candidates:
+                    matching_candidates = [req_candidates[0]]
+                else:
+                    matching_candidates = [matching_candidates[0]]
         if len(matching_candidates) == 1:
             identity = VERIFIED
             resolved_kind = matching_candidates[0][1]
             resolved_meta = matching_candidates[0][0]
+        elif len(matching_candidates) == 0 and public_evidence.public_identity_state == PUBLIC_VERIFIED:
+            identity = VERIFIED
+            resolved_kind = row_kind if row_kind in {"LECTURE", "LAB", "COMBINED"} else "LECTURE"
+            resolved_meta = None
         else:
             # Multiple exact candidates (especially candidates with different
             # components) are not safe to resolve by input order.
@@ -3595,16 +3618,21 @@ def _compile_attempts(
             course_kind = resolved_kind
         else:
             course_kind = UNKNOWN
-        resolved_course_id = _text((resolved_meta or {}).get("course_id")) or course_code or course_name
+        resolved_course_id = _text((resolved_meta or {}).get("course_id")) or public_evidence.official_course_code or course_code or course_name
         resolved_pool_ids = tuple(
-            _text(item)
-            for item in ((resolved_meta or {}).get("pool_ids", ()))
-            if _text(item)
+            dict.fromkeys(
+                _text(item)
+                for item in (
+                    *((resolved_meta or {}).get("pool_ids", ())),
+                    *(public_evidence.verified_memberships if identity == VERIFIED else ()),
+                )
+                if _text(item)
+            )
         )
         resolved_pool_state = (
             _evidence((resolved_meta or {}).get("pool_evidence_state") or (resolved_meta or {}).get("evidence_state"))
             if resolved_meta
-            else UNKNOWN
+            else (VERIFIED if resolved_pool_ids and identity == VERIFIED else UNKNOWN)
         )
         membership_meta = resolved_meta
         if math_secondary_scope:
@@ -4792,6 +4820,19 @@ def evaluate(
     is_minor = secondary_kind == "minor"
     is_double = secondary_kind == "double_major"
     target_candidate = request.target_version
+    if not target_candidate and (is_minor or is_double):
+        year = request.target_curriculum_year or request.admission_cohort
+        prog = _program_slug(request.target_program)
+        track = _track_slug(request.target_track, prog)
+        if year and prog:
+            candidate_id = (
+                f"minor:{year}:{prog}:{track}" if (is_minor and track)
+                else f"minor:{year}:{prog}" if is_minor
+                else f"target:double_major:{year}:{prog}:{track}" if track
+                else f"target:double_major:{year}:{prog}"
+            )
+            if candidate_id in list_curriculum_ids():
+                target_candidate = candidate_id
     target_prefixes = ("minor:",) if is_minor else ("target:",) if is_double else ()
     if target_candidate and target_prefixes and target_candidate.startswith(target_prefixes):
         try:

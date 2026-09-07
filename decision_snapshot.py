@@ -352,7 +352,12 @@ def _public_source_reference(value: Any) -> Any:
     text = _text(value)
     if not text:
         return ""
-    if text in _PUBLIC_SOURCE_REFERENCES:
+    if (
+        text in _PUBLIC_SOURCE_REFERENCES
+        or text.startswith("handbook:")
+        or text.startswith("official:")
+        or text.startswith("catalog:")
+    ):
         return text
     return _public_opaque_id(text, namespace="evidence")
 
@@ -954,8 +959,8 @@ def _attempt_allocation_plain(item: Any) -> dict[str, Any]:
     }
 
 
-def _requirement_result_plain(item: Any) -> dict[str, Any]:
-    return {
+def _requirement_result_plain(item: Any, name: str = "") -> dict[str, Any]:
+    res = {
         "requirement_id": _text(item.requirement_id),
         "status": _text(item.status),
         "required_credits": str(item.required_credits),
@@ -968,6 +973,10 @@ def _requirement_result_plain(item: Any) -> dict[str, Any]:
         "waived": bool(item.waived),
         "blockers": tuple(_text(blocker) for blocker in item.blockers),
     }
+    req_name = name or _text(getattr(item, "name", ""))
+    if req_name:
+        res["name"] = req_name
+    return res
 
 
 def _shared_ledger_plain(item: Any) -> dict[str, Any]:
@@ -1007,7 +1016,11 @@ def _alternative_plain(signature: Any) -> Any:
     return str(signature)
 
 
-def _allocation_plain(allocation: AllocationResult) -> dict[str, Any]:
+def _allocation_plain(allocation: AllocationResult, requirements: Sequence[Any] = ()) -> dict[str, Any]:
+    req_names = {
+        _text(getattr(r, "requirement_id", None) or getattr(r, "id", None)): _text(getattr(r, "name", None))
+        for r in requirements
+    }
     return {
         "status": allocation.status,
         "source_earned_credits": str(allocation.source_earned_credits),
@@ -1016,7 +1029,10 @@ def _allocation_plain(allocation: AllocationResult) -> dict[str, Any]:
         "unallocated_credits": str(allocation.unallocated_credits),
         "credit_conservation": bool(allocation.credit_conservation),
         "allocations": tuple(_attempt_allocation_plain(item) for item in allocation.allocations),
-        "requirement_results": tuple(_requirement_result_plain(item) for item in allocation.requirement_results),
+        "requirement_results": tuple(
+            _requirement_result_plain(item, req_names.get(_text(item.requirement_id), ""))
+            for item in allocation.requirement_results
+        ),
         "shadow_allocations": tuple(_portion_plain(item) for item in allocation.shadow_allocations),
         "shared_ledgers": tuple(_shared_ledger_plain(item) for item in allocation.shared_ledgers),
         "binding_assessments": tuple(_binding_assessment_plain(item) for item in allocation.binding_assessments),
@@ -1382,7 +1398,7 @@ class DecisionSnapshot:
                 "remediation_suggestions": self.remediation_suggestions,
                 "non_credit_results": _thaw(self.non_credit_results),
                 "subset_results": _thaw(self.subset_results),
-                "allocation": _allocation_plain(self.allocation),
+                "allocation": _allocation_plain(self.allocation, self.requirements),
                 # Keep the old scalar alias for existing adapters while the
                 # nested allocation object becomes the canonical payload.
                 "allocation_status": self.allocation.status,
