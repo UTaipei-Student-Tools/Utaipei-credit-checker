@@ -100,22 +100,24 @@ def _format_target_requirement_label(
 ) -> str:
     """Format target requirement into clean human-readable Traditional Chinese."""
     if target_record and isinstance(target_record, Mapping):
-        category = target_record.get("category") or target_record.get("requirement_type") or ""
-        rname = target_record.get("name") or target_name
+        category = clean_student_facing_text(target_record.get("category") or target_record.get("requirement_type") or "")
+        rname = clean_student_facing_text(target_record.get("name") or target_record.get("target_requirement_name") or target_name)
         if category and rname:
             return f"{category}（{rname}）"
-        if category:
-            return str(category)
-        if rname:
-            return str(rname)
+        return str(category or rname or default_label)
 
-    clean_name = str(target_name or "").strip()
+    raw_name = str(target_name or "").strip()
+    clean_name = clean_student_facing_text(raw_name)
     raw = str(target_id or "").strip()
 
-    if not raw and clean_name:
-        return clean_name
     if not raw:
+        return clean_name or default_label
+    if "REQUIREMENT_DEFICIT" in raw:
+        return "尚缺學分，請依系所規定選修"
+    if raw.startswith(("REQUIREMENT_", "APPLICATION:", "SEARCH_", "WAIVER_")):
         return default_label
+    if raw.startswith(("uuid:", "custom:")):
+        return clean_name or default_label
 
     # Dotted requirement patterns: e.g. apc.dm.115.chemistry.calculus_1
     if raw.startswith("apc.dm.") or "apc.dm" in raw:
@@ -137,13 +139,11 @@ def _format_target_requirement_label(
                 return f"{citation}（{clean_name}）"
             return citation
         # Unmapped colon pattern, uuid, custom scheme, etc.
-        if clean_name:
-            return f"{default_label}（{clean_name}）"
-        return default_label
+        return f"{default_label}（{clean_name}）" if clean_name else default_label
 
     # Fallback to cleaned text if it does not contain machine symbols
     cleaned = clean_student_facing_text(raw)
-    if cleaned and cleaned != raw and ":" not in cleaned and not any(k in cleaned for k in ("apc.", "uuid:", "custom:")):
+    if cleaned and cleaned != raw and ":" not in cleaned and not any(k in cleaned for k in ("apc.", "uuid:", "custom:", ".")):
         if clean_name and clean_name not in cleaned:
             return f"{cleaned}（{clean_name}）"
         return cleaned

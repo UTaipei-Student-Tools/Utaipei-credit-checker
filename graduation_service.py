@@ -3189,8 +3189,6 @@ def _compile_attempts(
                 membership = policy_category_memberships.get(category)
                 if membership:
                     aliases[membership].update(pool_ids)
-            if "science_college" in memberships:
-                aliases["science_college"].update(pool_ids)
             if _course_label(meta.get("pool_bucket")) == "physical_education":
                 aliases["university_physical_education_completion"].update(pool_ids)
         return {key: tuple(sorted(values)) for key, values in aliases.items() if values}
@@ -3279,6 +3277,12 @@ def _compile_attempts(
                     previous = explicit_pool_evidence.get(pool_key)
                     if previous is None or (previous[0] != VERIFIED and state == VERIFIED):
                         explicit_pool_evidence[pool_key] = (state, source, kind)
+        if resolved_meta:
+            meta_source = _text(resolved_meta.get("membership_source_reference") or resolved_meta.get("source_reference"))
+            meta_state = _evidence(resolved_meta.get("pool_evidence_state") or resolved_meta.get("evidence_state"))
+            for m_id in _policy_values(resolved_meta.get("membership_ids")):
+                if m_id and meta_source:
+                    explicit_pool_evidence[m_id] = (meta_state, meta_source, "catalog")
         for item in public_evidence.pool_membership_evidence:
             if not isinstance(item, Sequence) or len(item) < 4:
                 continue
@@ -3581,6 +3585,62 @@ def _compile_attempts(
                 public_evidence = PublicCourseEvidence(reasons=("PUBLIC_CATALOG_UNAVAILABLE",))
         else:
             public_evidence = PublicCourseEvidence(reasons=("PUBLIC_CATALOG_UNAVAILABLE",))
+        # Bridge AST inferred_category or bracket prefix tags for General Education
+        inferred_cat = _text(row_dict.get("inferred_category"))
+        if not inferred_cat:
+            prefix_tag = _text(row_dict.get("prefix_tag"))
+            if not prefix_tag:
+                m_tag = re.match(r"^(\[[^\]]+\])", _text(row_dict.get("raw_name") or row_dict.get("course_name")))
+                if m_tag:
+                    prefix_tag = m_tag.group(1)
+            if prefix_tag:
+                if "自然" in prefix_tag or "科技" in prefix_tag:
+                    inferred_cat = "自然、生命與科技領域"
+                elif "藝術" in prefix_tag or "美感" in prefix_tag:
+                    inferred_cat = "藝術與美感領域"
+                elif "人文" in prefix_tag:
+                    inferred_cat = "人文與文化思考領域"
+                elif "公民" in prefix_tag or "社會" in prefix_tag:
+                    inferred_cat = "公民素養與社會探索領域"
+                elif "共同選修" in prefix_tag:
+                    inferred_cat = "共同選修"
+                elif "校共同" in prefix_tag or "校定必修" in prefix_tag:
+                    inferred_cat = "校共同必修"
+
+        category_to_membership = {
+            "自然、生命與科技領域": "ge_nature",
+            "自然、生命與科技": "ge_nature",
+            "藝術與美感領域": "ge_art",
+            "藝術與美感": "ge_art",
+            "人文與文化思考領域": "ge_humanities",
+            "人文與文化思考": "ge_humanities",
+            "公民素養與社會探索領域": "ge_civic",
+            "公民素養與社會探索": "ge_civic",
+            "共同選修": "ge_common_elective",
+            "通識共同選修": "ge_common_elective",
+            "校共同必修": "university_compulsory",
+            "校定必修": "university_compulsory",
+        }
+        ge_membership_key = category_to_membership.get(inferred_cat)
+        target_ge_pools = public_pool_membership_ids.get(ge_membership_key, ()) if ge_membership_key else ()
+        if ge_membership_key and target_ge_pools:
+            new_verified = set(public_evidence.verified_memberships)
+            new_verified.add(ge_membership_key)
+            new_verified.add("university_common_excluded_from_free")
+            new_verified.update(target_ge_pools)
+            new_evidence = list(public_evidence.pool_membership_evidence)
+            for pid in target_ge_pools:
+                new_evidence.append((pid, VERIFIED, "transcript_inferred_tag", "public_catalog"))
+            new_evidence.append((ge_membership_key, VERIFIED, "transcript_inferred_tag", "public_catalog"))
+            new_evidence.append(("university_common_excluded_from_free", VERIFIED, "transcript_inferred_tag", "public_catalog"))
+            public_evidence = replace(
+                public_evidence,
+                public_identity_state=PUBLIC_VERIFIED,
+                official_category=inferred_cat,
+                official_category_state=PUBLIC_VERIFIED,
+                verified_memberships=tuple(dict.fromkeys(sorted(new_verified))),
+                pool_membership_evidence=tuple(dict.fromkeys(new_evidence)),
+            )
         if len(matching_candidates) > 1:
             distinct_kinds = {c[1] for c in matching_candidates}
             if len(distinct_kinds) == 1:
@@ -3593,7 +3653,7 @@ def _compile_attempts(
             identity = VERIFIED
             resolved_kind = matching_candidates[0][1]
             resolved_meta = matching_candidates[0][0]
-        elif len(matching_candidates) == 0 and public_evidence.public_identity_state == PUBLIC_VERIFIED:
+        elif len(matching_candidates) == 0 and len(candidate_by_key) == 0 and public_evidence.public_identity_state == PUBLIC_VERIFIED:
             identity = VERIFIED
             resolved_kind = row_kind if row_kind in {"LECTURE", "LAB", "COMBINED"} else "LECTURE"
             resolved_meta = None
@@ -3618,13 +3678,14 @@ def _compile_attempts(
             course_kind = resolved_kind
         else:
             course_kind = UNKNOWN
-        resolved_course_id = _text((resolved_meta or {}).get("course_id")) or public_evidence.official_course_code or course_code or course_name
+        resolved_course_id = _text((resolved_meta or {}).get("course_id")) or (public_evidence.official_course_code if identity == VERIFIED else "") or course_code or course_name
         resolved_pool_ids = tuple(
             dict.fromkeys(
                 _text(item)
                 for item in (
                     *((resolved_meta or {}).get("pool_ids", ())),
                     *(public_evidence.verified_memberships if identity == VERIFIED else ()),
+                    *(target_ge_pools if (ge_membership_key and identity == VERIFIED) else ()),
                 )
                 if _text(item)
             )
@@ -5050,7 +5111,13 @@ def evaluate(
     # shown even when another equally valid assignment remains.
     search_unresolved = not allocation.search_complete and not allocation.feasible_witness
     primary_allocation_uncertain = search_unresolved or scope_allocation_uncertain(primary_requirement_ids)
-    target_allocation_uncertain = search_unresolved or scope_allocation_uncertain(target_requirement_ids)
+    target_all_satisfied = bool(target_requirement_ids) and all(
+        item.status == PASS for item in allocation.requirement_results if item.requirement_id in target_requirement_ids
+    )
+    target_allocation_uncertain = (
+        scope_allocation_uncertain(target_requirement_ids)
+        or (search_unresolved and not target_all_satisfied)
+    )
     allocation_uncertain = (
         search_unresolved
         or primary_allocation_uncertain

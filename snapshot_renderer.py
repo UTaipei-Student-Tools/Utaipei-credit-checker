@@ -2923,20 +2923,24 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
     primary_subtext = f"必修進度 · 尚有 {todo_count} 項待辦"
 
     # 5. 雙主修進度
+    req_obj = getattr(snapshot, "request", {}) or {}
+    if not isinstance(req_obj, Mapping):
+        req_obj = {}
     context_obj = view.get("context") if isinstance(view.get("context"), Mapping) else {}
-    sec_kind = _text(context_obj.get("secondary_kind")).lower()
+    sec_kind = _text(req_obj.get("secondary_kind") or context_obj.get("secondary_kind")).lower()
     decisions = view.get("decisions") if isinstance(view.get("decisions"), Mapping) else {}
     dm_decision = decisions.get("double_major_qualification") or decisions.get("formal_double_major_award") or {}
     dm_decision_status = _text(dm_decision.get("status")) if isinstance(dm_decision, Mapping) else ""
     dm_status = summary.get("double_major_status") or dm_decision_status or "NOT_APPLICABLE"
-    dm_progress = view.get("statistics", {}).get("program_progress", {}).get("double_major", {})
+    stats_obj = getattr(snapshot, "statistics", None) or view.get("statistics", {}) or {}
+    dm_progress = (stats_obj.get("program_progress") or {}).get("double_major", {})
     target_reqs = [
         r for r in view.get("requirements", ())
         if _text(r.get("requirement_id")).startswith("target:") or "雙主修" in _text(r.get("kind")) or "雙主修" in _text(r.get("name"))
     ]
     is_dm = (
-        sec_kind in {"double_major", "doublemajor"}
-        or dm_status not in {"NOT_APPLICABLE", "不適用", ""}
+        sec_kind in {"double_major", "doublemajor", "雙主修"}
+        or (sec_kind not in {"minor", "輔系", ""} and dm_status not in {"NOT_APPLICABLE", "不適用", ""})
         or len(target_reqs) > 0
     )
     if is_dm:
@@ -2952,7 +2956,7 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         else:
             double_major_display = _public_status_label(dm_status)
         double_major_subtext = f"審查：{_public_status_label(dm_status)}"
-    elif sec_kind == "minor" or summary.get("minor_application_status") not in {"NOT_APPLICABLE", "不適用", ""}:
+    elif sec_kind in {"minor", "輔系"}:
         double_major_display = "輔系修習中"
         double_major_subtext = "未加修雙主修"
     else:

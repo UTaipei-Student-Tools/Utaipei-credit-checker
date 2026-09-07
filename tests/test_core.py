@@ -109,8 +109,8 @@ body { font-size: 10pt; }
 <tr><td>姓名：陳柏亘  學號：U11310022  入學年月：113年09月</td></tr>
 </table>
 <div>113學年</div>
-<table>
-<tr><td>微積分(I)</td><td>必</td><td>3</td><td>68</td></tr>
+<table style="width:250px">
+<tr><td style="width:145px">微積分(I)</td><td style="width:30px">必</td><td style="width:25px">3</td><td style="width:35px">68</td></tr>
 </table>"""
         page.insert_htmlbox(fitz.Rect(20, 20, 590, 780), html)
         pdf_bytes = document.tobytes()
@@ -436,7 +436,7 @@ class EngineTests(unittest.TestCase):
                     )
                     target_names = [c["name"] for c in report["target"]["compulsory_courses"]]
                     target_names += [c["name"] for c in report["target"]["elective_courses"]]
-                    self.assertEqual(target_names, [name])
+                    self.assertEqual(target_names, [normalize_course_name(name)])
 
             apc = rules["apc_rules"]
             for name, credit_value in apc["basic_core"].items():
@@ -518,7 +518,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0].identity_status, "VERIFIED")
         self.assertEqual(attempts[0].course_kind, "LECTURE")
-        self.assertIn("ge_art", attempts[0].resolved_pool_ids)
+        self.assertIn("ge_art", attempts[0].pool_ids)
         self.assertTrue(
             any(
                 item[0] == "pool:ge_art" and item[1] == "VERIFIED"

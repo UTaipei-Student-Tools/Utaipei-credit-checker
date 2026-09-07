@@ -670,9 +670,13 @@ def _pool_membership_records(
 _CATEGORY_MEMBERSHIP = {
     "國文類": "university_compulsory",
     "英文類": "university_compulsory",
+    "藝術與美感": "ge_art",
     "藝術與美感領域": "ge_art",
+    "人文與文化思考": "ge_humanities",
     "人文與文化思考領域": "ge_humanities",
+    "公民素養與社會探索": "ge_civic",
     "公民素養與社會探索領域": "ge_civic",
+    "自然、生命與科技": "ge_nature",
     "自然、生命與科技領域": "ge_nature",
     "共同選修": "ge_common_elective",
     "共同必修": "university_compulsory",
@@ -683,9 +687,13 @@ _EXCLUDED_FROM_FREE = frozenset(
         "國文類",
         "英文類",
         "體育類",
+        "藝術與美感",
         "藝術與美感領域",
+        "人文與文化思考",
         "人文與文化思考領域",
+        "公民素養與社會探索",
         "公民素養與社會探索領域",
+        "自然、生命與科技",
         "自然、生命與科技領域",
         "共同選修",
         "共同必修",
@@ -1226,8 +1234,11 @@ def resolve_public_evidence(
         category_state, official_category = _property_state([_text(item.get("official_category")) for item in candidates])
         college_state, official_college = _property_state([_text(item.get("college")) for item in candidates])
         department_state, department_unit = _property_state([_text(item.get("department_unit")) for item in candidates])
-        if tagged_category and category_state == VERIFIED and official_category != tagged_category:
-            category_state, official_category = CONFLICTED, ""
+        if tagged_category and category_state == VERIFIED:
+            norm_tagged = tagged_category.replace("領域", "")
+            norm_official = official_category.replace("領域", "")
+            if norm_official != norm_tagged:
+                category_state, official_category = CONFLICTED, ""
         reasons = []
     if public_identity_state != VERIFIED:
         reasons.append("PUBLIC_CATALOG_IDENTITY_CONFLICT")

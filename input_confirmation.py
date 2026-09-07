@@ -36,6 +36,11 @@ COURSE_FIELD_ALLOWLIST = frozenset(
         "attempt_group",
         "department",
         "course_type",
+        "raw_name",
+        "prefix_tag",
+        "clean_name",
+        "normalized_name",
+        "inferred_category",
     }
 )
 
@@ -136,11 +141,16 @@ class NormalizedCourseRow:
     attempt_group: str = ""
     department: str = ""
     course_type: str = ""
+    raw_name: str = ""
+    prefix_tag: str = ""
+    clean_name: str = ""
+    normalized_name: str = ""
+    inferred_category: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Return a plain safe copy for adapters and presentation code."""
 
-        return {
+        data = {
             "course_code": self.course_code,
             "course_name": self.course_name,
             "credits": self.credits,
@@ -154,6 +164,11 @@ class NormalizedCourseRow:
             "department": self.department,
             "course_type": self.course_type,
         }
+        for field in ("raw_name", "prefix_tag", "clean_name", "normalized_name", "inferred_category"):
+            val = getattr(self, field, "")
+            if val:
+                data[field] = val
+        return data
 
 
 @dataclass(frozen=True)
@@ -271,6 +286,11 @@ _TEXT_FIELDS = frozenset(
         "attempt_group",
         "department",
         "course_type",
+        "raw_name",
+        "prefix_tag",
+        "clean_name",
+        "normalized_name",
+        "inferred_category",
     }
 )
 
@@ -321,7 +341,7 @@ def _fingerprint_payload(rows: Iterable[NormalizedCourseRow]) -> list[dict[str, 
     payload = [row.as_dict() for row in rows]
     return sorted(
         payload,
-        key=lambda item: tuple(item[field] for field in sorted(COURSE_FIELD_ALLOWLIST)),
+        key=lambda item: tuple(item.get(field, "") for field in sorted(COURSE_FIELD_ALLOWLIST)),
     )
 
 
@@ -388,7 +408,7 @@ def _normalize_one(row: Mapping[object, object], row_index: int) -> tuple[Normal
     if status is None:
         diagnostics.append(_diagnostic("INVALID_STATUS", row_index, "status"))
         status = "UNKNOWN"
-    elif status in {"FAILED", "WITHDRAWN", "NOT_TAKEN", "WAIVED"} and earned_credits:
+    elif status in {"FAILED", "WITHDRAWN", "NOT_TAKEN", "WAIVED", "IN_PROGRESS"} and earned_credits:
         diagnostics.append(_diagnostic("STATUS_EARNED_CREDITS_CONFLICT", row_index, "earned_credits"))
 
     term = text_field("term")
@@ -413,6 +433,11 @@ def _normalize_one(row: Mapping[object, object], row_index: int) -> tuple[Normal
         attempt_group=values["attempt_group"],
         department=values["department"],
         course_type=values["course_type"],
+        raw_name=values["raw_name"],
+        prefix_tag=values["prefix_tag"],
+        clean_name=values["clean_name"],
+        normalized_name=values["normalized_name"],
+        inferred_category=values["inferred_category"],
     )
     return normalized, diagnostics
 
@@ -447,7 +472,7 @@ def normalize_course_rows(records: Iterable[Mapping[object, object]]) -> Normali
 
     seen: set[tuple[Any, ...]] = set()
     for row_index, row in enumerate(normalized_rows):
-        identity = tuple(row.as_dict()[field] for field in sorted(COURSE_FIELD_ALLOWLIST))
+        identity = tuple(row.as_dict().get(field, "") for field in sorted(COURSE_FIELD_ALLOWLIST))
         if identity in seen:
             diagnostics.append(_diagnostic("DUPLICATE_EXACT_ROW", row_index, "course"))
         seen.add(identity)

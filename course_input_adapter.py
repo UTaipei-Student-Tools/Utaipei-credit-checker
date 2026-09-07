@@ -23,6 +23,7 @@ from numbers import Real
 from typing import Any
 
 from allocation_engine import normalize_course_kind
+from handbook_rules import normalize_course_name
 from input_confirmation import (
     COURSE_FIELD_ALLOWLIST,
     ConfirmationState,
@@ -39,7 +40,7 @@ _EARNED_KEYS = ("earned_credits", "posted_earned_credits", "transfer_earned_cred
 _TERM_KEYS = ("term", "修課學期")
 _YEAR_KEYS = ("academic_year", "year", "修課學年")
 _SEMESTER_KEYS = ("semester", "學期")
-_NAME_KEYS = ("course_name", "name", "title", "raw_name", "科目名稱")
+_NAME_KEYS = ("course_name", "normalized_name", "clean_name", "name", "title", "raw_name", "科目名稱")
 _CODE_KEYS = ("course_code", "code", "課程代碼", "課號")
 _COMPONENT_TYPE_KEYS = ("component_type", "lecture_or_lab", "component")
 _TYPE_KEYS = ("course_type", "type", "課程類別")
@@ -307,7 +308,39 @@ def _legacy_row_to_attempts(
     if component_conflict:
         diagnostics.append(_diagnostic("CONFLICTING_COMPONENT_METADATA", row_index, "course_type"))
     department = _text(_first(row, _DEPARTMENT_KEYS, ""))
-    group = _attempt_group(code, name, course_type)
+    raw_name_val = _text(row.get("raw_name") or row.get("raw_title") or name)
+    prefix_tag_val = _text(row.get("prefix_tag") or row.get("bracket_tag") or "")
+    if not prefix_tag_val and raw_name_val:
+        tag_m = re.match(r"^(\[[^\]]+\])", raw_name_val)
+        if tag_m:
+            prefix_tag_val = tag_m.group(1)
+    clean_name_val = _text(row.get("clean_name") or row.get("clean_title") or "")
+    if not clean_name_val:
+        clean_name_val = raw_name_val[len(prefix_tag_val):].strip() if prefix_tag_val else raw_name_val
+    normalized_name_val = _text(row.get("normalized_name") or row.get("normalized_title") or "")
+    if not normalized_name_val:
+        normalized_name_val = normalize_course_name(clean_name_val or name)
+    inferred_category_val = _text(row.get("inferred_category") or "")
+    if not inferred_category_val and prefix_tag_val:
+        if "自然" in prefix_tag_val:
+            inferred_category_val = "自然、生命與科技領域"
+        elif "藝術" in prefix_tag_val:
+            inferred_category_val = "藝術與美感領域"
+        elif "人文" in prefix_tag_val:
+            inferred_category_val = "人文與文化思考領域"
+        elif "公民" in prefix_tag_val:
+            inferred_category_val = "公民素養與社會探索領域"
+        elif "共同選修" in prefix_tag_val:
+            inferred_category_val = "共同選修"
+        elif "校共同" in prefix_tag_val or "校定必修" in prefix_tag_val:
+            inferred_category_val = "校共同必修"
+        elif "系必修" in prefix_tag_val or "系定必修" in prefix_tag_val:
+            inferred_category_val = "專業必修"
+        elif "系選修" in prefix_tag_val or "系定選修" in prefix_tag_val:
+            inferred_category_val = "專業選修"
+
+    resolved_name = normalized_name_val or clean_name_val or name
+    group = _attempt_group(code, resolved_name, course_type)
     attempts: list[dict[str, Any]] = []
 
     semester_specs = (
@@ -340,7 +373,7 @@ def _legacy_row_to_attempts(
             attempts.append(
                 {
                     "course_code": code,
-                    "course_name": name,
+                    "course_name": resolved_name,
                     "credits": credit,
                     "earned_credits": earned,
                     "status": status,
@@ -351,6 +384,11 @@ def _legacy_row_to_attempts(
                     "attempt_group": group,
                     "department": department,
                     "course_type": course_type,
+                    "raw_name": raw_name_val,
+                    "prefix_tag": prefix_tag_val,
+                    "clean_name": clean_name_val,
+                    "normalized_name": normalized_name_val,
+                    "inferred_category": inferred_category_val,
                 }
             )
         return attempts, diagnostics
@@ -382,7 +420,7 @@ def _legacy_row_to_attempts(
     attempts.append(
         {
             "course_code": code,
-            "course_name": name,
+            "course_name": resolved_name,
             "credits": credit,
             "earned_credits": earned,
             "status": status,
@@ -393,6 +431,11 @@ def _legacy_row_to_attempts(
             "attempt_group": group,
             "department": department,
             "course_type": course_type,
+            "raw_name": raw_name_val,
+            "prefix_tag": prefix_tag_val,
+            "clean_name": clean_name_val,
+            "normalized_name": normalized_name_val,
+            "inferred_category": inferred_category_val,
         }
     )
     return attempts, diagnostics

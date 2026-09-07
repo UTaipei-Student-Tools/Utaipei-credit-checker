@@ -47,6 +47,24 @@ _DOUBLE_MAJOR = "雙主修"
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 _RULES_PATH = os.path.join(_ROOT, "rules_config.json")
 
+
+def _cleanup_legacy_contaminated_handbooks() -> None:
+    try:
+        data_handbooks_dir = os.path.join(_ROOT, "data", "handbooks")
+        if os.path.isdir(data_handbooks_dir):
+            for name in os.listdir(data_handbooks_dir):
+                if "_應用化學組_" in name and "應用物理暨化學系" not in name:
+                    target_path = os.path.join(data_handbooks_dir, name)
+                    try:
+                        os.remove(target_path)
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+
+_cleanup_legacy_contaminated_handbooks()
+
 _HANDBOOK_URLS = {
     "111": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MemN4TDNCMFlWODVNREkyTWw4eE56STBPREZmT0RBNU5qY3VjR1Jt&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
     "112": "https://curr.utaipei.edu.tw/app/index.php?Action=downloadfile&file=WVhSMFlXTm9MelV5TDNCMFlWOHhNRFF3T1RKZk16YzNORGc0TVY4ek16ZzJOaTV3WkdZPQ==&fname=0054YSGHRK10PPXXTSZSTSYW14PKJDKKQO343510LP25LKQPZWROYSA43454QOUSSSPOCDYTVSPKDHDH&cg=5",
@@ -309,6 +327,9 @@ def _pool_course_entry(
             "common_elective",
             "domain_elective",
             "department_professional",
+            "common_alternative_1",
+            "common_alternative_2",
+            "common_alternative_3",
         },
         "apc": {
             "apc_common_compulsory",
