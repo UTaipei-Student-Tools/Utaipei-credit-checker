@@ -43,3 +43,5 @@ app (1).py
 gitattributes (1)
 gitattributes.txt
 gitignore
+# Streamlit Community Cloud uses requirements.txt; do not shadow it with uv.lock.
+/uv.lock
