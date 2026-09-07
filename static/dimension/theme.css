@@ -1,0 +1,142 @@
+/* Dimension by HTML5 UP (CC BY 3.0), adapted for native Streamlit controls.
+   Original background retained; forms and dialogs use Streamlit session state. */
+.stApp:has(.st-key-dimension_cover) {
+  background: linear-gradient(rgba(17,24,35,.48),rgba(17,24,35,.76)), url('data:image/jpeg;base64,__BACKGROUND__') center / cover fixed !important;
+}
+.stApp:has(.st-key-dimension_cover) [data-testid="stAppViewContainer"],
+.stApp:has(.st-key-dimension_cover) [data-testid="stMain"] { background: transparent !important; }
+.st-key-dimension_cover {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: clamp(24px,4vh,52px) 24px 28px;
+  color: #f4f6f7;
+  text-align: center;
+  animation: dimension-arrive .65s ease-out both;
+}
+.dimension-mark {
+  display: grid; place-items: center;
+  width: 88px; height: 88px;
+  margin: 0 auto 58px;
+  border: 1px solid #bec9ce;
+  border-radius: 50%;
+  font-size: 26px; letter-spacing: .08em; font-weight: 500;
+  position: relative;
+}
+.dimension-mark::after {
+  content: ''; position: absolute; top: 100%; left: 50%;
+  width: 1px; height: 59px; background: #a4b0b6;
+}
+.dimension-title { border-block: 1px solid #a4b0b6; padding: 38px 16px; }
+.dimension-title h1 {
+  color: #fff !important;
+  font-family: 'Noto Sans TC', sans-serif;
+  font-size: clamp(2rem,5vw,3.65rem) !important;
+  font-weight: 500 !important; letter-spacing: .12em;
+  line-height: 1.5; margin: 0 0 14px; padding: 0 !important;
+}
+.dimension-lead { font-size: 21px; color: #edf3f2; margin: 0 0 14px; }
+.dimension-description { font-size: 16px; color: #d3dcdf; line-height: 1.9; margin: 0; }
+.st-key-dimension_actions { margin: 30px auto 0; max-width: 420px; }
+.st-key-dimension_actions .stButton > button {
+  border: 1px solid #bdc9ca !important; border-radius: 4px !important;
+  background: transparent !important; color: #f4f6f7 !important;
+  min-height: 52px !important; transition: background .18s ease, color .18s ease;
+}
+.st-key-dimension_actions button:hover { background: #354b49 !important; color: #fff !important; }
+.st-key-dimension_actions button p { color: inherit !important; font-size: 16px; }
+.dimension-footer { margin-top: 44px; color: #d2d9dd; }
+.dimension-footer p { font-size: 13px; line-height: 1.8; margin: 0 0 12px; }
+.dimension-footer .dimension-credit, .dimension-credit a { color: #b8c7ce !important; font-size: 12px; }
+.dimension-credit a { text-underline-offset: 4px; }
+.stApp:has(.st-key-dimension_cover) [data-testid="stHeader"] { background: transparent !important; }
+.stApp:has(.st-key-dimension_cover) [data-testid="stHeader"] button { color: #fff !important; }
+.stApp:has(.st-key-dimension_cover) .block-container { padding-top: 2rem !important; }
+.stApp:has(.st-key-dimension_toolbar) .block-container { max-width: 1120px; }
+.st-key-dimension_toolbar { max-width: 300px; margin-left: auto; }
+.st-key-dimension_toolbar button { border-radius: 4px !important; min-height: 44px !important; }
+.stApp:has(.st-key-dimension_toolbar) .header-card {
+  background: transparent; border: 0; border-bottom: 1px solid var(--ui-border-strong);
+  border-radius: 0; box-shadow: none; padding: 18px 0 28px; margin-bottom: 24px;
+  display: block;
+}
+.stApp:has(.st-key-dimension_toolbar) .header-title { font-size: clamp(1.6rem,4vw,2.3rem); font-weight: 600; letter-spacing: .05em; }
+.stApp:has(.st-key-dimension_toolbar) [data-testid="stExpander"] {
+  border-radius: 12px !important; margin-bottom: 16px;
+}
+.stApp:has(.st-key-dimension_toolbar) [data-testid="stExpander"] summary { padding: 18px 22px; }
+.stApp:has(.st-key-dimension_toolbar) [data-testid="stExpanderDetails"] { padding: 12px 24px 24px; }
+html[data-utaipei-theme="light"] .stApp:has(.st-key-dimension_toolbar),
+html[data-utaipei-theme="light"] .stApp:has(.st-key-dimension_toolbar) [data-testid="stAppViewContainer"] {
+  --ui-canvas: #f3f5f2; --ui-canvas-raised: #edf1ed;
+  --ui-accent: #356858; --ui-accent-strong: #244d41;
+  --ui-accent-soft: #e4eee8; --ui-focus: #356858;
+  --ui-border: #dce3dc; --ui-border-strong: #b8c9bc;
+  --ui-text: #20332b; --ui-text-muted: #506458;
+}
+html[data-utaipei-theme="dark"] .stApp:has(.st-key-dimension_toolbar),
+html[data-utaipei-theme="dark"] .stApp:has(.st-key-dimension_toolbar) [data-testid="stAppViewContainer"] {
+  --ui-canvas: #151f24; --ui-canvas-raised: #1b282e;
+  --ui-surface: #1d2b31; --ui-surface-raised: #25363e; --ui-surface-soft: #25363e;
+  --ui-accent: #b3d7c4; --ui-accent-strong: #b3d7c4;
+  --ui-accent-soft: #304a43; --ui-focus: #b3d7c4;
+  --ui-border: #3d5359; --ui-border-strong: #708c91;
+}
+button:focus-visible, .dimension-credit a:focus-visible { outline: 3px solid #78ad97 !important; outline-offset: 4px; }
+@keyframes dimension-arrive { from { opacity: .5; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 600px) {
+  .st-key-dimension_cover { padding: 28px 8px 20px; }
+  .dimension-mark { width: 66px; height: 66px; margin-bottom: 38px; font-size: 22px; }
+  .dimension-mark::after { height: 39px; }
+  .dimension-title { padding: 30px 0; }
+  .dimension-title h1 { letter-spacing: .06em; }
+  .dimension-lead { font-size: 17px; }
+  .dimension-description { font-size: 14px; }
+  .st-key-dimension_actions [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 12px !important; }
+  .st-key-dimension_actions [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; width: auto !important; }
+  .dimension-footer { margin-top: 30px; }
+  .st-key-dimension_toolbar [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
+  .st-key-dimension_toolbar [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; }
+  .stApp:has(.st-key-dimension_toolbar) [data-testid="stExpanderDetails"] { padding: 8px 12px 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .st-key-dimension_cover { animation: none; } }
+
+/* Glass button adapted from the user's Uiverse.io / shokat_2650 snippet.
+   Scope to real Streamlit buttons; no all:unset, disabled or focus reset. */
+.st-key-dimension_toolbar button,
+.stApp:has(.st-key-dimension_toolbar) button[kind="primary"] {
+  position: relative; isolation: isolate;
+  border-radius: 999px !important;
+  box-shadow: inset 0 2px 3px #ffffff35, inset 0 -2px 2px #ffffff55, 0 8px 16px #00000025 !important;
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  transition: transform .25s ease, box-shadow .25s ease, background .25s ease;
+}
+.st-key-dimension_toolbar button {
+  background: linear-gradient(-75deg,#ffffff0d,#ffffff30,#ffffff0d) !important;
+}
+.st-key-dimension_toolbar button::after,
+.stApp:has(.st-key-dimension_toolbar) button[kind="primary"]::after {
+  content: ''; position: absolute; inset: -1px; padding: 1px;
+  border-radius: inherit; pointer-events: none;
+  background: conic-gradient(from var(--dimension-angle, -75deg),#ffffffaa,transparent 12% 38%,#ffffffaa 50%,transparent 62% 90%,#ffffffaa);
+  mask: linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  transition: --dimension-angle .4s ease;
+}
+.st-key-dimension_toolbar button::before {
+  content: ''; position: absolute; inset: 1px; border-radius: inherit;
+  pointer-events: none; z-index: -1;
+  background: linear-gradient(-45deg,transparent 30%,#ffffff32 45%,transparent 58%);
+  background-size: 220% 220%; background-position: 0 50%;
+  transition: background-position .4s ease;
+}
+.st-key-dimension_toolbar button:hover:not(:disabled) { transform: scale(.975); }
+.st-key-dimension_toolbar button:hover::before { background-position: 45% 50%; }
+.st-key-dimension_toolbar button:hover::after { --dimension-angle: -125deg; }
+.st-key-dimension_toolbar button:active:not(:disabled) { transform: perspective(600px) rotateX(12deg) scale(.97); }
+@media (prefers-reduced-motion: reduce) {
+  .stApp:has(.st-key-dimension_toolbar) button[kind="primary"], .st-key-dimension_toolbar button,
+  .st-key-dimension_toolbar button::before, .st-key-dimension_toolbar button::after { transition: none; transform: none !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .st-key-dimension_toolbar button { background: var(--ui-surface) !important; backdrop-filter: none; }
+}

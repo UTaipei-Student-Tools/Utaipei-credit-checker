@@ -1020,8 +1020,13 @@ def _render_analysis_state_marker(*, active: bool | None = None) -> None:
     )
 
 
-def main():
+def main(*, show_entrance=False):
     setup_page()
+    if show_entrance:
+        from welcome import render_entrance
+
+        if not render_entrance():
+            return
     render_header_card("北市大畢業通", "依入學年度規劃畢業、輔系與雙主修", landmark_id="main-content")
     sidebar_state = render_setup_panel()
     collapse_sidebar_if_needed()
@@ -1074,4 +1079,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(show_entrance=True)
