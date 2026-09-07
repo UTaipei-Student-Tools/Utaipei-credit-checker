@@ -7,29 +7,24 @@ __pycache__/
 .env
 venv/
 .venv/
+.venv-pwa-test/
 
-# Streamlit
+# Agents & Streamlit
+.agents/
 .streamlit/
-
-# macOS
-.DS_Store
-
-# Byte-compiled / optimized / DLL files
-*.egg-info/
-.eggs/
-*.egg
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Logs
 *.log
 
 # temporary files
 *.tmp
 *.temp
+tmp/
+.test-tmp/
+tests/tmp/
+test_tmp/
 utaipei-transcript-*.pdf
 student_transcript*.pdf
+transcript*.pdf
+student*.pdf
 *_export.csv
 
 # Local credentials and Streamlit secrets
@@ -37,6 +32,10 @@ student_transcript*.pdf
 
 # Hugging Face
 *.hf
+HF資訊.txt
+校務登入測試.txt
+credit_map_v24_new.html
+學生手冊/
 
 # Duplicate local files
 README (1).md

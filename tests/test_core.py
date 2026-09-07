@@ -2,6 +2,7 @@ import unittest
 
 from credit_engine import evaluate_graduation, find_and_consume_course
 from handbook_rules import (
+    get_apc_target_requirements,
     get_available_handbook_years,
     get_credit_requirements,
     get_rule_sets,
@@ -9,11 +10,10 @@ from handbook_rules import (
     validate_rule_collisions,
 )
 from pdf_parser import build_course_dict, parse_transcript_pdf
-from schedule_parser import merge_schedule_courses, parse_schedule_html
 
 
-def course(name, credit=2, score="80", course_type="選"):
-    return build_course_dict(name, course_type, str(credit), score, "", "", "114")
+def course(name, credit=2, score="80", course_type="選", academic_year="114"):
+    return build_course_dict(name, course_type, str(credit), score, "", "", academic_year)
 
 
 class RuleTests(unittest.TestCase):
@@ -27,11 +27,13 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(single["target_total"], 0)
         self.assertEqual(double["target_total"], 40)
 
-    def test_all_three_verified_handbooks_are_available(self):
-        self.assertEqual(get_available_handbook_years(), ["114", "113", "112"])
+    def test_all_supported_handbooks_are_available(self):
+        self.assertEqual(get_available_handbook_years(), ["115", "114", "113", "112", "111"])
+        self.assertEqual(validate_rule_collisions("111"), [])
         self.assertEqual(validate_rule_collisions("112"), [])
         self.assertEqual(validate_rule_collisions("113"), [])
         self.assertEqual(validate_rule_collisions("114"), [])
+        self.assertEqual(validate_rule_collisions("115"), [])
 
     def test_year_specific_rules_do_not_bleed_between_versions(self):
         rules_112 = get_rule_sets("112")["earth_life_major"]
@@ -46,10 +48,17 @@ class RuleTests(unittest.TestCase):
         self.assertNotIn("書報討論", rules_113["common_compulsory"])
 
     def test_normalization_preserves_course_sequence_identity(self):
-        self.assertEqual(normalize_course_name(" 微積分（Ⅰ） "), "微積分(I)")
+        self.assertEqual(normalize_course_name(" 微積分（Ⅰ） "), "微積分(一)")
         self.assertNotEqual(normalize_course_name("微積分"), normalize_course_name("微積分(I)"))
         self.assertNotEqual(normalize_course_name("微積分(I)"), normalize_course_name("微積分(II)"))
-        self.assertNotEqual(normalize_course_name("微積分(一)"), normalize_course_name("微積分(I)"))
+        self.assertEqual(normalize_course_name("微積分(一)"), normalize_course_name("微積分(I)"))
+        self.assertEqual(normalize_course_name("普通化學實驗(II)"), "普通化學實驗(二)")
+        self.assertEqual(normalize_course_name("儀器分析 (I)"), "儀器分析(一)")
+        self.assertEqual(normalize_course_name("微積分(1)"), "微積分(一)")
+        self.assertEqual(normalize_course_name("物理學(IV)"), "物理學(四)")
+        self.assertEqual(normalize_course_name("化學 (5)"), "化學(五)")
+        self.assertEqual(normalize_course_name("體育（3）"), "體育(三)")
+        self.assertEqual(normalize_course_name("普通物理學(VI)"), "普通物理學(六)")
 
     def test_exact_matcher_rejects_substrings_and_wrong_credit(self):
         consumed = set()
@@ -59,9 +68,9 @@ class RuleTests(unittest.TestCase):
 
     def test_every_handbook_exposes_source_and_review_warnings(self):
         expected_sources = {
-            "112": "3-理學院 (5).pdf",
-            "113": "3-理學院 (4).pdf",
-            "114": "3-理學院 (3).pdf",
+            "112": "3-理學院 (112).pdf",
+            "113": "3-理學院 (113).pdf",
+            "114": "3-理學院 (114).pdf",
         }
         for year, source in expected_sources.items():
             with self.subTest(year=year):
@@ -85,73 +94,41 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_transcript_pdf(b"not a pdf")
 
-    def test_schedule_parser_respects_second_semester(self):
-        html = """
-        <table>
-          <tr><th>科目名稱</th><th>學分</th><th>選別</th></tr>
-          <tr><td>資料結構</td><td>3</td><td>必</td></tr>
-        </table>
-        """
-        parsed = parse_schedule_html(html, academic_year="115", semester="2")
-        self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["sem1_credit"], "")
-        self.assertEqual(parsed[0]["sem2_credit"], "3.0")
-        self.assertEqual(parsed[0]["semester"], "2")
-        self.assertEqual(parsed[0]["source"], "schedule")
+    def test_header_extracts_double_major_and_minor(self):
+        import fitz
+        document = fitz.open()
+        page = document.new_page(width=600, height=800)
+        html = """<style>
+body { font-size: 10pt; }
+.meta td { height:15px; width:310px; }
+</style>
+<table class="meta">
+<tr><td>系所：地球環境暨生物資源學系</td></tr>
+<tr><td>雙主修：應用物理暨化學系應用化學組-修習中</td></tr>
+<tr><td>輔系：資訊科學系-修習中</td></tr>
+<tr><td>姓名：陳柏亘  學號：U11310022  入學年月：113年09月</td></tr>
+</table>
+<div>113學年</div>
+<table>
+<tr><td>微積分(I)</td><td>必</td><td>3</td><td>68</td></tr>
+</table>"""
+        page.insert_htmlbox(fitz.Rect(20, 20, 590, 780), html)
+        pdf_bytes = document.tobytes()
+        document.close()
 
-    def test_schedule_parser_rejects_print_date_noise(self):
-        html = """
-        <table>
-          <tr><td>列印日期:2026/7/29 10:34</td></tr>
-        </table>
-        """
-        self.assertEqual(parse_schedule_html(html, academic_year="115", semester="1"), [])
-
-    def test_schedule_parser_skips_rows_without_valid_credit(self):
-        html = """
-        <table>
-          <tr><th>科目名稱</th><th>學分</th><th>選別</th></tr>
-          <tr><td>資料結構</td><td>--</td><td>必</td></tr>
-          <tr><td>列印日期:2026/7/29 10:34</td><td>2</td><td>選</td></tr>
-        </table>
-        """
-        self.assertEqual(parse_schedule_html(html), [])
-
-    def test_schedule_grid_requires_course_link_and_explicit_credit(self):
-        html = """
-        <table>
-          <tr>
-            <td><a href="ag064_print.jsp?course=123">資料結構</a><span>3 學分</span></td>
-            <td>列印日期:2026/7/29 10:34</td>
-          </tr>
-        </table>
-        """
-        parsed = parse_schedule_html(html, academic_year="115", semester="1")
-        self.assertEqual([course["name"] for course in parsed], ["資料結構"])
-        self.assertEqual(parsed[0]["total_credit"], 3.0)
-
-    def test_schedule_courses_merge_as_in_progress_without_duplicates(self):
-        transcript = [course("英文(一)", 2)]
-        schedule = parse_schedule_html(
-            """
-            <table>
-              <tr><th>科目名稱</th><th>學分</th><th>選別</th></tr>
-              <tr><td>英文(一)</td><td>2</td><td>必</td></tr>
-              <tr><td>資料結構</td><td>3</td><td>必</td></tr>
-            </table>
-            """,
-            academic_year="115",
-            semester="1",
-        )
-        merged, added = merge_schedule_courses(transcript, schedule)
-        self.assertEqual(len(merged), 2)
-        self.assertEqual([item["name"] for item in added], ["資料結構"])
-        self.assertTrue(added[0]["is_in_progress"])
-        report = evaluate_graduation(
-            merged,
-            {"domain": "地球環境", "program": "輔系", "target_dept": "資科系"},
-        )
-        self.assertEqual(report["summary"]["total_ip"], 3)
+        student_info, courses = parse_transcript_pdf(pdf_bytes)
+        self.assertEqual(student_info["department"], "地球環境暨生物資源學系")
+        self.assertEqual(student_info["department_family"], "地生")
+        self.assertEqual(student_info["track"], "地球環境")
+        self.assertIsNotNone(student_info["double_major"])
+        self.assertEqual(student_info["double_major"]["department"], "物化")
+        self.assertEqual(student_info["double_major"]["track"], "應用化學")
+        self.assertEqual(student_info["double_major"]["status"], "修習中")
+        self.assertEqual(student_info["double_major"]["raw"], "應用物理暨化學系應用化學組-修習中")
+        self.assertIsNotNone(student_info["minor"])
+        self.assertEqual(student_info["minor"]["department"], "資科")
+        self.assertEqual(student_info["minor"]["status"], "修習中")
+        self.assertEqual(courses[0]["name"], "微積分(一)")
 
 
 class EngineTests(unittest.TestCase):
@@ -179,7 +156,7 @@ class EngineTests(unittest.TestCase):
             courses,
             {"domain": "地球環境", "program": "輔系", "target_dept": "資科系", "handbook_year": "114"},
         )
-        self.assertEqual([c["name"] for c in report["target"]["elective_courses"]], ["微積分(I)", "微積分(II)"])
+        self.assertEqual([c["name"] for c in report["target"]["elective_courses"]], ["微積分(一)", "微積分(二)"])
         self.assertIn("微積分", [c["name"] for c in report["major"]["other_elective_courses"]])
         self.assertEqual(report["summary"]["target_completed"], 6)
 
@@ -258,7 +235,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn("普通物理學(一)", missing)
         self.assertIn("普通物理實驗(一)", missing)
 
-    def test_apc_quota_only_accepts_required_pool(self):
+    def test_apc_unresolved_quota_does_not_consume_primary_candidates(self):
         base = [
             course("普通物理學(一)", 3), course("普通物理實驗(一)", 1),
             course("普通化學(一)", 3), course("普通化學實驗(一)", 1),
@@ -277,10 +254,12 @@ class EngineTests(unittest.TestCase):
             base + [course("物理數學(一)", 3), course("電磁學實驗", 1)],
             {"domain": "地球環境", "program": "輔系", "target_dept": "物化系物理組", "handbook_year": "114"},
         )
-        self.assertEqual(with_required["summary"]["target_completed"], 20)
-        self.assertEqual(with_required["target"]["compulsory_missing"], [])
+        self.assertEqual(with_required["summary"]["target_completed"], 16)
+        self.assertEqual(with_required["target"]["compulsory_completed"], 0)
+        self.assertEqual(with_required["target"]["compulsory_missing"][0]["credit"], 4)
+        self.assertEqual(with_required["free"]["completed"], 4)
 
-    def test_apc_other_required_quota_is_capped_and_overflow_is_conserved(self):
+    def test_apc_unresolved_quota_conserves_unallocated_credits(self):
         base = [
             course("普通物理學(一)", 3), course("普通物理實驗(一)", 1),
             course("普通化學(一)", 3), course("普通化學實驗(一)", 1),
@@ -291,9 +270,9 @@ class EngineTests(unittest.TestCase):
             base + [course("物理數學(一)", 3), course("電磁學(一)", 3), course("電磁學實驗", 1)],
             {"domain": "地球環境", "program": "輔系", "target_dept": "物化系物理組", "handbook_year": "114"},
         )
-        self.assertEqual(report["target"]["compulsory_completed"], 4)
-        self.assertEqual(report["summary"]["target_completed"], 20)
-        self.assertEqual(report["free"]["completed"], 3)
+        self.assertEqual(report["target"]["compulsory_completed"], 0)
+        self.assertEqual(report["summary"]["target_completed"], 16)
+        self.assertEqual(report["free"]["completed"], 7)
         self.assertEqual(report["summary"]["total_completed"], 23)
 
     def test_cs_quota_caps_completed_and_in_progress_without_losing_credits(self):
@@ -392,8 +371,16 @@ class EngineTests(unittest.TestCase):
             [old_title, new_title],
             {"domain": "地球環境", "program": "輔系", "target_dept": "物化系物理組", "handbook_year": "114"},
         )
-        self.assertEqual([c["name"] for c in report_112["target"]["compulsory_courses"]], ["半導體元件物理"])
-        self.assertEqual([c["name"] for c in report_114["target"]["compulsory_courses"]], ["半導體物理"])
+        self.assertIn("半導體元件物理", get_rule_sets("112")["apc_rules"]["divisions"]["物理組"]["compulsory"])
+        self.assertNotIn("半導體元件物理", get_rule_sets("114")["apc_rules"]["divisions"]["物理組"]["compulsory"])
+        self.assertIn("半導體物理", get_rule_sets("114")["apc_rules"]["divisions"]["物理組"]["compulsory"])
+        # The old APC minor pages do not name the extra four-credit pool;
+        # primary-track mappings are therefore candidates, not executable
+        # target requirements.  Both reports must remain review-gated.
+        self.assertEqual(report_112["target"]["compulsory_courses"], [])
+        self.assertEqual(report_114["target"]["compulsory_courses"], [])
+        self.assertEqual(report_112["target"]["compulsory_missing"][0]["credit"], 4)
+        self.assertEqual(report_114["target"]["compulsory_missing"][0]["credit"], 4)
 
     def test_alternative_groups_never_double_count_or_cross_stages(self):
         report_112 = evaluate_graduation(
@@ -419,7 +406,7 @@ class EngineTests(unittest.TestCase):
             for name, credit_value in earth["common_compulsory"].items():
                 with self.subTest(year=year, scope="earth_common", course=name):
                     report = evaluate_graduation(
-                        [course(name, credit_value)],
+                        [course(name, credit_value, academic_year=year)],
                         {"domain": "地球環境", "program": "單主修", "handbook_year": year},
                     )
                     self.assertEqual([c["name"] for c in report["major"]["dept_compulsory_courses"]], [name])
@@ -428,7 +415,7 @@ class EngineTests(unittest.TestCase):
                 for name, credit_value in earth["domains"][domain].items():
                     with self.subTest(year=year, scope=f"{domain}_required", course=name):
                         report = evaluate_graduation(
-                            [course(name, credit_value)],
+                            [course(name, credit_value, academic_year=year)],
                             {"domain": domain, "program": "單主修", "handbook_year": year},
                         )
                         self.assertEqual([c["name"] for c in report["major"]["domain_compulsory_courses"]], [name])
@@ -436,7 +423,7 @@ class EngineTests(unittest.TestCase):
                 for name, credit_value in earth["domain_electives"][domain].items():
                     with self.subTest(year=year, scope=f"{domain}_elective", course=name):
                         report = evaluate_graduation(
-                            [course(name, credit_value)],
+                            [course(name, credit_value, academic_year=year)],
                             {"domain": domain, "program": "單主修", "handbook_year": year},
                         )
                         self.assertEqual([c["name"] for c in report["major"]["domain_elective_courses"]], [name])
@@ -444,7 +431,7 @@ class EngineTests(unittest.TestCase):
             for name, credit_value in rules["cs_rules"]["department_courses"].items():
                 with self.subTest(year=year, scope="cs", course=name):
                     report = evaluate_graduation(
-                        [course(name, credit_value)],
+                        [course(name, credit_value, academic_year=year)],
                         {"domain": "地球環境", "program": "輔系", "target_dept": "資科系", "handbook_year": year},
                     )
                     target_names = [c["name"] for c in report["target"]["compulsory_courses"]]
@@ -455,19 +442,27 @@ class EngineTests(unittest.TestCase):
             for name, credit_value in apc["basic_core"].items():
                 with self.subTest(year=year, scope="apc_basic", course=name):
                     report = evaluate_graduation(
-                        [course(name, credit_value)],
+                        [course(name, credit_value, academic_year=year)],
                         {"domain": "地球環境", "program": "輔系", "target_dept": "物化系物理組", "handbook_year": year},
                     )
                     self.assertEqual([c["name"] for c in report["target"]["basic_core_courses"]], [name])
 
             for division in ("物理組", "化學組"):
-                for name, credit_value in apc["divisions"][division]["compulsory"].items():
+                target_program = "雙主修" if year == "115" else "輔系"
+                target_plan = get_apc_target_requirements(year, division, target_program)
+                for target_row in target_plan["requirements"]:
+                    if target_row.get("kind") != "course":
+                        continue
+                    name = target_row["name"]
+                    credit_value = target_row["credits"]
                     with self.subTest(year=year, scope=f"apc_{division}", course=name):
                         report = evaluate_graduation(
-                            [course(name, credit_value)],
-                            {"domain": "地球環境", "program": "輔系", "target_dept": f"物化系{division}", "handbook_year": year},
+                            [course(name, credit_value, academic_year=year)],
+                            {"domain": "地球環境", "program": target_program, "target_dept": f"物化系{division}", "handbook_year": year},
                         )
-                        self.assertEqual([c["name"] for c in report["target"]["compulsory_courses"]], [name])
+                        target_names = [c["name"] for c in report["target"]["basic_core_courses"]]
+                        target_names += [c["name"] for c in report["target"]["compulsory_courses"]]
+                        self.assertEqual(target_names, [name])
 
     def test_interleaved_year_evaluations_keep_their_own_rules(self):
         first_114 = evaluate_graduation(
@@ -485,6 +480,51 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(first_114["major"]["dept_compulsory_completed"], 2)
         self.assertEqual(middle_112["major"]["dept_compulsory_completed"], 0)
         self.assertEqual(last_114["major"]["dept_compulsory_completed"], 2)
+
+    def test_general_education_public_catalog_verified_in_compile_attempts(self):
+        from graduation_service import _compile_attempts
+        from input_confirmation import NormalizedCourseRow
+        from public_course_catalog import load_public_course_catalog
+
+        catalog = load_public_course_catalog()
+        candidate = next(
+            item
+            for item in catalog.courses
+            if item.get("term") == "112-1"
+            and item.get("official_category") == "藝術與美感領域"
+            and item.get("credits") == 2
+            and "(停開)" not in item.get("course_name", "")
+        )
+        row = NormalizedCourseRow(
+            course_code="",
+            course_name=candidate["course_name"],
+            credits=2,
+            earned_credits=2,
+            status="COMPLETED",
+            term="112-1",
+            course_type="",
+        )
+        metadata = {
+            "ge-art-policy": {
+                "generic": True,
+                "policy_rule": "official_category_policy",
+                "policy_state": "VERIFIED",
+                "pool_id": "pool:ge_art",
+                "membership_ids": ("ge_art",),
+                "policy_predicate": {"category": "藝術與美感領域"},
+            },
+        }
+        attempts, _safe_rows = _compile_attempts((row,), metadata)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].identity_status, "VERIFIED")
+        self.assertEqual(attempts[0].course_kind, "LECTURE")
+        self.assertIn("ge_art", attempts[0].resolved_pool_ids)
+        self.assertTrue(
+            any(
+                item[0] == "pool:ge_art" and item[1] == "VERIFIED"
+                for item in attempts[0].pool_membership_evidence
+            )
+        )
 
 
 if __name__ == "__main__":

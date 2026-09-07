@@ -8,9 +8,47 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
+from audit_export import audit_csv_bytes, audit_json_bytes, dataframe_csv_bytes
 from handbook_rules import normalize_course_name
-from schedule_planner import render_schedule_planner
-from ui_components import draw_premium_progress, format_credit, render_header_card
+from input_confirmation import mask_person_name, mask_student_id
+from lieflat_progress_chart import render_progress_chart
+from policy_audit import UNKNOWN
+from ui_components import draw_premium_progress, format_credit
+
+_STATUS_LABELS = {
+    "SATISFIED": "已滿足",
+    "NOT_SATISFIED": "未滿足",
+    "UNKNOWN": "需人工確認",
+    "NOT_APPLICABLE": "不適用",
+    "COMPLETED": "已完成",
+    "INCOMPLETE": "未完成",
+}
+
+_IDENTITY_STATUS_LABELS = {
+    "VERIFIED": "身分已核對",
+    "CONFLICTED": "身分衝突",
+    "UNKNOWN": "身分待確認（暫列）",
+    "MANUAL_APPROVED": "人工核准身分",
+}
+
+_SHARED_REUSE_FALLBACK_NOTE = (
+    "共同修課核准僅代表合計額度；列出的課名只是規劃用模擬配置，不代表系所已核准該課程身分。"
+    "正式共同修課科目身分須由系所證據確認。"
+)
+
+
+def _status_display(status):
+    return _STATUS_LABELS.get(str(status or "UNKNOWN"), "需人工確認")
+
+
+def _shared_reuse_note(shared_reuse):
+    """Return the explicit disclaimer for reporting-only shared-credit rows."""
+
+    if isinstance(shared_reuse, dict):
+        note = str(shared_reuse.get("official_course_identity_note") or "").strip()
+        if note:
+            return note
+    return _SHARED_REUSE_FALLBACK_NOTE
 
 
 def render_report(student_info, courses, report, major_domain, program_type, target_dept, source_label):
@@ -19,33 +57,42 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
     rules_meta = report.get("rules_meta", {})
     handbook_year = str(report.get("handbook_year") or rules_meta.get("version") or "未辨識")
     safe_source = escape(str(source_label or "未知來源"))
+    safe_name = escape(mask_person_name(student_info.get("name")))
+    safe_student_id = escape(mask_student_id(student_info.get("student_id")))
     safe_handbook = escape(handbook_year)
-    safe_rule_source = escape(str(rules_meta.get("source_file") or "未標示"))
+    safe_rule_source = escape(str(rules_meta.get("evidence_file") or rules_meta.get("source_file") or "未標示"))
     mode_tag = f"<span class='source-badge'>{safe_handbook} 學年度手冊</span>"
-
-    render_header_card(
-        title="🎓 臺北市立大學 歷年畢業學分自我審查系統",
-        subtitle=f"{handbook_year} 學年度手冊 / {major_domain}領域 / {program_type}{f' ({target_dept})' if program_type != '單主修' else ''}",
+    evidence_states = report.get("evidence_states") or report.get("primary_plan", {}).get("evidence_states", {})
+    evidence_labels = {
+        "VERIFIED": "已核對",
+        "INCOMPLETE": "尚未完整",
+        "CONFLICTED": "有矛盾",
+        "MANUAL_REVIEW": "需人工確認",
+    }
+    evidence_text = "／".join(
+        f"{label}：{evidence_labels.get(str(evidence_states.get(key)), str(evidence_states.get(key)))}"
+        for key, label in (("threshold", "門檻"), ("course_catalog", "課程表"), ("eligibility", "資格"))
+        if evidence_states.get(key)
     )
 
     st.markdown(
         f"""
         <div class="info-flex">
-            <div class="info-card">
-                <div style="font-size:14px; color:#64748b; font-weight:700;">學生資訊</div>
-                <div style="margin-top:10px; font-size:15px; color:#0f172a; line-height:1.7;">
-                    姓名：<strong>{escape(str(student_info.get("name") or "未辨識"))}</strong><br>
-                    學號：<strong>{escape(str(student_info.get("student_id") or "未辨識"))}</strong><br>
+            <section class="info-card" aria-label="學生資訊">
+                <div class="eyebrow">學生資訊</div>
+                <div class="meta-value info-value">
+                    姓名：<strong>{safe_name}</strong><br>
+                    學號：<strong>{safe_student_id}</strong><br>
                     系所：<strong>{escape(str(student_info.get("department") or "未辨識"))}</strong><br>
                     入學年月：<strong>{escape(str(student_info.get("admission_year") or "未辨識"))}</strong><br>
                     列印日期：<strong>{escape(str(student_info.get("print_date") or "未辨識"))}</strong>
                 </div>
-            </div>
-            <div class="info-card info-card-highlight">
-                <div style="font-size:14px; color:#0f172a; font-weight:700; margin-bottom:8px;">審查依據</div>
-                <div style="font-size:18px; color:#0f172a; font-weight:800;">{mode_tag}</div>
-                <div style="margin-top:10px; font-size:13px; color:#475569;">手冊來源：{safe_rule_source}<br>成績來源：{safe_source}<br>已分析 {len(courses)} 筆修課紀錄。</div>
-            </div>
+            </section>
+            <section class="info-card info-card-highlight" aria-label="審查依據">
+                <div class="eyebrow">審查依據</div>
+                <div class="meta-value info-source">{mode_tag}</div>
+                <div class="meta-label info-note">手冊來源：{safe_rule_source}<br>成績來源：{safe_source}<br>已分析 {len(courses)} 筆修課紀錄。<br>{escape(evidence_text)}</div>
+            </section>
         </div>
         """,
         unsafe_allow_html=True,
@@ -61,39 +108,165 @@ def render_report(student_info, courses, report, major_domain, program_type, tar
 
     for warning in report.get("document_warnings", []):
         st.warning(f"手冊核對提醒：{warning}")
+    for warning in report.get("policy_warnings", []):
+        st.warning(f"政策／證據提醒：{warning}")
+
+    identity_gate = report.get("identity_gate", {})
+    if isinstance(identity_gate, dict) and identity_gate.get("status") in {"UNKNOWN", "CONFLICTED"}:
+        reasons = identity_gate.get("reasons", [])
+        reason_text = "；".join(str(reason) for reason in reasons if reason)
+        st.warning(
+            "課程身分稽核提醒："
+            + (reason_text or "部分系所課程缺少可核對的開課身分，暫不能作為最終畢業判定。")
+        )
+
+    diagnostics = student_info.get("parse_diagnostics", {}) if isinstance(student_info, dict) else {}
+    if diagnostics and diagnostics.get("complete") is False:
+        for warning in diagnostics.get("warnings", []):
+            st.warning(f"解析完整性提醒：{warning}")
+
+    if not report.get("detailed", True):
+        _render_policy_plan_report(student_info, report, program_type, target_dept)
+        return
 
     _render_parsed_course_totals(courses, report["summary"], program_type)
+    _render_outcome_headline(report["summary"].get("graduation_status"))
     _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements)
-    st.markdown("<br><br>", unsafe_allow_html=True)
+    _render_lieflat_threshold_progress(
+        summary,
+        program_type,
+        requirements,
+        rules_meta,
+        courses=courses,
+        report=report,
+    )
+    st.markdown("<div class='section-gap section-gap-compact'></div>", unsafe_allow_html=True)
     _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements)
 
 
+def _render_outcome_headline(status):
+    status = status or UNKNOWN
+    label = _status_display(status)
+    outcome_class = {
+        "SATISFIED": "outcome-satisfied",
+        "NOT_SATISFIED": "outcome-not-satisfied",
+        "UNKNOWN": "outcome-unknown",
+    }.get(status, "outcome-unknown")
+    st.markdown(
+        f"<div class='outcome-banner {outcome_class}' role='status'>審查結果：{escape(label)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_policy_plan_report(student_info, report, program_type, target_dept):
+    """Render threshold-only planning for programs without safe course tables."""
+
+    status = report.get("summary", {}).get("graduation_status", UNKNOWN)
+    _render_outcome_headline(status)
+    plan = report.get("primary_plan", {})
+    st.markdown("### 📋 已核對的門檻規劃")
+    st.info("目前僅顯示官方門檻總額；成績單尚未提供可安全逐課分類的課號／開課系所資料，系統不猜測課程身份。")
+    evidence_states = plan.get("evidence_states", plan.get("evidence", {}))
+    evidence_labels = {
+        "VERIFIED": "已核對",
+        "INCOMPLETE": "尚未完整",
+        "CONFLICTED": "有矛盾",
+        "MANUAL_REVIEW": "需人工確認",
+    }
+    if evidence_states:
+        st.caption(
+            "證據狀態："
+            + "／".join(
+                f"{key}={evidence_labels.get(str(value), value)}" for key, value in evidence_states.items()
+            )
+        )
+    rows = []
+    for item in plan.get("breakdown", []):
+        required = float(item.get("required", 0.0) or 0.0)
+        rows.append({"項目": item.get("label", ""), "官方要求": required, "已核對": 0.0, "差額": required, "狀態": _status_display("UNKNOWN")})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if report.get("target_plan"):
+        target = report["target_plan"]
+        st.markdown(f"### 🧪 雙主修目標：{target.get('program', '')} {target.get('track') or ''}")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"項目": "目標雙主修總額", "官方要求": target.get("total_required", 40), "已核對": 0.0, "差額": target.get("total_required", 40), "狀態": _status_display(UNKNOWN)},
+                    {"項目": "基礎／共同結構", "官方要求": target.get("base_required", 0), "已核對": 0.0, "差額": target.get("base_required", 0), "狀態": _status_display(target.get("status", UNKNOWN))},
+                    {"項目": "其餘必修／選修結構", "官方要求": target.get("other_required", 0), "已核對": 0.0, "差額": target.get("other_required", 0), "狀態": _status_display(target.get("status", UNKNOWN))},
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    eligibility = report.get("double_major_eligibility")
+    if eligibility:
+        st.markdown("### 🧾 雙主修申請資格")
+        st.markdown(f"**{_status_display(eligibility.get('status', UNKNOWN))}**")
+        for reason in eligibility.get("reasons", []):
+            st.caption(f"• {reason}")
+        shared_evidence = eligibility.get("shared_evidence", {})
+        if shared_evidence:
+            st.caption(f"共同修課證據：{shared_evidence.get('state', '未回答')}（共享額度另列稽核，不增加原始學分）")
+            st.warning(_shared_reuse_note(report.get("shared_reuse", {})))
+    for warning in report.get("policy_warnings", []):
+        st.warning(f"下一步：{warning}")
+    st.markdown("### 🔎 來源與人工確認")
+    citations = report.get("citations", [])
+    if citations:
+        for citation in citations:
+            if isinstance(citation, dict):
+                st.caption(f"{citation.get('label', '來源')}｜{citation.get('file', '')} {citation.get('pages', '')} {citation.get('url', '')}".strip())
+            else:
+                st.caption(str(citation))
+    else:
+        st.caption("尚無可列示的來源引用。")
+    audit = {
+        "cohort": report.get("handbook_year", ""),
+        "primary_program": plan.get("primary_program", plan.get("program", "")),
+        "track": plan.get("track", ""),
+        "program_type": program_type,
+        "eligibility": eligibility or {"status": status},
+        "status": status,
+        "requirements": report.get("requirements", {}),
+        "gate_results": report.get("graduation_gates", {}),
+        "manual_gates": report.get("manual_gates", {}),
+        "warnings": report.get("policy_warnings", []),
+        "citations": citations,
+        "report": report,
+    }
+    col_csv, col_json = st.columns(2)
+    with col_csv:
+        st.download_button("📥 匯出政策稽核 CSV", data=audit_csv_bytes(audit), file_name="UTaipei_policy_audit.csv", mime="text/csv", use_container_width=True)
+    with col_json:
+        st.download_button("📥 匯出政策稽核 JSON", data=audit_json_bytes(audit), file_name="UTaipei_policy_audit.json", mime="application/json", use_container_width=True)
+
+
 def _render_metric_cards(summary, report, major_domain, program_type, target_dept, requirements):
-    colors = ["#00cd98", "#4facfe", "#ffaa00", "#94a3b8", "#a855f7", "#f97316"]
     labels = [
-        ("🎓 實得總學分", summary["total_completed"], requirements["total"], summary["total_ip"], colors[0]),
-        ("🏫 校共同+通識", summary["common_completed"], requirements["common_total"], summary["common_ip"], colors[1]),
-        ("🔬 主修系專門學分", summary["major_completed"], requirements["major_total"], summary["major_ip"], colors[2]),
-        ("🔓 自由選修學分", summary["free_completed"], requirements["free_elective"], summary["free_ip"], colors[3]),
-        ("✨ 跨系所學分", summary["target_completed"], requirements["target_total"], summary["target_ip"], colors[4]),
+        ("🎓 實得總學分", summary["total_completed"], requirements["total"], summary["total_ip"]),
+        ("🏫 校共同+通識", summary["common_completed"], requirements["common_total"], summary["common_ip"]),
+        ("🔬 主修系專門學分", summary["major_completed"], requirements["major_total"], summary["major_ip"]),
+        ("🔓 自由選修學分", summary["free_completed"], requirements["free_elective"], summary["free_ip"]),
+        ("✨ 跨系所學分", summary["target_completed"], requirements["target_total"], summary["target_ip"]),
         (
             "🎽 體育修課",
             report["pe"]["semesters_completed"],
             report["pe"]["semesters_required"],
             report["pe"]["semesters_ip"],
-            colors[5],
         ),
     ]
 
-    html_str = ["<div style='width:100%;'>", "<div class='metric-grid'>"]
+    html_str = ["<section class='metric-grid' aria-label='學分統計'>"]
 
-    for idx, (label, completed, target, ip, color) in enumerate(labels):
+    for idx, (label, completed, target, ip) in enumerate(labels):
         if label == "✨ 跨系所學分" and program_type == "單主修":
             html_str.append(
-                "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div style='font-size:14px; font-weight:700; color:#475569; margin-bottom:12px;'>🚫 無跨系修讀</div>"
-                "<div style='font-size:28px; font-weight:800; color:#94a3b8; margin-bottom:6px;'>N/A</div>"
-                "<div style='font-size:12px; color:#94a3b8;'>目前為單主修身份</div>"
+                "<div class='metric-card metric-card--muted'>"
+                "<div class='metric-label'>🚫 無跨系修讀</div>"
+                "<div class='metric-value'>N/A</div>"
+                "<div class='metric-meta'>目前為單主修身份</div>"
                 "</div>"
             )
             continue
@@ -111,50 +284,40 @@ def _render_metric_cards(summary, report, major_domain, program_type, target_dep
             )
 
         html_str.append(
-            f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-            f"<div style='font-size:14px; font-weight:700; color:#475569; margin-bottom:12px;'>{label}</div>"
-            f"<div style='font-size:28px; font-weight:800; color:{color}; margin-bottom:6px;'>{value_text}</div>"
-            f"<div style='font-size:12px; color:#64748b;'>{bottom_text}</div>"
+            f"<div class='metric-card'>"
+            f"<div class='metric-label'>{escape(label)}</div>"
+            f"<div class='metric-value'>{escape(value_text)}</div>"
+            f"<div class='metric-meta'>{escape(bottom_text)}</div>"
             f"</div>"
         )
 
-    # 審查結果卡片 (原來的最後一欄)
-    grad_text = "🎉 已達畢業標準" if summary["graduation_ready"] else "⚠️ 未達畢業標準"
-    grad_color = "#00cd98" if summary["graduation_ready"] else "#ff3860"
-    grad_bg = "rgba(0, 205, 152, 0.08)" if summary["graduation_ready"] else "rgba(255, 56, 96, 0.08)"
+    # 審查結果卡片：UNKNOWN 不得顯示成已達標或單純未達標。
+    outcome = summary.get("graduation_status", "SATISFIED" if summary.get("graduation_ready") else "NOT_SATISFIED")
+    outcome_label = {
+        "SATISFIED": "🎉 已滿足",
+        "NOT_SATISFIED": "⚠️ 未滿足",
+        "UNKNOWN": "❔ 需人工確認",
+    }.get(outcome, "❔ 需人工確認")
+    outcome_class = {
+        "SATISFIED": "outcome-satisfied",
+        "NOT_SATISFIED": "outcome-not-satisfied",
+        "UNKNOWN": "outcome-unknown",
+    }.get(outcome, "outcome-unknown")
 
     html_str.append(
-        f"<div style='background:{grad_bg}; border:1px solid {grad_color}; border-radius:12px; padding:18px; display:flex; flex-direction:column; justify-content:space-between;'>"
-        f"<div style='font-size:14px; font-weight:700; color:{grad_color}; margin-bottom:12px;'>✨ 審查結果</div>"
-        f"<div style='font-size:20px; font-weight:800; color:{grad_color}; margin-bottom:6px;'>{grad_text}</div>"
-        f"<div style='font-size:12px; color:{grad_color}; opacity:0.8;'>含通識/體育/系專/輔雙</div>"
+        f"<div class='metric-card {outcome_class}' role='status'>"
+        f"<div class='metric-label'>✨ 審查結果</div>"
+        f"<div class='metric-value'>{escape(outcome_label)}</div>"
+        f"<div class='metric-meta'>含通識／體育／系專／雙主修</div>"
         f"</div>"
     )
 
-    html_str.append("</div></div>")
+    html_str.append("</section>")
     st.markdown("".join(html_str), unsafe_allow_html=True)
 
 
 def _render_report_sections(courses, report, summary, major_domain, program_type, target_dept, requirements):
     st.markdown("### 🎯 畢業進度總覽")
-
-    schedule_courses = [
-        course for course in courses if course.get("source") == "schedule" and course.get("is_in_progress")
-    ]
-    if schedule_courses:
-        schedule_credits = sum(float(course.get("total_credit") or 0.0) for course in schedule_courses)
-        terms = sorted(
-            {
-                f"{course.get('academic_year', '')}-{course.get('semester', '')}"
-                for course in schedule_courses
-                if course.get("academic_year") and course.get("semester")
-            }
-        )
-        term_label = "、".join(terms) if terms else "已公布"
-        st.info(
-            f"📅 已納入 {term_label} 課表：{len(schedule_courses)} 門、{format_credit(schedule_credits)} 學分；"
-            "以下進度條的藍色區段代表這些修讀中學分。"
-        )
 
     major_target = requirements["total"]
     target_req = requirements["target_total"]
@@ -167,7 +330,7 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
     draw_premium_progress("🏆 畢業總學分進度", total_completed_all, major_target, ip=total_ip_all)
 
     if program_type != "單主修":
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-gap'></div>", unsafe_allow_html=True)
         draw_premium_progress(f"🧪 {program_type} ({target_dept})", target_completed, target_req, ip=target_ip)
 
     st.markdown("---")
@@ -182,14 +345,13 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
         "free_elective": "六、自由選修",
         "target": f"🧪 {program_type}",
         "export": "📦 全部匯出",
-        "planner": "🗓️ 模擬排課",
     }
     selected_section = st.selectbox(
         "📂 查看詳細分類與工具",
         options=list(section_labels),
         format_func=section_labels.get,
         key="report_section_selector",
-        help="共 10 個區塊。改用下拉導覽可避免較窄的畫面把後段分頁裁掉。",
+        help="共 9 個區塊。改用下拉導覽可避免較窄的畫面把後段分頁裁掉。",
     )
     st.caption(f"共 {len(section_labels)} 個區塊｜目前顯示：{section_labels[selected_section]}")
 
@@ -211,13 +373,12 @@ def _render_report_sections(courses, report, summary, major_domain, program_type
         _render_target_tab(report, program_type, target_dept, summary)
     elif selected_section == "export":
         _render_export_tab(courses, report, summary, requirements)
-    elif selected_section == "planner":
-        render_schedule_planner()
 
 
 def _render_overview_tab(courses, summary, report, major_domain, program_type, target_dept, requirements):
     st.markdown("### 📊 畢業學分進度總覽")
     _render_overview_progress_cards(courses, summary, report, program_type, target_dept, requirements)
+    _render_subject_detail_expanders(courses, report, summary, requirements, program_type, target_dept)
     st.markdown("---")
 
     missing = []
@@ -242,11 +403,204 @@ def _render_overview_tab(courses, summary, report, major_domain, program_type, t
         st.success("🎓 您已完成所有主修及共同必修科目。")
 
 
+def _missing_course_row(item):
+    """Convert a requirement placeholder to the shared responsive row shape."""
+
+    return {
+        "科目名稱": item.get("name", "待補足課程"),
+        "修課學年": "--",
+        "學分": item.get("credit", item.get("credits", 0.0)),
+        "成績": "--",
+        "狀態": "缺漏" if item.get("status") != "in_progress" else "在修中",
+        "狀態類別": "missing" if item.get("status") != "in_progress" else "ip",
+        "配置備註": item.get("allocation_note", ""),
+    }
+
+
+def _render_subject_detail_expanders(courses, report, summary, requirements, program_type, target_dept):
+    """Render touch-friendly drill-downs for every overview credit subtotal.
+
+    The six main buckets (plus each general-education category and any
+    double-major buckets) remain compact until opened.  This keeps the mobile
+    overview scannable while making the exact completed/in-progress/missing
+    course composition directly discoverable.
+    """
+
+    common = report.get("common", {})
+    major = report.get("major", {})
+    target = report.get("target", {})
+    free = report.get("free", {})
+    groups = [
+        (
+            "校共同課程",
+            common.get("compulsory_courses", [])
+            + [course for category in common.get("categories", {}).values() for course in category.get("courses", [])]
+            + common.get("common_elective_courses", []),
+            common.get("compulsory_missing", []),
+            common.get("compulsory_completed", 0.0)
+            + common.get("category_completed", 0.0)
+            + common.get("common_elective_completed", 0.0),
+            common.get("compulsory_ip", 0.0)
+            + common.get("category_ip", 0.0)
+            + common.get("common_elective_ip", 0.0),
+            requirements.get("common_total", 0.0),
+        ),
+        (
+            "系共同必修",
+            major.get("dept_compulsory_courses", []),
+            major.get("dept_compulsory_missing", []),
+            major.get("dept_compulsory_completed", 0.0),
+            major.get("dept_compulsory_ip", 0.0),
+            requirements.get("major_common_compulsory", 0.0),
+        ),
+        (
+            "專業必修",
+            major.get("domain_compulsory_courses", []),
+            major.get("domain_compulsory_missing", []),
+            major.get("domain_compulsory_completed", 0.0),
+            major.get("domain_compulsory_ip", 0.0),
+            requirements.get("domain_compulsory", 0.0),
+        ),
+        (
+            "專業選修",
+            major.get("domain_elective_courses", []),
+            [],
+            major.get("domain_elective_completed", 0.0),
+            major.get("domain_elective_ip", 0.0),
+            requirements.get("domain_elective", 0.0),
+        ),
+        (
+            "其他本系課程",
+            major.get("other_elective_courses", []),
+            [],
+            major.get("other_elective_completed", 0.0),
+            major.get("other_elective_ip", 0.0),
+            requirements.get("major_other_elective", 0.0),
+        ),
+        (
+            "自由選修",
+            free.get("courses", []),
+            [],
+            free.get("completed", summary.get("free_completed", 0.0)),
+            free.get("ip", summary.get("free_ip", 0.0)),
+            requirements.get("free_elective", 0.0),
+        ),
+    ]
+
+    for category_name, category_data in common.get("categories", {}).items():
+        required = requirements.get("ge_per_category", 4.0)
+        completed = category_data.get("completed", 0.0)
+        in_progress = category_data.get("ip", 0.0)
+        missing = []
+        shortfall = max(float(required) - float(completed) - float(in_progress), 0.0)
+        if shortfall > 0:
+            missing.append({"name": f"{category_name}分類尚缺學分（請依手冊選課）", "credit": shortfall})
+        groups.append((f"通識分類｜{category_name}", category_data.get("courses", []), missing, completed, in_progress, required))
+
+    if program_type != "單主修":
+        target_plan = report.get("target_requirements") or {}
+        if not target_plan:
+            target_plan = (report.get("target_plan") or {}).get("target_requirements") or report.get("target_plan") or {}
+
+        def target_bucket_required(bucket, explicit_key=None):
+            explicit = target_plan.get(explicit_key, None) if explicit_key else None
+            if explicit is not None:
+                return float(explicit or 0.0)
+            bucket_completed = float(target.get(f"{bucket}_completed", 0.0) or 0.0)
+            bucket_ip = float(target.get(f"{bucket}_ip", 0.0) or 0.0)
+            bucket_missing = sum(float(item.get("credit", 0.0) or 0.0) for item in target.get(f"{bucket}_missing", []))
+            return bucket_completed + bucket_ip + bucket_missing
+
+        target_is_apc = "物化" in str(target_dept or "")
+        if target_is_apc:
+            target_base_required = target_bucket_required("basic_core", "base_required")
+            # APC places its remaining quota in ``compulsory_courses``.
+            target_other_required = target_bucket_required("compulsory", "other_required")
+            target_elective_required = target_bucket_required("elective")
+        else:
+            # The CS/other policy plan calls its 15-credit required block
+            # ``base_required`` and its 25-credit pool ``other_required``;
+            # those map to the report's compulsory/elective buckets.  There is
+            # no separate basic-core row to display for these targets.
+            target_base_required = target_bucket_required("basic_core")
+            target_other_required = float(target_plan.get("base_required", 0.0) or 0.0) or target_bucket_required("compulsory")
+            target_elective_required = float(target_plan.get("other_required", 0.0) or 0.0) or target_bucket_required("elective")
+        target_groups = [
+            (
+                f"{target_dept}基礎／共同必修",
+                target.get("basic_core_courses", []),
+                target.get("basic_core_missing", []),
+                target.get("basic_core_completed", 0.0),
+                target.get("basic_core_ip", 0.0),
+                target_base_required,
+            ),
+            (
+                f"{target_dept}指定／專業必修",
+                target.get("compulsory_courses", []),
+                target.get("compulsory_missing", []),
+                target.get("compulsory_completed", 0.0),
+                target.get("compulsory_ip", 0.0),
+                target_other_required,
+            ),
+            (
+                f"{target_dept}專業選修",
+                target.get("elective_courses", []),
+                target.get("elective_missing", []),
+                target.get("elective_completed", 0.0),
+                target.get("elective_ip", 0.0),
+                target_elective_required,
+            ),
+        ]
+        groups.extend(
+            group
+            for group in target_groups
+            if group[1] or group[2]
+        )
+
+    st.markdown("#### 🔎 點開查看每個學分小計的科目組成")
+    st.caption("每個區塊會列出已完成、修讀中、缺漏，以及課程被配置到哪個畢業欄位。")
+    for index, (label, item_courses, missing_items, completed, in_progress, required) in enumerate(groups):
+        title = f"{label}｜已得 {format_credit(completed)}／{format_credit(required)} 學分"
+        if in_progress:
+            title += f"（修讀中 {format_credit(in_progress)}）"
+        with st.expander(title, expanded=False):
+            if item_courses:
+                st.caption(f"已完成／修讀中課程：{len(item_courses)} 門")
+                _render_course_cards([_course_row(course, allocation_context=label) for course in item_courses])
+            if missing_items:
+                st.caption(f"缺漏／待補足：{len(missing_items)} 項")
+                _render_course_cards([_missing_course_row(item) for item in missing_items])
+            if not item_courses and not missing_items:
+                st.info("目前沒有可列出的課程或缺漏項目。")
+
+
 def _get_course_category(c, report):
     c_idx = id(c)
 
+    def stable_id(course):
+        try:
+            total_credit = round(float(course.get("total_credit") or 0.0), 6)
+        except (TypeError, ValueError):
+            total_credit = 0.0
+        return (
+            normalize_course_name(course.get("name", "") or ""),
+            total_credit,
+            str(course.get("academic_year", "") or ""),
+            str(course.get("semester", "") or ""),
+            str(course.get("sem1_credit", "") or ""),
+            str(course.get("sem1_score", "") or ""),
+            str(course.get("sem2_credit", "") or ""),
+            str(course.get("sem2_score", "") or ""),
+        )
+
+    source_stable_id = stable_id(c)
+
     def is_same_course(report_course):
-        return id(report_course) == c_idx or report_course.get("_origin_id") == c_idx
+        return (
+            id(report_course) == c_idx
+            or report_course.get("_origin_id") == c_idx
+            or report_course.get("_origin_id") == source_stable_id
+        )
 
     for rc in report.get("common", {}).get("compulsory_courses", []):
         if is_same_course(rc):
@@ -328,40 +682,108 @@ def _render_overview_progress_cards(courses, summary, report, program_type, targ
         },
     ]
 
-    df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
+    df_full = pd.DataFrame(courses).reindex(
+        columns=["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]
+    )
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
     df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
     df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
-    csv_bytes = df_full.to_csv(index=False).encode("utf-8")
 
-    html_str = [
-        "<div style='display:flex; justify-content:center; width:100%; margin-bottom:18px;'>",
-        "<div style='width:100%;'>",
-        "<div class='overview-grid'>",
-    ]
+    html_str = ["<section class='overview-grid' aria-label='分類學分統計'>"]
 
     for card in cards:
         if card.get("visible", True):
             html_str.append(
-                f"<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:20px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                f"<div style='font-size:15px; font-weight:700; color:#475569; margin-bottom:12px; line-height:1.4;'>{card['title']}</div>"
-                f"<div style='font-size:32px; font-weight:800; color:#0f172a; margin-bottom:8px;'>{format_credit(card['completed'])} / {format_credit(card['target'])}</div>"
-                f"<div style='font-size:13px; color:#64748b;'>已得 {format_credit(card['completed'])} / 修讀中 {format_credit(card['ip'])}</div>"
+                f"<div class='metric-card'>"
+                f"<div class='metric-label'>{escape(card['title'])}</div>"
+                f"<div class='metric-value'>{format_credit(card['completed'])} / {format_credit(card['target'])}</div>"
+                f"<div class='metric-meta'>已得 {format_credit(card['completed'])} ／修讀中 {format_credit(card['ip'])}</div>"
                 f"</div>"
             )
 
-    html_str.append("</div></div></div>")
+    html_str.append("</section>")
     st.markdown("".join(html_str), unsafe_allow_html=True)
-    st.markdown("<div style='display:flex; justify-content:center; margin-top:16px;'>", unsafe_allow_html=True)
+
+
+def _render_lieflat_threshold_progress(summary, program_type, requirements, rules_meta, courses=None, report=None):
+    """Render one Lieflat F5 chart for the principal credit thresholds.
+
+    ``courses`` and ``report`` are optional for compatibility with direct
+    callers.  The old implementation referenced both ``csv_bytes`` and
+    ``report`` without defining them, so the chart raised before the section
+    selector could render.  Build a small, valid CSV payload locally when a
+    full course list is not supplied.
+    """
+
+    rows = [
+        {
+            "label": "畢業總學分",
+            "completed": summary.get("total_completed", 0.0),
+            "required": requirements.get("total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "校共同＋通識",
+            "completed": summary.get("common_completed", 0.0),
+            "required": requirements.get("common_total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "主修系專門",
+            "completed": summary.get("major_completed", 0.0),
+            "required": requirements.get("major_total", 0.0),
+            "unit": "學分",
+        },
+        {
+            "label": "自由選修",
+            "completed": summary.get("free_completed", 0.0),
+            "required": requirements.get("free_elective", 0.0),
+            "unit": "學分",
+        },
+    ]
+    if program_type != "單主修" and float(requirements.get("target_total", 0.0) or 0.0) > 0:
+        rows.append(
+            {
+                "label": f"{program_type}目標系",
+                "completed": summary.get("target_completed", 0.0),
+                "required": requirements.get("target_total", 0.0),
+                "unit": "學分",
+            }
+        )
+
+    source = str(rules_meta.get("evidence_file") or rules_meta.get("source_file") or "學生手冊與成績單分析")
+    st.markdown(
+        render_progress_chart(rows, source=source),
+        unsafe_allow_html=True,
+    )
+    report = report if isinstance(report, dict) else {}
+    if courses:
+        overview = pd.DataFrame(
+            [
+                {
+                    "科目名稱": course.get("name", ""),
+                    "科目屬性": course.get("type", ""),
+                    "修課學年": course.get("academic_year", ""),
+                    "學分數": course.get("total_credit", 0.0),
+                    "是否完成": course.get("is_completed", False),
+                    "修讀中": course.get("is_in_progress", False),
+                }
+                for course in courses
+            ]
+        )
+    else:
+        overview = pd.DataFrame(rows)
+    csv_bytes = dataframe_csv_bytes(overview)
+    st.markdown("<div class='export-group export-group-heading' role='group' aria-label='分類統計匯出'>", unsafe_allow_html=True)
+    st.markdown("<div class='export-label'>分類統計匯出</div></div>", unsafe_allow_html=True)
     st.download_button(
         label="📦 全部匯出 CSV",
         data=csv_bytes,
-        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}_Overview.csv",
+        file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', rules_meta.get('version', 'unknown'))}_Overview.csv",
         mime="text/csv",
         use_container_width=False,
     )
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_common_and_major_tab(report, major_domain):
@@ -437,21 +859,21 @@ def _render_ge_categories(common_report, per_category_required=4):
                 if category_data["completed"] + category_data["ip"] >= per_category_required
                 else "⚠️ 未達標"
             )
-            color = (
-                "#00cd98"
+            status_class = (
+                "status-completed"
                 if category_data["completed"] >= per_category_required
-                else "#4facfe"
+                else "status-ip"
                 if category_data["completed"] + category_data["ip"] >= per_category_required
-                else "#ff3860"
+                else "status-missing"
             )
             st.markdown(
                 f"""
-                <div style='background: rgba(30, 41, 85, 0.2); border:1px solid rgba(255,255,255,0.05); border-radius:12px; padding:15px; margin-bottom:15px;'>
-                    <div style='display:flex; justify-content:space-between; margin-bottom:10px; font-weight:600;'>
-                        <span>{escape(str(category_name))}</span>
-                        <span style='color:{color}; white-space:nowrap;'>{status}</span>
+                <div class='category-card'>
+                    <div class='category-heading'>
+                        <span class='category-name'>{escape(str(category_name))}</span>
+                        <span class='status-badge {status_class}'>{escape(status)}</span>
                     </div>
-                    <div style='font-size:13px; color:#475569; margin-bottom:10px;'>已得: {category_data["completed"]:g} / 修讀中: {category_data["ip"]:g} / 目標: {per_category_required:g} 學分</div>
+                    <div class='category-meta'>已得: {category_data["completed"]:g} ／修讀中: {category_data["ip"]:g} ／目標: {per_category_required:g} 學分</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -644,6 +1066,13 @@ def _render_target_tab(report, program_type, target_dept, summary):
     draw_premium_progress(
         f"🧪 {program_type} ({target_dept})", summary["target_completed"], target_req, ip=summary["target_ip"]
     )
+    shared_reuse = report.get("shared_reuse", {})
+    if shared_reuse.get("total", 0.0):
+        st.warning(
+            f"共同修課共享額度（合計 {shared_reuse.get('total', 0.0):g} 學分）僅作模擬配置；"
+            f"{shared_reuse.get('completed', 0.0):g} 已完成、{shared_reuse.get('ip', 0.0):g} 修讀中，"
+            f"不加總至原始學分守恆。{_shared_reuse_note(shared_reuse)}"
+        )
     st.markdown("---")
 
     if "物化系" in target_dept:
@@ -671,13 +1100,17 @@ def _render_export_tab(courses, report, summary, requirements):
         f"### 📦 六、自由選修 與 全部匯出 (已取得 {report['free']['completed']:g}/{requirements['free_elective']:g} 學分)"
     )
     st.info("下方為歷年修課總表，您可匯出 CSV 供備查或核對。")
-    df_full = pd.DataFrame(courses)[["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]]
+    if report.get("program_type") == "雙主修" or report.get("shared_reuse", {}).get("total", 0.0):
+        st.warning(f"匯出提醒：{_shared_reuse_note(report.get('shared_reuse', {}))}")
+    df_full = pd.DataFrame(courses).reindex(
+        columns=["name", "type", "academic_year", "total_credit", "is_completed", "is_in_progress"]
+    )
     categories = [_get_course_category(c, report) for c in courses]
     df_full.insert(1, "category", categories)
     df_full.insert(0, "handbook_year", report.get("handbook_year", ""))
     df_full.columns = ["審查手冊學年度", "科目名稱", "系統分類", "科目屬性", "修課學年", "學分數", "是否完成", "修讀中"]
     st.dataframe(df_full, use_container_width=True)
-    csv_bytes = df_full.to_csv(index=False).encode("utf-8")
+    csv_bytes = dataframe_csv_bytes(df_full)
     st.download_button(
         label="📥 匯出學分審查試算表 (CSV)",
         data=csv_bytes,
@@ -685,6 +1118,39 @@ def _render_export_tab(courses, report, summary, requirements):
         mime="text/csv",
         use_container_width=True,
     )
+
+    audit_payload = {
+        "cohort": report.get("handbook_year", ""),
+        "primary_program": report.get("primary_plan", {}).get("primary_program", "地生"),
+        "track": report.get("primary_plan", {}).get("track", ""),
+        "program_type": report.get("program_type", ""),
+        "eligibility": report.get("double_major_eligibility") or {"status": report.get("summary", {}).get("graduation_status", UNKNOWN)},
+        "status": report.get("summary", {}).get("graduation_status", UNKNOWN),
+        "requirements": requirements,
+        "gate_results": report.get("graduation_gates", {}),
+        "manual_gates": report.get("manual_gates", {}),
+        "warnings": report.get("policy_warnings", []) + report.get("document_warnings", []),
+        "citations": report.get("citations", []),
+        "application": report.get("application", {}),
+        "report": report,
+    }
+    export_col_csv, export_col_json = st.columns(2)
+    with export_col_csv:
+        st.download_button(
+            label="📥 匯出完整稽核 CSV",
+            data=audit_csv_bytes(audit_payload),
+            file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with export_col_json:
+        st.download_button(
+            label="📥 匯出完整稽核 JSON",
+            data=audit_json_bytes(audit_payload),
+            file_name=f"UTaipei_Credit_Audit_{report.get('handbook_year', 'unknown')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
     # 額外匯出：通識分類明細與通識超額清單
     # Build GE category detail CSV
@@ -702,7 +1168,7 @@ def _render_export_tab(courses, report, summary, requirements):
                 }
             )
     ge_df = pd.DataFrame(ge_rows)
-    ge_csv = ge_df.to_csv(index=False).encode("utf-8")
+    ge_csv = dataframe_csv_bytes(ge_df)
     st.download_button(
         label="📥 匯出：通識分類明細 (CSV)",
         data=ge_csv,
@@ -727,7 +1193,7 @@ def _render_export_tab(courses, report, summary, requirements):
             )
     if overflow_rows:
         overflow_df = pd.DataFrame(overflow_rows)
-        overflow_csv = overflow_df.to_csv(index=False).encode("utf-8")
+        overflow_csv = dataframe_csv_bytes(overflow_df)
         st.download_button(
             label="📥 匯出：通識超額清單 (CSV)",
             data=overflow_csv,
@@ -750,12 +1216,12 @@ def _render_parsed_course_totals(courses, summary, program_type):
 
     st.markdown(
         f"""
-        <div style='display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px;'>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>解析總學分: <b>{format_credit(parsed_total)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>已修得: <b>{format_credit(parsed_completed)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>修讀中: <b>{format_credit(parsed_ip)}</b></div>
-            <div style='flex: 1 1 120px; background:#ffffff; padding:12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);'>總含修讀中: <b>{format_credit(summary.get("total_with_ip", 0.0))}</b></div>
-        </div>
+        <section class='parsed-summary' aria-label='解析學分摘要'>
+            <div class='parsed-summary-item'><span>解析總學分</span><b>{format_credit(parsed_total)}</b></div>
+            <div class='parsed-summary-item'><span>已修得</span><b>{format_credit(parsed_completed)}</b></div>
+            <div class='parsed-summary-item'><span>修讀中</span><b>{format_credit(parsed_ip)}</b></div>
+            <div class='parsed-summary-item'><span>總含修讀中</span><b>{format_credit(summary.get("total_with_ip", 0.0))}</b></div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
@@ -810,8 +1276,8 @@ def _render_course_cards(rows):
         st.warning("⚠️ 目前無相關修課紀錄。")
         return
     html = [
-        "<div style='display:grid; gap:12px;'>",
-        "<div class='course-header'>",
+        "<div class='course-list' role='table' aria-label='課程清單'>",
+        "<div class='course-header' role='row'>",
         "<div>科目名稱</div>",
         "<div>修課學年</div>",
         "<div>學分</div>",
@@ -832,31 +1298,54 @@ def _render_course_cards(rows):
                 status_type = "missing"
             else:
                 status_type = "completed"
-        if status_type == "completed":
-            bg = "rgba(16, 185, 129, 0.12)"
-            color = "#0f766e"
-            border = "rgba(16, 185, 129, 0.24)"
-        elif status_type == "ip":
-            bg = "rgba(59, 130, 246, 0.12)"
-            color = "#1d4ed8"
-            border = "rgba(59, 130, 246, 0.24)"
-        else:
-            bg = "rgba(249, 115, 22, 0.12)"
-            color = "#c2410c"
-            border = "rgba(249, 115, 22, 0.24)"
-
         safe_name = escape(str(r.get("科目名稱", "")))
         safe_year = escape(str(r.get("修課學年", "")))
         safe_credit = escape(format_credit(r.get("學分", "")))
         safe_score = escape(str(r.get("成績", "")))
         safe_status = escape(str(status))
+        allocation_note = str(r.get("配置備註") or r.get("allocation_note") or "").strip()
+        safe_allocation_note = escape(allocation_note)
+        allocation_markup = (
+            f"<div class='course-allocation-note'>配置：{safe_allocation_note}</div>"
+            if allocation_note
+            else ""
+        )
+        identity_status = str(r.get("課程身分") or r.get("identity_status") or "").strip()
+        identity_reason = str(r.get("身分理由") or r.get("identity_reason") or "").strip()
+        identity_scope = str(r.get("身分範圍") or r.get("identity_scope") or "").strip()
+        identity_authority = str(
+            r.get("身分核准單位") or r.get("identity_authority") or r.get("authority") or ""
+        ).strip()
+        identity_evidence = str(
+            r.get("身分證據引用")
+            or r.get("identity_evidence_reference")
+            or r.get("evidence_reference")
+            or ""
+        ).strip()
+        identity_markup = ""
+        if identity_status:
+            identity_label = _IDENTITY_STATUS_LABELS.get(identity_status, identity_status)
+            identity_parts = [identity_label]
+            if identity_scope:
+                identity_parts.append(f"範圍：{identity_scope}")
+            if identity_reason:
+                identity_parts.append(identity_reason)
+            if identity_authority:
+                identity_parts.append(f"核准：{identity_authority}")
+            if identity_evidence:
+                identity_parts.append(f"證據：{identity_evidence}")
+            identity_markup = (
+                "<div class='course-identity-note'>"
+                + "｜".join(escape(part) for part in identity_parts)
+                + "</div>"
+            )
         html.append(
-            f"<div class='course-row'>"
-            f"<div class='course-name-col' data-label='科目名稱'>{safe_name}</div>"
-            f"<div data-label='修課學年' style='color:#334155;'>{safe_year}</div>"
-            f"<div data-label='學分' style='color:#334155;'>{safe_credit}</div>"
-            f"<div data-label='成績' style='color:#334155;'>{safe_score}</div>"
-            f"<div class='course-status-col' data-label='狀態'><span style='display:inline-flex; align-items:center; justify-content:center; padding:8px 14px; border-radius:999px; background:{bg}; color:{color}; border:1px solid {border}; font-size:12px; font-weight:700;'>{safe_status}</span></div>"
+            f"<div class='course-row' role='row'>"
+            f"<div class='course-name-col' role='cell' data-label='科目名稱'>{safe_name}{allocation_markup}{identity_markup}</div>"
+            f"<div role='cell' data-label='修課學年'>{safe_year}</div>"
+            f"<div role='cell' data-label='學分'>{safe_credit}</div>"
+            f"<div role='cell' data-label='成績'>{safe_score}</div>"
+            f"<div class='course-status-col' role='cell' data-label='狀態'><span class='status-badge status-{status_type}'>{safe_status}</span></div>"
             f"</div>"
         )
 
@@ -864,16 +1353,22 @@ def _render_course_cards(rows):
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def _course_row(c):
-    score = c["sem1_score"] if c["sem1_score"] not in (None, "", "--") else c["sem2_score"]
+def _course_row(c, allocation_context=None):
+    score = c.get("sem1_score") if c.get("sem1_score") not in (None, "", "--") else c.get("sem2_score")
     status, status_type = _status_label(score)
     return {
-        "科目名稱": f"{c['name']}（{c['allocation_note']}）" if c.get("allocation_note") else c["name"],
-        "修課學年": f"{c['academic_year']}學年",
-        "學分": c["total_credit"],
+        "科目名稱": c.get("name", ""),
+        "修課學年": f"{c.get('academic_year', '')}學年",
+        "學分": c.get("total_credit", 0.0),
         "成績": score,
         "狀態": status,
         "狀態類別": status_type,
+        "配置備註": c.get("allocation_note") or (f"計入：{allocation_context}" if allocation_context else ""),
+        "課程身分": c.get("identity_status", ""),
+        "身分範圍": c.get("identity_scope", ""),
+        "身分理由": c.get("identity_reason", ""),
+        "身分核准單位": c.get("identity_authority") or c.get("authority", ""),
+        "身分證據引用": c.get("identity_evidence_reference") or c.get("evidence_reference", ""),
     }
 
 

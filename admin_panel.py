@@ -14,10 +14,10 @@ def render_admin_rules_editor(config_path):
     with st.expander("⚙️ 管理員：更新畢業規則", expanded=False):
         st.markdown(
             """
-            <div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">
-            輸入管理員密碼後，可直接在此貼上新學年度的 <code>rules_config.json</code> 內容並儲存。
-            儲存完畢後重新整理頁面即可套用新規則。
-            </div>
+            <p class="admin-help">
+                輸入管理員密碼後，可直接在此貼上新學年度的 <code>rules_config.json</code> 內容並儲存。
+                儲存完畢後重新整理頁面即可套用新規則。
+            </p>
             """,
             unsafe_allow_html=True,
         )
