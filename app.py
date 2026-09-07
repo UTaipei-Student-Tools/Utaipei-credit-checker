@@ -480,7 +480,8 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
         st.session_state.pop("_parser_confirmation_cohort", None)
         return _empty_confirmation()
 
-    source_digest = _safe_source_digest(source, source_label=sidebar_state.get("source_label", ""))
+    # Invalidate session results created by older parser/editor implementations.
+    source_digest = _safe_source_digest(source, source_label=str(sidebar_state.get("source_label", "")) + "|confirmation-v3")
     selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
     cached_digest = st.session_state.get("_source_fingerprint")
     cached_cohort = str(st.session_state.get("_parser_confirmation_cohort") or "").strip()
@@ -501,6 +502,7 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
     ):
         return cached_confirmation
 
+    st.session_state.pop("transcript_rows_editor", None)
     try:
         student_info, courses = parse_transcript_pdf(source)
         try:
@@ -869,20 +871,26 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
     editor_rows = _editor_display_rows(row.as_dict() for row in confirmation.rows)
     if editor_rows:
         try:
-            edited = st.data_editor(
-                editor_rows,
-                key="transcript_rows_editor",
-                hide_index=True,
-                num_rows="dynamic",
-                use_container_width=True,
-                disabled=["attempt_group"],
-                column_config=_confirmation_column_config(),
-            )
+            with st.expander("需要修正成績時，展開編輯"):
+                edited = st.data_editor(
+                    editor_rows,
+                    key="transcript_rows_editor",
+                    hide_index=True,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    disabled=["attempt_group"],
+                    column_config=_confirmation_column_config(),
+                )
             records = _as_editor_records(edited)
             current_records = tuple(sorted_course_rows(row.as_dict() for row in current.rows))
             internal_records = _editor_internal_records(records) if records is not None else None
             if internal_records is not None and internal_records != current_records:
                 current = edit_confirmation(current, internal_records)
+                # Editing a visible row does not prove that the parser did not
+                # omit other rows, or approve a different admission handbook.
+                for blocker in confirmation.diagnostics:
+                    if blocker.code in {"PARSER_INCOMPLETE", "COHORT_MISMATCH"}:
+                        current = _mark_confirmation_unconfirmed(current, code=blocker.code, message=blocker.message)
         except (AttributeError, TypeError, ValueError):
             # A missing editor keeps the formal release gate closed.
             current = confirmation
@@ -896,7 +904,14 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
         if current.state is ConfirmationState.STALE:
             st.warning("課程列在上次確認後已變更，請重新檢視並確認。")
         elif current.state is ConfirmationState.UNCONFIRMED:
-            st.warning("課程列尚未通過安全檢查，不能產生正式通過判定。")
+            st.warning("請先修正以下項目，再確認成績。")
+        if current.diagnostics:
+            fields = {"credits": "課程學分", "earned_credits": "實得學分", "term": "修課學期",
+                      "status": "修課狀態", "grade": "成績", "course_name": "課程名稱"}
+            for issue in current.diagnostics:
+                location = f"原始資料第 {issue.row_index + 1} 列：" if issue.row_index is not None else ""
+                field = fields.get(issue.field, issue.field or "")
+                st.caption(f"{location}{field} — {issue.message}")
         # Parser fatal diagnostics make ``valid`` false.  Keep the button in
         # the same place so the user can see the next step, but make the
         # unsafe action impossible until there are rows without diagnostics.
@@ -1058,6 +1073,13 @@ def _render_analysis_state_marker(*, active: bool | None = None) -> None:
     )
 
 
+def _render_semester_search():
+    from semester_courses import render_course_search
+
+    with st.expander("本學期課程｜先選時段查課"):
+        render_course_search(st)
+
+
 def main(*, show_entrance=False):
     setup_page()
     if show_entrance:
@@ -1066,6 +1088,7 @@ def main(*, show_entrance=False):
         if not render_entrance():
             return
     render_header_card("北市大畢業通", "依入學年度規劃畢業、輔系與雙主修", landmark_id="main-content")
+    _render_semester_search()
     sidebar_state = render_setup_panel()
     collapse_sidebar_if_needed()
 
@@ -1089,7 +1112,6 @@ def main(*, show_entrance=False):
     if not released_rows:
         _clear_snapshot_caches()
         st.info("畢業標準檢核尚未開始：請先核對成績，再按「確認目前成績列」。")
-        _render_imported_course_preview(confirmation)
         _render_analysis_state_marker(active=True)
         return
 

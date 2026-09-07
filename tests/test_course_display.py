@@ -101,3 +101,19 @@ def test_actual_editor_preserves_sparse_metadata_and_can_open_graduation_audit()
     # A rerun with no edits must not invalidate the confirmed rows.
     app.run()
     assert app.session_state["test_confirmation"].state.value == "CONFIRMED"
+
+
+def _invalid_editor_fixture():
+    from app import _render_confirmation_editor
+    from input_confirmation import start_confirmation
+    current = start_confirmation([dict(course_name="測試課", credits=2,
+        earned_credits=0, status="UNKNOWN", term="114-1")])
+    _render_confirmation_editor(current)
+
+
+def test_invalid_grade_names_the_problem_without_unlocking_confirmation():
+    from streamlit.testing.v1 import AppTest
+    app = AppTest.from_function(_invalid_editor_fixture).run()
+    assert not app.exception
+    assert app.button(key="confirm_transcript_rows").disabled
+    assert any("修課狀態" in item.value for item in app.caption)

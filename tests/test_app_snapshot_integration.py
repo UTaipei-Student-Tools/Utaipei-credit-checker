@@ -527,7 +527,7 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
 
                 with patch.object(app, "st", fake_st), patch.object(
                     app, "setup_page"
-                ), patch.object(app, "render_header_card"), patch.object(
+                ), patch.object(app, "render_header_card"), patch.object(app, "_render_semester_search"), patch.object(
                     app, "render_setup_panel", return_value={
                         "has_transcript": True,
                         "primary_curriculum_id": "primary:114:cs",
@@ -551,7 +551,7 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
                 ):
                     app.main()
 
-                self.assertEqual(calls, [confirmation])
+                self.assertEqual(calls, [])  # grade overview is the sole preview
                 self.assertEqual(marker_states, [True])
                 self.assertIsNone(fake_st.session_state["_decision_snapshot_cache_key"])
                 self.assertIsNone(fake_st.session_state["_decision_snapshot_cache_value"])
@@ -585,6 +585,7 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
 
         with patch.object(app, "st", fake_st), patch.object(app, "setup_page"), patch.object(
             app, "render_header_card"
+        ), patch.object(app, "_render_semester_search"
         ), patch.object(
             app,
             "render_setup_panel",
