@@ -502,6 +502,11 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
 
     try:
         student_info, courses = parse_transcript_pdf(source)
+        try:
+            from pdf_parser import transcript_to_markdown
+            st.session_state["_transcript_markdown"] = transcript_to_markdown(courses, student_info)
+        except Exception:
+            st.session_state["_transcript_markdown"] = ""
         adapted = adapt_legacy_result(courses, source_kind="transcript")
         confirmation = adapted.confirmation
         st.session_state["_student_display"] = _safe_student_display(student_info)
@@ -819,6 +824,9 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
         with st.expander("查看解析核對原因", expanded=True):
             for message in diagnostics:
                 st.write(f"• {message}")
+
+    if st.session_state.get("_transcript_markdown"):
+        st.markdown(st.session_state["_transcript_markdown"], unsafe_allow_html=True)
 
     current = confirmation
     editor_rows = _editor_display_rows(row.as_dict() for row in confirmation.rows)

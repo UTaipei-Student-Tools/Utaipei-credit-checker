@@ -1092,8 +1092,34 @@ def _parse_transcript_document(doc):
 
 
 def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academic_year):
+    # Extract bracket tag prefix if present (e.g., [通選自然], [共同選修], [通選藝術])
+    raw_name = str(name or "").strip()
+    tag_m = re.match(r"^(\[[^\]]+\])", raw_name)
+    prefix_tag = tag_m.group(1) if tag_m else ""
+    bracket_tag = prefix_tag  # backward compatibility alias
+    clean_name = raw_name[len(prefix_tag):].strip() if prefix_tag else raw_name
+
+    inferred_category = ""
+    if prefix_tag:
+        if "自然" in prefix_tag:
+            inferred_category = "自然、生命與科技領域"
+        elif "藝術" in prefix_tag:
+            inferred_category = "藝術與美感領域"
+        elif "人文" in prefix_tag:
+            inferred_category = "人文與文化思考領域"
+        elif "公民" in prefix_tag:
+            inferred_category = "公民素養與社會探索領域"
+        elif "共同選修" in prefix_tag:
+            inferred_category = "共同選修"
+        elif "校共同" in prefix_tag or "校定必修" in prefix_tag:
+            inferred_category = "校共同必修"
+        elif "系必修" in prefix_tag or "系定必修" in prefix_tag:
+            inferred_category = "專業必修"
+        elif "系選修" in prefix_tag or "系定選修" in prefix_tag:
+            inferred_category = "專業選修"
+
     # Normalize course name
-    norm_name = normalize_course_name(name)
+    norm_name = normalize_course_name(clean_name or raw_name)
     if not norm_name:
         return None
 
@@ -1186,9 +1212,39 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
 
     is_completed = (completed_credit == total_credit) if not is_zero_credit else (is_c1_completed or is_c2_completed)
 
+    acad_y = str(academic_year or "").strip()
+    sem_code = ""
+    grade = ""
+    has_s1 = bool(s1_cred and s1_cred != "--") or bool(s1_score and s1_score != "--")
+    has_s2 = bool(s2_cred and s2_cred != "--") or bool(s2_score and s2_score != "--")
+    if has_s1 and not has_s2:
+        sem_code = "1"
+        grade = s1_score if s1_score and s1_score != "--" else ""
+    elif has_s2 and not has_s1:
+        sem_code = "2"
+        grade = s2_score if s2_score and s2_score != "--" else ""
+    elif has_s1 and has_s2:
+        sem_code = "1-2"
+        grade = s1_score or s2_score or ""
+    else:
+        sem_code = "1"
+
     return {
         "name": norm_name,
-        "raw_name": name,
+        "raw_name": raw_name,
+        "prefix_tag": prefix_tag,
+        "bracket_tag": bracket_tag,
+        "clean_name": clean_name,
+        "normalized_name": norm_name,
+        "inferred_category": inferred_category,
+        "academic_year": acad_y,
+        "semester_code": sem_code,
+        "credits": total_credit,
+        "grade": grade,
+        "is_completed": is_completed,
+        "is_passed": is_completed,
+        "is_in_progress": is_ip and not is_completed,
+        "is_zero_credit": is_zero_credit,
         "course_code": "",
         "offering_department": "",
         # Filled by the graduation engine once a row is allocated to a
@@ -1200,17 +1256,139 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
         "identity_authority": "",
         "identity_evidence_reference": "",
         "type": ctype if ctype else "選",
-        "academic_year": academic_year,
         "sem1_credit": s1_cred if s1_cred else "",
         "sem1_score": s1_score if s1_score else "",
         "sem2_credit": s2_cred if s2_cred else "",
         "sem2_score": s2_score if s2_score else "",
         "total_credit": total_credit,
         "completed_credit": completed_credit,
-        "is_completed": is_completed,
-        "is_in_progress": is_ip and not is_completed,
-        "is_zero_credit": is_zero_credit,
     }
+
+
+def transcript_to_markdown(
+    courses,
+    student_info=None,
+    *,
+    collapsible=True,
+    expanded=False,
+    summary_title=None,
+    include_header=True,
+):
+    """Generate a clean GFM markdown table of parsed courses for UI preview and auditing."""
+    lines = []
+
+    summary_text = summary_title or "成績單中介檢核表格（點擊展開）"
+    open_attr = " open" if expanded else ""
+    if collapsible:
+        lines.append(f"<details{open_attr}>")
+        lines.append(f"<summary>{summary_text}</summary>")
+        lines.append("")
+
+    def _course_is_done(c):
+        if c.get("is_completed") or c.get("is_passed"):
+            return True
+        st = str(c.get("status") or "").upper()
+        return st in ("COMPLETED", "PASSED")
+
+    def _course_is_ip(c):
+        if c.get("is_in_progress"):
+            return True
+        st = str(c.get("status") or "").upper()
+        return st == "IN_PROGRESS"
+
+    def _course_done_cred(c):
+        if not _course_is_done(c):
+            return 0.0
+        val = c.get("completed_credit")
+        if val is None or val == "":
+            val = c.get("earned_credits")
+        if val is None or val == "":
+            val = c.get("credits")
+        try:
+            return float(val or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _course_ip_cred(c):
+        if not _course_is_ip(c):
+            return 0.0
+        val = c.get("total_credit")
+        if val is None or val == "":
+            val = c.get("credits")
+        try:
+            return float(val or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if student_info and include_header:
+        dept = student_info.get("department", "")
+        track = student_info.get("track", "")
+        dm = student_info.get("double_major")
+        dm_str = (
+            f"{dm.get('department', '')}{dm.get('track', '') or ''} ({dm.get('status', '修習中')})"
+            if dm and isinstance(dm, dict)
+            else (dm or "無")
+        )
+        lines.append("### 學生歷年成績單解析預覽")
+        lines.append(f"- **姓名**: {student_info.get('name', '未標示')} | **學號**: {student_info.get('student_id', '未標示')} | **主修**: {dept} {track or ''} | **雙主修**: {dm_str}")
+        completed_c = sum(_course_done_cred(c) for c in courses)
+        ip_c = sum(_course_ip_cred(c) for c in courses)
+        lines.append(f"- **學分核對總計**: 已修畢 **{completed_c:g}** 學分 | 修習中 **{ip_c:g}** 學分 | 累計 **{completed_c + ip_c:g}** 學分")
+        lines.append("")
+
+    lines.append("| 學期 | 課程名稱 | 原始標籤 | 類別 | 學分 | 成績 | 修課狀態 | 歸屬領域 / 審查備註 |")
+    lines.append("|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---|")
+    for c in courses:
+        name = str(c.get("normalized_name") or c.get("name", "") or "").replace("|", "\\|")
+        tag = str(c.get("prefix_tag") or c.get("bracket_tag", "") or "").replace("|", "\\|")
+        ctype = str(c.get("course_type") or c.get("type", "選") or "選").replace("|", "\\|")
+        acad_y = c.get("academic_year", "")
+        sem_code = c.get("semester_code", "")
+        s1_cred = c.get("sem1_credit", "")
+        s1_score = c.get("sem1_score", "")
+        s2_cred = c.get("sem2_credit", "")
+        s2_score = c.get("sem2_score", "")
+
+        is_done = _course_is_done(c)
+        is_ip = _course_is_ip(c)
+        status_desc = "已修畢" if is_done else ("修習中" if is_ip else "未通過/停修")
+
+        inferred = c.get("inferred_category") or ""
+        if is_ip:
+            audit_note = f"{inferred}（修習中，完成後認列）" if inferred else "修習中，完成後認列"
+        else:
+            audit_note = inferred if inferred else "-"
+        audit_note = str(audit_note).replace("|", "\\|")
+
+        cred_val = c.get("credits") if c.get("credits") is not None else c.get("total_credit", 0.0)
+        try:
+            cred_float = float(cred_val)
+            cred_str = f"{cred_float:g}"
+        except (TypeError, ValueError):
+            cred_str = str(cred_val)
+        score_val = c.get("grade") or (s1_score if s1_score and s1_score != "--" else (s2_score if s2_score and s2_score != "--" else ""))
+        score_str = str(score_val) if score_val else "-"
+
+        if sem_code in ("1", "2"):
+            sem_str = f"{acad_y}-{sem_code}" if acad_y else str(sem_code)
+        elif "-" in str(sem_code):
+            sem_str = f"{acad_y}-{sem_code}" if acad_y and not str(sem_code).startswith(str(acad_y)) else str(sem_code)
+        elif s1_cred and s1_cred != "--":
+            sem_str = f"{acad_y}-1"
+        elif s2_cred and s2_cred != "--":
+            sem_str = f"{acad_y}-2"
+        else:
+            sem_str = str(acad_y or "-")
+        sem_str = sem_str.replace("|", "\\|")
+
+        lines.append(f"| {sem_str} | {name} | {tag or '-'} | {ctype} | {cred_str} | {score_str} | {status_desc} | {audit_note} |")
+
+    if collapsible:
+        lines.append("")
+        lines.append("</details>")
+
+    return "\n".join(lines)
+
 
 
 def split_two_semester_courses(courses):
@@ -1242,9 +1420,16 @@ def split_two_semester_courses(courses):
             return True, False, False
 
     for c in courses:
-        if c.get("name") in split_targets:
+        target_name = c.get("normalized_name") or c.get("name", "")
+        if target_name in split_targets:
             s1_active, s1_done, s1_ip = get_sem_status(c.get("sem1_score"), c.get("sem1_credit"))
             s2_active, s2_done, s2_ip = get_sem_status(c.get("sem2_score"), c.get("sem2_credit"))
+
+            clean_name_base = c.get("clean_name") or target_name
+            norm_name_base = c.get("normalized_name") or target_name
+            raw_name_base = c.get("raw_name") or target_name
+            p_tag = c.get("prefix_tag") or c.get("bracket_tag", "")
+            inferred = c.get("inferred_category", "")
 
             if s1_active or s2_active:
                 if s1_active:
@@ -1254,8 +1439,13 @@ def split_two_semester_courses(courses):
                         cred = 3.0
                     new_courses.append(
                         {
-                            "name": f"{c['name']}(上)",
-                            "raw_name": f"{c['raw_name']}(上)",
+                            "name": f"{norm_name_base}(上)",
+                            "raw_name": f"{raw_name_base}(上)",
+                            "prefix_tag": p_tag,
+                            "bracket_tag": p_tag,
+                            "clean_name": f"{clean_name_base}(上)",
+                            "normalized_name": f"{norm_name_base}(上)",
+                            "inferred_category": inferred,
                             "course_code": c.get("course_code", ""),
                             "offering_department": c.get("offering_department", ""),
                             "identity_status": c.get("identity_status", ""),
@@ -1265,6 +1455,9 @@ def split_two_semester_courses(courses):
                             "identity_evidence_reference": c.get("identity_evidence_reference", ""),
                             "type": c.get("type", "必"),
                             "academic_year": c.get("academic_year", ""),
+                            "semester_code": "1",
+                            "credits": cred,
+                            "grade": c.get("sem1_score", ""),
                             "sem1_credit": c.get("sem1_credit", ""),
                             "sem1_score": c.get("sem1_score", ""),
                             "sem2_credit": "",
@@ -1272,6 +1465,7 @@ def split_two_semester_courses(courses):
                             "total_credit": cred,
                             "completed_credit": cred if s1_done else 0.0,
                             "is_completed": s1_done,
+                            "is_passed": s1_done,
                             "is_in_progress": s1_ip,
                             "is_zero_credit": False,
                         }
@@ -1283,8 +1477,13 @@ def split_two_semester_courses(courses):
                         cred = 3.0
                     new_courses.append(
                         {
-                            "name": f"{c['name']}(下)",
-                            "raw_name": f"{c['raw_name']}(下)",
+                            "name": f"{norm_name_base}(下)",
+                            "raw_name": f"{raw_name_base}(下)",
+                            "prefix_tag": p_tag,
+                            "bracket_tag": p_tag,
+                            "clean_name": f"{clean_name_base}(下)",
+                            "normalized_name": f"{norm_name_base}(下)",
+                            "inferred_category": inferred,
                             "course_code": c.get("course_code", ""),
                             "offering_department": c.get("offering_department", ""),
                             "identity_status": c.get("identity_status", ""),
@@ -1294,6 +1493,9 @@ def split_two_semester_courses(courses):
                             "identity_evidence_reference": c.get("identity_evidence_reference", ""),
                             "type": c.get("type", "必"),
                             "academic_year": c.get("academic_year", ""),
+                            "semester_code": "2",
+                            "credits": cred,
+                            "grade": c.get("sem2_score", ""),
                             "sem1_credit": "",
                             "sem1_score": "",
                             "sem2_credit": c.get("sem2_credit", ""),
@@ -1301,16 +1503,23 @@ def split_two_semester_courses(courses):
                             "total_credit": cred,
                             "completed_credit": cred if s2_done else 0.0,
                             "is_completed": s2_done,
+                            "is_passed": s2_done,
                             "is_in_progress": s2_ip,
                             "is_zero_credit": False,
                         }
                     )
             else:
                 half_credit = c["total_credit"] / 2.0
+                score_str = "P" if c.get("is_completed") else ("未" if c.get("is_in_progress") else "")
                 new_courses.append(
                     {
-                        "name": f"{c['name']}(上)",
-                        "raw_name": f"{c['raw_name']}(上)",
+                        "name": f"{norm_name_base}(上)",
+                        "raw_name": f"{raw_name_base}(上)",
+                        "prefix_tag": p_tag,
+                        "bracket_tag": p_tag,
+                        "clean_name": f"{clean_name_base}(上)",
+                        "normalized_name": f"{norm_name_base}(上)",
+                        "inferred_category": inferred,
                         "course_code": c.get("course_code", ""),
                         "offering_department": c.get("offering_department", ""),
                         "identity_status": c.get("identity_status", ""),
@@ -1320,21 +1529,30 @@ def split_two_semester_courses(courses):
                         "identity_evidence_reference": c.get("identity_evidence_reference", ""),
                         "type": c.get("type", "必"),
                         "academic_year": c.get("academic_year", ""),
+                        "semester_code": "1",
+                        "credits": half_credit,
+                        "grade": score_str,
                         "sem1_credit": str(half_credit),
-                        "sem1_score": "P" if c.get("is_completed") else ("未" if c.get("is_in_progress") else ""),
+                        "sem1_score": score_str,
                         "sem2_credit": "",
                         "sem2_score": "",
                         "total_credit": half_credit,
                         "completed_credit": half_credit if c.get("is_completed") else 0.0,
                         "is_completed": c.get("is_completed", False),
+                        "is_passed": c.get("is_completed", False),
                         "is_in_progress": c.get("is_in_progress", False),
                         "is_zero_credit": False,
                     }
                 )
                 new_courses.append(
                     {
-                        "name": f"{c['name']}(下)",
-                        "raw_name": f"{c['raw_name']}(下)",
+                        "name": f"{norm_name_base}(下)",
+                        "raw_name": f"{raw_name_base}(下)",
+                        "prefix_tag": p_tag,
+                        "bracket_tag": p_tag,
+                        "clean_name": f"{clean_name_base}(下)",
+                        "normalized_name": f"{norm_name_base}(下)",
+                        "inferred_category": inferred,
                         "course_code": c.get("course_code", ""),
                         "offering_department": c.get("offering_department", ""),
                         "identity_status": c.get("identity_status", ""),
@@ -1344,13 +1562,17 @@ def split_two_semester_courses(courses):
                         "identity_evidence_reference": c.get("identity_evidence_reference", ""),
                         "type": c.get("type", "必"),
                         "academic_year": c.get("academic_year", ""),
+                        "semester_code": "2",
+                        "credits": half_credit,
+                        "grade": score_str,
                         "sem1_credit": "",
                         "sem1_score": "",
                         "sem2_credit": str(half_credit),
-                        "sem2_score": "P" if c.get("is_completed") else ("未" if c.get("is_in_progress") else ""),
+                        "sem2_score": score_str,
                         "total_credit": half_credit,
                         "completed_credit": half_credit if c.get("is_completed") else 0.0,
                         "is_completed": c.get("is_completed", False),
+                        "is_passed": c.get("is_completed", False),
                         "is_in_progress": c.get("is_in_progress", False),
                         "is_zero_credit": False,
                     }
@@ -1386,6 +1608,22 @@ def load_courses_from_csv(csv_path):
         for r in reader:
             name = r.get("科目名稱") or r.get("name") or ""
             raw_name = name
+            tag_m = re.match(r"^(\[[^\]]+\])", raw_name)
+            prefix_tag = tag_m.group(1) if tag_m else ""
+            clean_name = raw_name[len(prefix_tag):].strip() if prefix_tag else raw_name
+            inferred_category = ""
+            if prefix_tag:
+                if "自然" in prefix_tag:
+                    inferred_category = "自然、生命與科技領域"
+                elif "藝術" in prefix_tag:
+                    inferred_category = "藝術與美感領域"
+                elif "人文" in prefix_tag:
+                    inferred_category = "人文與文化思考領域"
+                elif "公民" in prefix_tag:
+                    inferred_category = "公民素養與社會探索領域"
+                elif "共同選修" in prefix_tag:
+                    inferred_category = "共同選修"
+
             ctype = r.get("科目屬性") or r.get("type") or ""
             ay = r.get("修課學年") or r.get("academic_year") or ""
             cred_str = r.get("學分數") or r.get("credit") or "0"
@@ -1402,8 +1640,13 @@ def load_courses_from_csv(csv_path):
             completed_credit = credit if done else 0.0
 
             course = {
-                "name": normalize_course_name(name),
+                "name": normalize_course_name(clean_name or name),
                 "raw_name": raw_name,
+                "prefix_tag": prefix_tag,
+                "bracket_tag": prefix_tag,
+                "clean_name": clean_name,
+                "normalized_name": normalize_course_name(clean_name or name),
+                "inferred_category": inferred_category,
                 "course_code": r.get("課號") or r.get("course_code") or "",
                 "offering_department": r.get("開課系所") or r.get("offering_department") or "",
                 "identity_status": r.get("課程身分") or r.get("identity_status") or "",
@@ -1413,6 +1656,9 @@ def load_courses_from_csv(csv_path):
                 "identity_evidence_reference": r.get("證據引用") or r.get("identity_evidence_reference") or "",
                 "type": ctype if ctype else "選",
                 "academic_year": ay,
+                "semester_code": "1",
+                "credits": credit,
+                "grade": "P" if done else ("未" if ip else ""),
                 "sem1_credit": "",
                 "sem1_score": "",
                 "sem2_credit": str(credit) if credit else "",
@@ -1420,6 +1666,7 @@ def load_courses_from_csv(csv_path):
                 "total_credit": credit,
                 "completed_credit": completed_credit,
                 "is_completed": bool(done),
+                "is_passed": bool(done),
                 "is_in_progress": bool(ip) and not done,
                 "is_zero_credit": credit == 0.0,
             }

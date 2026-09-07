@@ -862,18 +862,19 @@ def _curriculum_label(curriculum_id):
         return "自訂／待確認課表"
 
     # 1. Immediate fallback for UUIDs, custom schemes, and internal debug blocker tokens
-    if (
-        raw_str.startswith(("uuid:", "custom:"))
-        or any(
-            code in raw_str
-            for code in (
-                "REQUIREMENT_",
-                "APPLICATION:",
-                "SEARCH_",
-                "WAIVER_",
-                "RULE_CONTEXT:",
-                "CREDIT_CONSERVATION_",
-            )
+    if raw_str.startswith("uuid:"):
+        return "自訂／待確認項目"
+    if raw_str.startswith("custom:"):
+        return "自訂課程項目"
+    if any(
+        code in raw_str
+        for code in (
+            "REQUIREMENT_",
+            "APPLICATION:",
+            "SEARCH_",
+            "WAIVER_",
+            "RULE_CONTEXT:",
+            "CREDIT_CONSERVATION_",
         )
     ):
         return "自訂／待確認課表"

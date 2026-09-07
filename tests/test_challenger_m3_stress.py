@@ -45,6 +45,7 @@ def _make_base_snapshot(
         {
             "attempts": tuple(attempts),
             "requirements": tuple(requirements),
+            "secondary_kind": secondary_kind,
             "request": {"secondary_kind": secondary_kind} if secondary_kind else {},
             "input_confirmation": {
                 "state": "CONFIRMED",
@@ -59,7 +60,7 @@ def _make_base_snapshot(
     )
 
     total_source = sum((a.earned_credits for a in attempts), Decimal("0"))
-    total_alloc = sum((r.allocated_credits for r in requirement_results), Decimal("0"))
+    total_alloc = sum((r.effective_credits for r in requirement_results), Decimal("0"))
 
     allocation = AllocationResult(
         status="IN_PROGRESS",
@@ -122,7 +123,7 @@ def test_edge_case_1_fresh_student_zero_credits():
                 requirement_id="req-core",
                 status="IN_PROGRESS",
                 required_credits=Decimal("32"),
-                allocated_credits=Decimal("0"),
+                exclusive_credits=Decimal("0"),
                 shared_shadow_credits=Decimal("0"),
                 effective_credits=Decimal("0"),
                 deficit=Decimal("32"),
@@ -290,28 +291,28 @@ def test_edge_case_4_long_names_special_chars_roman_numerals():
         CourseAttempt(
             attempt_id="att-long",
             course_id="LONG-01",
-            name=extremely_long_name,
+            course_name=extremely_long_name,
+            credits=Decimal("3"),
             earned_credits=Decimal("3"),
-            source_credits=Decimal("3"),
-            semester="113-1",
+            academic_term="113-1",
             status="PASS",
         ),
         CourseAttempt(
             attempt_id="att-xss",
             course_id="XSS-02",
-            name=special_char_name,
+            course_name=special_char_name,
+            credits=Decimal("2"),
             earned_credits=Decimal("2"),
-            source_credits=Decimal("2"),
-            semester="113-2",
+            academic_term="113-2",
             status="PASS",
         ),
         CourseAttempt(
             attempt_id="att-roman",
             course_id="ROMAN-03",
-            name=roman_name,
+            course_name=roman_name,
+            credits=Decimal("4"),
             earned_credits=Decimal("4"),
-            source_credits=Decimal("4"),
-            semester="114-1",
+            academic_term="114-1",
             status="PASS",
         ),
     )
@@ -367,19 +368,19 @@ def test_edge_case_5_notes_cell_zero_p_tags():
         CourseAttempt(
             attempt_id="att-test-1",
             course_id="CS-101",
-            name="計算機概論",
+            course_name="計算機概論",
+            credits=Decimal("3"),
             earned_credits=Decimal("3"),
-            source_credits=Decimal("3"),
-            semester="113-1",
+            academic_term="113-1",
             status="PASS",
         ),
         CourseAttempt(
             attempt_id="att-test-2",
             course_id="CS-102",
-            name="資料結構",
+            course_name="資料結構",
+            credits=Decimal("3"),
             earned_credits=Decimal("3"),
-            source_credits=Decimal("3"),
-            semester="113-2",
+            academic_term="113-2",
             status="PASS",
         ),
     )
@@ -439,10 +440,10 @@ def test_edge_case_6_zero_internal_debug_leaks():
         CourseAttempt(
             attempt_id="att-uuid-550e8400-e29b-41d4-a716-446655440000",
             course_id="113:earth:earth_environment:pool:common",
-            name="環境科學概論",
+            course_name="環境科學概論",
+            credits=Decimal("3"),
             earned_credits=Decimal("3"),
-            source_credits=Decimal("3"),
-            semester="113-1",
+            academic_term="113-1",
             status="PASS",
         ),
     )

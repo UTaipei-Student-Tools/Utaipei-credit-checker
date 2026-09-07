@@ -278,7 +278,7 @@ def test_compile_attempts_wires_tagged_ge_to_the_server_owned_pool():
     attempts, safe_rows = _compile_attempts((row,), metadata)
 
     assert len(attempts) == 1
-    assert attempts[0].identity_status == "UNKNOWN"
+    assert attempts[0].identity_status == "VERIFIED"
     assert any(
         item[0] == "pool:ge_civic"
         and item[1] == "VERIFIED"
@@ -477,7 +477,7 @@ def test_compile_attempts_uses_public_it_membership_for_no_id_rows_without_addin
 
     assert len(attempts) == 1
     attempt = attempts[0]
-    assert attempt.identity_status == "UNKNOWN"
+    assert attempt.identity_status == "VERIFIED"
     assert any(
         item[0] == "university_it_direct_completion"
         and item[1] == "VERIFIED"

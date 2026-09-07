@@ -374,6 +374,80 @@ class ChenTranscriptEmpiricalChallengerTests(unittest.TestCase):
         self.assertNotIn("課程身分或要求來源尚不足以安全認列", html)
         self.assertEqual(float(snapshot.as_dict()["allocation"]["recognized_credits"]), 12.0)
 
+    def test_chen_six_specific_courses_oracle(self):
+        """Verify the 6 specific Chen courses required by user prompt:
+        1. 微積分(I) -> 微積分(一)
+        2. 普通化學實驗(二) -> 普通化學實驗(二)
+        3. [通選自然]生命科學與人生 -> Natural Sciences (自然、生命與科技領域)
+        4. [通選藝術]生活哲學與藝術 -> Arts (藝術與美感領域)
+        5. [通選藝術]都市景觀與敷地計畫 -> Arts (藝術與美感領域), in-progress
+        6. [共同選修]Python資料視覺化 -> General Elective (共同選修), in-progress
+        """
+        from pdf_parser import parse_transcript_pdf
+        from handbook_rules import normalize_course_name
+
+        student_info, courses = parse_transcript_pdf(self.TRANSCRIPT_PATH)
+
+        # 1. 微積分(I) -> 微積分(一)
+        c1 = next((c for c in courses if "微積分" in c.get("name", "") or "微積分" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c1, "Course 微積分(I) not found")
+        self.assertEqual(c1["raw_name"], "微積分(I)")
+        self.assertEqual(c1["normalized_name"], "微積分(一)")
+        self.assertEqual(normalize_course_name(c1["raw_name"]), "微積分(一)")
+        self.assertTrue(c1["is_completed"])
+        self.assertFalse(c1["is_in_progress"])
+
+        # 2. 普通化學實驗(二) -> 普通化學實驗(二)
+        c2 = next((c for c in courses if "普通化學實驗(二)" in c.get("name", "") or "普通化學實驗(二)" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c2, "Course 普通化學實驗(二) not found")
+        self.assertEqual(c2["raw_name"], "普通化學實驗(二)")
+        self.assertEqual(c2["normalized_name"], "普通化學實驗(二)")
+        self.assertEqual(normalize_course_name(c2["raw_name"]), "普通化學實驗(二)")
+        self.assertTrue(c2["is_completed"])
+        self.assertFalse(c2["is_in_progress"])
+
+        # 3. [通選自然]生命科學與人生 -> Natural Sciences
+        c3 = next((c for c in courses if "生命科學與人生" in c.get("name", "") or "生命科學與人生" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c3, "Course [通選自然]生命科學與人生 not found")
+        self.assertEqual(c3["prefix_tag"], "[通選自然]")
+        self.assertEqual(c3["clean_name"], "生命科學與人生")
+        self.assertEqual(c3["normalized_name"], "生命科學與人生")
+        self.assertEqual(c3["inferred_category"], "自然、生命與科技領域")
+        self.assertTrue(c3["is_completed"])
+        self.assertFalse(c3["is_in_progress"])
+
+        # 4. [通選藝術]生活哲學與藝術 -> Arts
+        c4 = next((c for c in courses if "生活哲學與藝術" in c.get("name", "") or "生活哲學與藝術" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c4, "Course [通選藝術]生活哲學與藝術 not found")
+        self.assertEqual(c4["prefix_tag"], "[通選藝術]")
+        self.assertEqual(c4["clean_name"], "生活哲學與藝術")
+        self.assertEqual(c4["normalized_name"], "生活哲學與藝術")
+        self.assertEqual(c4["inferred_category"], "藝術與美感領域")
+        self.assertTrue(c4["is_completed"])
+        self.assertFalse(c4["is_in_progress"])
+
+        # 5. [通選藝術]都市景觀與敷地計畫 -> Arts, in-progress
+        c5 = next((c for c in courses if "都市景觀與敷地計畫" in c.get("name", "") or "都市景觀與敷地計畫" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c5, "Course [通選藝術]都市景觀與敷地計畫 not found")
+        self.assertEqual(c5["prefix_tag"], "[通選藝術]")
+        self.assertEqual(c5["clean_name"], "都市景觀與敷地計畫")
+        self.assertEqual(c5["normalized_name"], "都市景觀與敷地計畫")
+        self.assertEqual(c5["inferred_category"], "藝術與美感領域")
+        self.assertFalse(c5["is_completed"])
+        self.assertTrue(c5["is_in_progress"])
+        self.assertEqual(c5["completed_credit"], 0.0)
+
+        # 6. [共同選修]Python資料視覺化 -> General Elective, in-progress
+        c6 = next((c for c in courses if "Python資料視覺化" in c.get("name", "") or "Python資料視覺化" in c.get("raw_name", "")), None)
+        self.assertIsNotNone(c6, "Course [共同選修]Python資料視覺化 not found")
+        self.assertEqual(c6["prefix_tag"], "[共同選修]")
+        self.assertEqual(c6["clean_name"], "Python資料視覺化")
+        self.assertEqual(c6["normalized_name"], "Python資料視覺化")
+        self.assertEqual(c6["inferred_category"], "共同選修")
+        self.assertFalse(c6["is_completed"])
+        self.assertTrue(c6["is_in_progress"])
+        self.assertEqual(c6["completed_credit"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
