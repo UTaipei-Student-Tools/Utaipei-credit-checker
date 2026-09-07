@@ -1090,6 +1090,11 @@ def main(*, show_entrance=False):
     render_header_card("北市大畢業通", "依入學年度規劃畢業、輔系與雙主修", landmark_id="main-content")
     _render_semester_search()
     sidebar_state = render_setup_panel()
+    from confirmed_rules import confirmed_label
+    for selected_id in (sidebar_state.get("primary_curriculum_id"), sidebar_state.get("target_curriculum_id")):
+        label = confirmed_label(selected_id)
+        if label:
+            st.caption(label)
     collapse_sidebar_if_needed()
 
     confirmation = _parser_confirmation(sidebar_state)

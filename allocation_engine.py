@@ -1484,8 +1484,6 @@ def _direct_match(attempt: CourseAttempt, requirement: RequirementSpec) -> bool 
     # strict component identity check.
     if kind is False:
         return False
-    if kind is None and not authoritative_pool:
-        return None
     pool_unknown = any(_membership_record_is_uncertain(record) for record in pool_records)
     formal_exact = attempt.course_id in requirement.eligible_course_ids or pool_match or requirement.accept_any
     # Keep same-name rows visible as planning candidates, but never let title
@@ -1494,10 +1492,14 @@ def _direct_match(attempt: CourseAttempt, requirement: RequirementSpec) -> bool 
         if pool_unknown:
             return None
         if attempt.course_name in requirement.eligible_course_names:
+            if kind is None and not authoritative_pool:
+                return None
             # Exact title equality is usable only after the service/adapter
             # has already established a formal, uniquely matched identity.
             return True if attempt.identity_status == VERIFIED and attempt.pool_evidence_state == VERIFIED else None
         return False
+    if kind is None and not authoritative_pool:
+        return None
     if pool_match:
         return True
     if attempt.identity_status != VERIFIED:

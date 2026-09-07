@@ -258,7 +258,7 @@ def translate_requirement_blocker(
             else (requirement_map or {}).get(req_id, {})
         )
         name = req.get("name") or _extract_fallback_req_name(req_id)
-        return f"{name}：缺少官方認定紀錄，請核對修讀科目。"
+        return f"{name}：尚有課程或採計條件待核對，請查看下方課程明細；不代表沒有修課。"
 
     if text.startswith("WAIVER_DECISION_REQUIRED:"):
         req_id = text.split(":", 1)[1].strip()
@@ -1276,7 +1276,9 @@ def _attempt_view(
         display_status = UNKNOWN
     reason = _allocation_reason(allocation, portions)
     if force_unallocated_reason and not portions:
-        if _as_sequence(allocation.get("portions")):
+        if status == "IN_PROGRESS":
+            reason = "修習中，通過後才能採計；目前不計入已取得學分。"
+        elif _as_sequence(allocation.get("portions")):
             reason = "此課程已配置至其他畢業要求，本要求未使用其學分。"
         else:
             reason = "此課程符合快照中的官方清單，但目前沒有安全配置至本要求。"
@@ -1627,6 +1629,17 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
                 )
                 if attempt_id:
                     matched_attempt_ids.add(attempt_id)
+        # Pool-based requirements also carry verified membership. Keep pending
+        # courses visible without assigning any credits or changing verdicts.
+        eligible_pools = set(_as_sequence(requirement.get("eligible_pool_ids")))
+        for attempt in attempts:
+            attempt_id = _text(attempt.get("attempt_id"))
+            verified_pools = {entry.get("pool_id") for entry in _as_sequence(attempt.get("pool_membership_evidence"))
+                              if isinstance(entry, Mapping) and entry.get("evidence_state") == "VERIFIED"}
+            if attempt_id not in matched_attempt_ids and eligible_pools & verified_pools:
+                course_views.append(_attempt_view(attempt, attempt_allocations.get(attempt_id, {}),
+                    requirement_id, alternatives, evidence_state=evidence_state, force_unallocated_reason=True))
+                matched_attempt_ids.add(attempt_id)
         # An official list is descriptive evidence carried by the snapshot;
         # it is not reconstructed from the allocator.  Join only by the
         # explicit course ID/name values and show all other states honestly.
@@ -1655,6 +1668,7 @@ def build_snapshot_projection(snapshot: DecisionSnapshot) -> Mapping[str, Any]:
             {
                 "requirement_id": requirement_id,
                 "name": _text(requirement.get("name"), requirement_id),
+                "owner": _text(requirement.get("owner")),
                 "kind": _requirement_kind_label(requirement),
                 "bucket": _text(requirement.get("bucket")),
                 "required_credits": _text(result.get("required_credits"), _text(requirement.get("credits_required"), MANUAL_LABEL)),
@@ -2138,6 +2152,11 @@ def _cs_elective_rollup(view: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
 
 def _requirements_markup(view: Mapping[str, Any]) -> str:
+    from requirement_layout import grouped_requirements_markup
+    return grouped_requirements_markup(view, _requirement_group_contents)
+
+
+def _requirement_group_contents(view: Mapping[str, Any]) -> str:
     rollup = _cs_elective_rollup(view)
     if not rollup:
         return "".join(_requirement_markup(item) for item in view["requirements"])

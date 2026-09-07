@@ -477,7 +477,7 @@ class ParametricBlockerAdviceTests(unittest.TestCase):
         cases = [
             (
                 "REQUIREMENT_EVIDENCE_UNKNOWN:req-core",
-                "系必修核心：缺少官方認定紀錄，請核對修讀科目。",
+                "系必修核心：尚有課程或採計條件待核對，請查看下方課程明細；不代表沒有修課。",
             ),
             (
                 "REQUIREMENT_COVERAGE_UNKNOWN:req-core",

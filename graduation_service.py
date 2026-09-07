@@ -3128,6 +3128,16 @@ def _compile_attempts(
             # values form different keys and hides an otherwise exact
             # handbook identity.
             catalog_by_name[(name, credits)].append(meta)
+            # Existing explicit handbook aliases were previously ignored by
+            # the no-code index. Keep the alias scoped to 113 Earth electives.
+            if any(str(pool).startswith("pool:primary:113:earth:") for pool in meta.get("pool_ids", ())):
+                from curriculum_registry import _RULES
+                aliases = _RULES.get("shared", {}).get("course_aliases", {}).get("earth_life_common_electives", {})
+                for canonical, names in aliases.items():
+                    if name == _course_label(canonical):
+                        for alias in names:
+                            catalog_by_name[(_course_label(alias), credits)].append(
+                                {**meta, "confirmed_lookup_alias": _course_label(alias)})
     policy_metadata = tuple(
         meta
         for meta in metadata.values()
@@ -3556,7 +3566,8 @@ def _compile_attempts(
             # unresolved until an adapter supplies section evidence.
             if "section" in required_dimensions and row_section and _text(meta.get("section")) != row_section:
                 continue
-            if label and _course_label(meta.get("course_name") or meta.get("name")) != label:
+            if (label and _course_label(meta.get("course_name") or meta.get("name")) != label
+                    and meta.get("confirmed_lookup_alias") != label):
                 continue
             matching_candidates.append((meta, expected_kind))
         matching_handbook_metadata = tuple(item[0] for item in matching_candidates)
@@ -4949,6 +4960,8 @@ def evaluate(
         metadata,
         completion_metadata=tuple(completion_metadata),
     )
+    from confirmed_rules import route_confirmed_attempts
+    attempts = route_confirmed_attempts(request.primary_curriculum_id, attempts, requirements)
     non_credit_waivers = _resolve_non_credit_waivers(request, evidence_resolver)
     primary_non_credit_results = _compile_non_credit_results(
         primary,

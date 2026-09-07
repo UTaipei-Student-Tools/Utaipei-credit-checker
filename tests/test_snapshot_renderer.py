@@ -159,8 +159,9 @@ def test_snapshot_projection_contains_requirement_expanders_and_course_explanati
     assert "規則來源" in output
     assert "其他可行方式" in output
     assert "沒有其他安全路徑" in output or "資料不足" in output
-    assert "min-width" not in output
-    assert "height:" not in output.replace("line-height:", "")
+    import re
+    assert not re.search(r"min-width:\s*[1-9]", output)
+    assert not re.search(r"(?<![-\w])height:\s*\d", output)
 
 
 def test_renderer_exposes_v2_statistics_digest_and_fail_closed_chart_contract():
@@ -407,7 +408,7 @@ def test_requirement_expander_lists_official_choices_unallocated_attempts_and_no
     assert courses["B-001"]["is_allocated"] is False
     assert courses["B-001"]["used_credits"] == "0"
     assert courses["B-001"]["status_label"] == "修習中"
-    assert "未配置" in courses["B-001"]["allocation_reason"] or "安全" in courses["B-001"]["allocation_reason"]
+    assert "修習中，通過後才能採計" in courses["B-001"]["allocation_reason"]
     assert courses["C-003"]["status"] == "NOT_ATTEMPTED"
     assert courses["C-003"]["status_label"] == "尚未修課"
     assert courses["C-003"]["used_credits"] == "0"

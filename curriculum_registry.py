@@ -5593,6 +5593,9 @@ def _primary_university_requirement_rows(
     }
     zero_credit_rows: list[dict[str, Any]] = []
     for series in ("life_guidance", "service_learning"):
+        # Explicit user-confirmed 113 Earth/Life correction, 2026-09-08.
+        if cohort == "113" and program == "earth" and series == "service_learning":
+            continue
         descriptor = _primary_zero_credit_descriptor(
             cohort,
             program,
@@ -7530,7 +7533,10 @@ def get_curriculum(curriculum_id: Any) -> dict[str, Any]:
         parsed = _parse_id(curriculum_id)
     if not parsed:
         raise KeyError(f"找不到版本化課程表：{curriculum_id}")
-    return deepcopy(_REGISTRY[parsed])
+    record = deepcopy(_REGISTRY[parsed])
+    from confirmed_rules import validate_confirmed_rules
+    validate_confirmed_rules(_RULES, record)
+    return record
 
 
 def list_curriculum_ids(*, kind: str | None = None, cohort: Any = None) -> list[str]:
