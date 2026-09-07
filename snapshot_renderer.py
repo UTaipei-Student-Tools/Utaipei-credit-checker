@@ -3011,10 +3011,12 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         f'<tr><th scope="row">成績單實得學分</th><td><strong>{_escape(source_earned)} 學分</strong></td></tr>'
         f'<tr><th scope="row">尚未配置</th><td><strong>{_escape(unallocated)} 學分</strong></td></tr>'
     )
+    from workspace_ui import workspace_css
+    css += workspace_css(report_only=True)
     rendered_html = (
         f'<section id="utaipei-snapshot-report" class="snapshot-report" data-snapshot-id="{snapshot_id}" data-verdict="{_escape(_public_status_slug(view.get("verdict")))}" data-statistics-schema="{statistics_schema}" data-statistics-digest="{statistics_digest}">'
         f'<style>{css}</style><span id="utaipei-analysis-state" data-analysis-active="true" data-exported="false" hidden></span>'
-        '<header class="snapshot-header"><div><p class="snapshot-eyebrow">北市大畢業通</p><h1>畢業進度</h1>'
+        '<header class="snapshot-header"><div><h1>畢業進度</h1>'
         f'<p class="snapshot-kicker">依已確認的成績資料整理 · 更新於 {_escape(_format_evaluated_at(view.get("evaluated_at")))}</p></div>'
         f'<span class="snapshot-badge {_status_class(view.get("verdict"))}">{_escape(public_verdict)}</span></header>'
         f'<p class="snapshot-context">{context_markup}</p>'

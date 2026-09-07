@@ -861,7 +861,6 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
             white-space: nowrap; min-width: 3.5rem;
         }
         </style>""", ui=st)
-        st.markdown("### 成績一覽")
         st.markdown(transcript_to_markdown(
             [row.as_dict() for row in confirmation.rows],
             collapsible=False, include_header=False,
@@ -1076,7 +1075,7 @@ def _render_analysis_state_marker(*, active: bool | None = None) -> None:
 def _render_semester_search():
     from semester_courses import render_course_search
 
-    with st.expander("本學期課程｜先選時段查課"):
+    with st.container(key="moksha_lookup"):
         render_course_search(st)
 
 
@@ -1088,7 +1087,11 @@ def main(*, show_entrance=False):
         if not render_entrance():
             return
     render_header_card("北市大畢業通", "依入學年度規劃畢業、輔系與雙主修", landmark_id="main-content")
+    from workspace_ui import workspace_css, navigation_markup, backdrop_markup, section_markup
+    render_html('<style>' + workspace_css() + '</style>' + backdrop_markup() + navigation_markup())
+    render_html(section_markup("course-lookup", "本學期查課"))
     _render_semester_search()
+    render_html(section_markup("course-setup", "修讀設定"))
     sidebar_state = render_setup_panel()
     from confirmed_rules import confirmed_label
     for selected_id in (sidebar_state.get("primary_curriculum_id"), sidebar_state.get("target_curriculum_id")):
@@ -1099,9 +1102,13 @@ def main(*, show_entrance=False):
 
     confirmation = _parser_confirmation(sidebar_state)
     has_source = bool(sidebar_state.get("has_transcript"))
+    render_html(section_markup("course-review", "成績一覽"))
     if has_source:
         confirmation = _render_confirmation_editor(confirmation)
+    else:
+        st.info("尚未匯入成績。請先使用上方 PDF 匯入或校務系統登入，這裡會依通識與學期列出課程。")
 
+    render_html(section_markup("graduation-review", "畢業審核"))
     if not has_source:
         _clear_snapshot_caches()
         _render_analysis_state_marker(active=False)

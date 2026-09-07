@@ -39,9 +39,35 @@ def deficit_markup(items):
             missing.append(f'{escape(str(item.get("name", "此項要求")))}：學分缺額 0，另有條件待核對')
     if not missing:
         return '<p class="snapshot-category-complete">本區學分要求已完成。</p>'
-    return ('<footer class="snapshot-category-deficit"><strong>本區尚缺</strong><ul>'
-            + ''.join(f'<li>{text}</li>' for text in missing)
-            + '</ul><small>依目前已採計學分列示；修習中尚未計入，各項缺額不重複加總。</small></footer>')
+    summary = ('<strong>本區尚缺</strong><ul>' + ''.join(f'<li>{text}</li>' for text in missing) + '</ul>')
+    candidates = []
+    seen = set()
+    for item in items:
+        if item.get('status') in {'PASS', 'NOT_APPLICABLE'}:
+            continue
+        try:
+            deficit = Decimal(str(item.get('deficit')))
+            if deficit.is_finite() and deficit <= 0:
+                continue
+        except InvalidOperation:
+            continue  # Unknown quota is not a known course deficit.
+        for course in item.get('courses', ()):
+            if str(course.get('status', '')).upper() not in {'NOT_ATTEMPTED', 'NOT_TAKEN'}:
+                continue
+            name = str(course.get('course_name') or course.get('name') or '').strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            elective = ('選修' in str(item.get('kind', '')) or 'elective' in str(item.get('bucket', ''))
+                        or item.get('bucket') == 'department_professional' or 'alternative' in str(item.get('bucket', '')))
+            candidates.append(f'<li>{escape(name)}<span>{"可選課程，非全部必修" if elective else "尚未出現在成績紀錄"}</span></li>')
+    note = '<small>依目前已採計學分列示；修習中尚未計入，各項缺額不重複加總。</small>'
+    listing = '<ul class="snapshot-missing-courses">' + ''.join(candidates) + '</ul>' if candidates else ''
+    if len(candidates) >= 3:
+        return ('<details class="snapshot-category-deficit snapshot-deficit-disclosure"><summary>'
+                + summary + f'<span class="snapshot-deficit-toggle">查看未修課程（{len(candidates)} 門）</span></summary>'
+                + '<div class="snapshot-deficit-content">' + listing + note + '</div></details>')
+    return '<footer class="snapshot-category-deficit">' + summary + listing + note + '</footer>'
 
 
 def requirement_section(item):
@@ -87,6 +113,16 @@ RELIEF_CSS = """
 .snapshot-category-deficit { background: #a52232; color: #fff; padding: 20px 24px; border-radius: 16px; margin-top: 24px; }
 .snapshot-category-deficit ul { margin: 8px 0 12px; padding-left: 24px; }
 .snapshot-category-deficit small { color: #fff; }
+.snapshot-deficit-disclosure { padding: 0; }
+.snapshot-deficit-disclosure > summary { padding: 20px 24px; cursor: pointer; list-style: none; min-height: 48px; }
+.snapshot-deficit-disclosure > summary::-webkit-details-marker { display: none; }
+.snapshot-deficit-disclosure > summary:focus-visible { outline: 3px solid currentColor; outline-offset: 4px; }
+.snapshot-deficit-toggle { display: inline-block; text-decoration: underline; text-underline-offset: 4px; }
+.snapshot-deficit-toggle::after { content: ' ＋'; }
+.snapshot-deficit-disclosure[open] .snapshot-deficit-toggle::after { content: ' −'; }
+.snapshot-deficit-content { padding: 0 24px 24px; }
+.snapshot-missing-courses li { margin-block: 12px; }
+.snapshot-missing-courses span { display: block; font-size: .85em; }
 .snapshot-category-complete { color: var(--relief-ink); }
 .snapshot-requirement-section .snapshot-requirement-expander {
   background: var(--relief-surface); color: var(--relief-ink);

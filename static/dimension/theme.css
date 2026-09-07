@@ -5,14 +5,32 @@
 }
 .stApp:has(.st-key-dimension_cover) [data-testid="stAppViewContainer"],
 .stApp:has(.st-key-dimension_cover) [data-testid="stMain"] { background: transparent !important; }
-.st-key-dimension_cover {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: clamp(24px,4vh,52px) 24px 28px;
+.stApp:has(.st-key-dimension_cover) [data-testid="stMain"] { container-type: inline-size; }
+.stApp:has(.st-key-dimension_cover) .st-key-dimension_cover {
+  min-height: 100svh;
+  width: 100cqw;
+  max-width: none;
+  margin-left: calc(50% - 50cqw);
+  margin-right: calc(50% - 50cqw);
+  padding: clamp(48px,7vh,80px) 24px 40px;
+  background: linear-gradient(rgba(17,24,35,.48),rgba(17,24,35,.76)), url('data:image/jpeg;base64,__BACKGROUND__') center / cover;
+  border-radius: 0;
   color: #f4f6f7;
   text-align: center;
   animation: dimension-arrive .65s ease-out both;
 }
+.stApp:has(.st-key-dimension_toolbar) .st-key-dimension_cover {
+  animation: none;
+}
+.dimension-intro { max-width: 760px; margin-inline: auto; }
+.st-key-dimension_cover { position: relative; }
+.st-key-dimension_cover::after {
+  content: ''; position: absolute; inset: auto 0 0; height: 140px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--ui-canvas, #0c1116));
+}
+html.utaipei-cover-away .st-key-dimension_cover { display: none !important; }
+html.utaipei-cover-away .st-key-dimension_toolbar { margin-top: 32px; }
 .dimension-mark {
   display: grid; place-items: center;
   width: 88px; height: 88px;
@@ -50,7 +68,7 @@
 .dimension-credit a { text-underline-offset: 4px; }
 .stApp:has(.st-key-dimension_cover) [data-testid="stHeader"] { background: transparent !important; }
 .stApp:has(.st-key-dimension_cover) [data-testid="stHeader"] button { color: #fff !important; }
-.stApp:has(.st-key-dimension_cover) .block-container { padding-top: 2rem !important; }
+.stApp:has(.st-key-dimension_cover) .block-container { padding-top: 0 !important; }
 .stApp:has(.st-key-dimension_toolbar) .block-container { max-width: 1120px; }
 .st-key-dimension_toolbar { max-width: 300px; margin-left: auto; }
 .st-key-dimension_toolbar button { border-radius: 4px !important; min-height: 44px !important; }

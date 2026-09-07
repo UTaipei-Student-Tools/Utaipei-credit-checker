@@ -515,7 +515,7 @@ def _render_settings_fragment(draft, settings_before, *, panel_title, expanded):
 
     # Streamlit 1.57 fragments must own the containers into which they render;
     # do not call this function inside an expander created by the parent page.
-    with st.expander(panel_title, expanded=expanded):
+    with st.container(key="moksha_settings"):
         rules_meta = _render_handbook_selector(st, draft)
         _render_major_settings(draft.get("primary_handbook_year"), st, draft)
         # Keep provenance available without taking space away from the four
@@ -565,7 +565,10 @@ def render_setup_panel():
     )
     if st.session_state.pop("_settings_apply_notice", False):
         st.success("設定已套用；已依新的手冊與修讀身分更新分析條件。")
-    with st.expander("成績資料與校務系統（點開載入）", expanded=not has_transcript):
+    from workspace_ui import section_markup
+    from ui_components import render_html
+    render_html(section_markup("course-import", "匯入成績"))
+    with st.container(key="moksha_import"):
         st.caption("上傳歷年成績單，或使用校務系統登入抓取；抓取失敗時會保留前次資料。")
         st.markdown("---")
         _render_upload_section(st)
