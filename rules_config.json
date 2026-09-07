@@ -1,7 +1,7 @@
 {
   "_meta": {
     "schema_version": "2.0",
-    "default_academic_year": "114",
+    "default_academic_year": "113",
     "last_updated": "2026-08-02",
     "matching_policy": "handbook year + department scope + exact normalized title + exact credits",
     "apc_target_requirement_id_format": "apc.{dm|minor}.{cohort}.{physics|chemistry}.{requirement_slug}",

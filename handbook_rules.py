@@ -194,7 +194,7 @@ get_supported_cohorts = get_available_admission_cohorts
 
 
 def get_default_handbook_year():
-    configured = str(_CFG.get("_meta", {}).get("default_academic_year", "114"))
+    configured = str(_CFG.get("_meta", {}).get("default_academic_year", "113"))
     years = get_available_handbook_years()
     if configured in years:
         return configured

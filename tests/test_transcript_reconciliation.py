@@ -10,6 +10,23 @@ from pdf_parser import build_course_dict, parse_transcript_pdf
 from tests.synthetic_transcript_fixture import build_synthetic_transcript_pdf
 
 
+@pytest.mark.parametrize("mark", ["停", "退", "W", "停修"])
+def test_withdrawn_is_not_failed_attempted_credit(mark):
+    from pdf_parser import _totals_from_courses
+    rows = [build_course_dict("匿名課程甲", "必", "3", mark, "", "", "113"),
+            build_course_dict("匿名課程乙", "必", "3", "55", "", "", "113"),
+            build_course_dict("匿名課程丙", "必", "3", "80", "", "", "113")]
+    totals = _totals_from_courses(rows)
+    assert totals["completed_attempted_credits"] == 6
+    assert totals["earned_credits"] == 3
+    assert totals["withdrawn_credits"] == 3
+
+
+def test_default_handbook_is_113():
+    from handbook_rules import get_default_handbook_year
+    assert get_default_handbook_year() == "113"
+
+
 def transcript_with_summary(attempted=12, earned=9, *, duplicate=False, conflict=False):
     """Only synthetic courses and identities; no live transcript material."""
     with fitz.open(stream=build_synthetic_transcript_pdf(), filetype="pdf") as document:

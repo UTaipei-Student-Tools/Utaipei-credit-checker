@@ -293,7 +293,7 @@ def _semester_status(score, credit):
     if token in {"抵", "抵免", "抵認", "transfer", "transferred", "transfercredit"}:
         return "TRANSFERRED"
     if is_withdrawn_grade(score):
-        return "ENDED_NO_EARNED"
+        return "WITHDRAWN"
     if token in {"f", "fail", "failed", "不及格", "不通過", "停", "w", "withdrawn", "停修", "撤選"}:
         return "ENDED_NO_EARNED"
     try:
@@ -313,6 +313,7 @@ def _totals_from_courses(course_list):
         "waived_credits": 0.0,
         "unverified_transfer_credits": 0.0,
         "unknown_credits": 0.0,
+        "withdrawn_credits": 0.0,
     }
     for course in course_list:
         for credit_key, score_key in (("sem1_credit", "sem1_score"), ("sem2_credit", "sem2_score")):
@@ -330,6 +331,10 @@ def _totals_from_courses(course_list):
                 totals["earned_credits"] += credit
             elif status == "ENDED_NO_EARNED":
                 totals["completed_attempted_credits"] += credit
+            elif status == "WITHDRAWN":
+                # Printed 停/退 is not a failed attempt. Keep the course visible,
+                # but exclude it from the transcript's attempted/earned totals.
+                totals["withdrawn_credits"] += credit
             elif status == "WAIVED":
                 totals["waived_credits"] += credit
             elif status == "TRANSFERRED":

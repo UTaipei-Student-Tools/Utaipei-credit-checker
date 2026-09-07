@@ -481,7 +481,7 @@ def _parser_confirmation(sidebar_state: Mapping[str, Any]) -> CourseConfirmation
         return _empty_confirmation()
 
     # Invalidate session results created by older parser/editor implementations.
-    source_digest = _safe_source_digest(source, source_label=str(sidebar_state.get("source_label", "")) + "|confirmation-v3")
+    source_digest = _safe_source_digest(source, source_label=str(sidebar_state.get("source_label", "")) + "|confirmation-v4")
     selected_cohort = str(sidebar_state.get("admission_cohort") or "").strip()
     cached_digest = st.session_state.get("_source_fingerprint")
     cached_cohort = str(st.session_state.get("_parser_confirmation_cohort") or "").strip()

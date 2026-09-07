@@ -39,7 +39,7 @@ def test_explicit_withdrawal_is_confirmable_but_never_earns_credit(grade):
     assert row.earned_credits == 0
     confirmed = confirm_confirmation(adapted.confirmation, adapted.fingerprint)
     assert len(release_formal_attempts(confirmed, confirmed.fingerprint)) == 1
-    assert _semester_status(grade, 2) == "ENDED_NO_EARNED"
+    assert _semester_status(grade, 2) == "WITHDRAWN"
     markup = transcript_to_markdown([row.as_dict()], collapsible=False)
     assert "已退選" in markup
     assert "不確定" not in markup
