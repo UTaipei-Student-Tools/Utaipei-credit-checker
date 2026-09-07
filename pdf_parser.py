@@ -8,6 +8,8 @@ import re
 import fitz
 
 from handbook_rules import normalize_course_name
+from course_display import grouped_course_rows, course_term
+from course_status import is_withdrawn_grade
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
 
@@ -290,6 +292,8 @@ def _semester_status(score, credit):
         return "WAIVED"
     if token in {"抵", "抵免", "抵認", "transfer", "transferred", "transfercredit"}:
         return "TRANSFERRED"
+    if is_withdrawn_grade(score):
+        return "ENDED_NO_EARNED"
     if token in {"f", "fail", "failed", "不及格", "不通過", "停", "w", "withdrawn", "停修", "撤選"}:
         return "ENDED_NO_EARNED"
     try:
@@ -1158,7 +1162,7 @@ def build_course_dict(name, ctype, s1_cred, s1_score, s2_cred, s2_score, academi
             return True, False  # Completed
         if score == "抵" or score == "免":
             return False, False
-        if score == "F" or score == "停" or score == "W":
+        if score == "F" or is_withdrawn_grade(score):
             return False, False  # Failed/Withdraw
         try:
             val = float(score)
@@ -1336,10 +1340,36 @@ def transcript_to_markdown(
         lines.append(f"- **學分核對總計**: 已修畢 **{completed_c:g}** 學分 | 修習中 **{ip_c:g}** 學分 | 累計 **{completed_c + ip_c:g}** 學分")
         lines.append("")
 
-    lines.append("| 學期 | 課程名稱 | 原始標籤 | 類別 | 學分 | 成績 | 修課狀態 | 歸屬領域 / 審查備註 |")
-    lines.append("|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---|")
-    for c in courses:
-        name = str(c.get("normalized_name") or c.get("name", "") or "").replace("|", "\\|")
+    # Expand each printed semester independently before grouping the display.
+    # This is presentation only and does not release any formal attempts.
+    display_courses = []
+    for original in courses:
+        semester_rows = []
+        for semester in ("1", "2"):
+            credit = original.get(f"sem{semester}_credit")
+            if credit in (None, "", "--"):
+                continue
+            item = dict(original)
+            score = original.get(f"sem{semester}_score", "")
+            item.update(semester_code=semester, semester=semester, grade=score,
+                        credits=credit, term=f"{original.get('academic_year', '')}-{semester}")
+            state = _semester_status(score, max(_parse_credit_value(credit) or 0, 1))
+            item.update(is_completed=state == "COMPLETED", is_passed=state == "COMPLETED",
+                        is_in_progress=state == "IN_PROGRESS", status=state)
+            semester_rows.append(item)
+        display_courses.extend(semester_rows or [original])
+    grouped = grouped_course_rows(display_courses)
+    grouped_rows = []
+    for title, group in grouped:
+        grouped_rows.append((title, None))
+        grouped_rows.extend((None, row) for row in group)
+    for title, c in grouped_rows:
+        if c is None:
+            lines.extend(["", f"#### {title}", "",
+                          "| 學期 | 課程名稱 | 原始標籤 | 類別 | 學分 | 成績 | 修課狀態 | 歸屬領域 / 審查備註 |",
+                          "|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---|"])
+            continue
+        name = str(c.get("normalized_name") or c.get("course_name") or c.get("name", "") or "").replace("|", "\\|")
         tag = str(c.get("prefix_tag") or c.get("bracket_tag", "") or "").replace("|", "\\|")
         ctype = str(c.get("course_type") or c.get("type", "選") or "選").replace("|", "\\|")
         acad_y = c.get("academic_year", "")
@@ -1368,6 +1398,9 @@ def transcript_to_markdown(
             cred_str = str(cred_val)
         score_val = c.get("grade") or (s1_score if s1_score and s1_score != "--" else (s2_score if s2_score and s2_score != "--" else ""))
         score_str = str(score_val) if score_val else "-"
+        if is_withdrawn_grade(score_val) or str(c.get("status", "")).upper() == "WITHDRAWN":
+            status_desc = "已退選／停修"
+            audit_note = "已退選，不計入取得學分"
 
         if sem_code in ("1", "2"):
             sem_str = f"{acad_y}-{sem_code}" if acad_y else str(sem_code)
@@ -1380,6 +1413,8 @@ def transcript_to_markdown(
         else:
             sem_str = str(acad_y or "-")
         sem_str = sem_str.replace("|", "\\|")
+        if c.get("term") or c.get("semester"):
+            sem_str = course_term(c).replace("|", "\\|")
 
         lines.append(f"| {sem_str} | {name} | {tag or '-'} | {ctype} | {cred_str} | {score_str} | {status_desc} | {audit_note} |")
 
@@ -1411,7 +1446,7 @@ def split_two_semester_courses(courses):
             return True, False, True
         if score in ("P", "抵", "免"):
             return True, True, False
-        if score in ("F", "停", "W"):
+        if score == "F" or is_withdrawn_grade(score):
             return True, False, False
         try:
             val = float(score)

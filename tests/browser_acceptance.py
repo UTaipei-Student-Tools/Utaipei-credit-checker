@@ -714,7 +714,7 @@ def _assert_analysis_flow(page: Page, fixture: Path, output_dir: Path) -> dict[s
     preview_row_count = int(preview.get_attribute("data-row-count") or "-1")
     preview_earned_credits = float(preview.get_attribute("data-earned-credits") or "-1")
     assert preview_row_count == 5
-    assert preview.locator("tbody tr").count() == 5
+    assert preview.locator("tbody tr:not(.course-group)").count() == 5
     assert preview_earned_credits == 9
     preview_text = preview.inner_text()
     assert "待確認" in preview_text

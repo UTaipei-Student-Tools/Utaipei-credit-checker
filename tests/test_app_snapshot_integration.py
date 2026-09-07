@@ -276,6 +276,7 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
         )
         fake_st = SimpleNamespace(
             session_state={"_student_display": {"name": "＊＊", "student_id": "••••"}},
+            markdown=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
             warning=lambda *_args, **_kwargs: None,
             success=lambda *_args, **_kwargs: None,
@@ -408,7 +409,8 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
         self.assertIn("class='snapshot-import-preview'", markup)
         self.assertIn("data-row-count='5'", markup)
         self.assertIn("data-earned-credits='9'", markup)
-        self.assertEqual(markup.count("<tbody><tr>"), 1)
+        self.assertEqual(markup.count("<tbody>"), 1)
+        self.assertEqual(markup.count("class='course-group'"), 5)
         self.assertEqual(markup.count("<tr>"), 6)  # header plus five imported rows
         self.assertIn("解析實得學分小計 <strong>9</strong> 學分", markup)
         self.assertIn("待確認／僅供核對", markup)
@@ -513,6 +515,7 @@ class AppSnapshotIntegrationTests(unittest.TestCase):
                 calls: list[object] = []
                 marker_states: list[bool] = []
                 fake_st = SimpleNamespace(
+                    info=lambda *_args, **_kwargs: None,
                     session_state={
                         "_decision_snapshot_cache_key": "stale-key",
                         "_decision_snapshot_cache_value": object(),

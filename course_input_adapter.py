@@ -23,6 +23,7 @@ from numbers import Real
 from typing import Any
 
 from allocation_engine import normalize_course_kind
+from course_status import is_withdrawn_grade
 from handbook_rules import normalize_course_name
 from input_confirmation import (
     COURSE_FIELD_ALLOWLIST,
@@ -224,7 +225,7 @@ def _status_and_earned(score: Any, credits: float, explicit_earned: Any = _MISSI
         return "IN_PROGRESS", 0.0, True
     if token in {"f", "fail", "failed", "不及格", "不通過"}:
         return "FAILED", 0.0, True
-    if token in {"停", "w", "withdrawn", "停修", "撤選"}:
+    if is_withdrawn_grade(score):
         return "WITHDRAWN", 0.0, True
     if token in {"免", "免修", "waived"}:
         return "WAIVED", 0.0, True
@@ -411,6 +412,12 @@ def _legacy_row_to_attempts(
         return [], diagnostics
     term, academic_year, semester = term_info
     score = _first(row, _STATUS_KEYS, "")
+    # A printed withdrawal grade is decisive even if a legacy parser left
+    # a generic UNKNOWN/COMPLETED status alongside it.
+    for grade_key in ("grade", "score"):
+        if is_withdrawn_grade(row.get(grade_key)):
+            score = row[grade_key]
+            break
     explicit_earned = _first(row, _EARNED_KEYS, _MISSING)
     status, earned, known = _status_and_earned(score, credit, explicit_earned)
     if not known:

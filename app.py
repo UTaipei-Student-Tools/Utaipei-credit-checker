@@ -19,6 +19,7 @@ from typing import Any
 import streamlit as st
 
 from course_input_adapter import adapt_legacy_result
+from course_display import grouped_course_rows, sorted_course_rows, course_type_label
 from graduation_service import EvaluationRequest, evaluate
 from input_confirmation import (
     ConfirmationState,
@@ -601,7 +602,7 @@ _EDITOR_STATUS_LABELS = {
     "IN_PROGRESS": "修習中",
     "FAILED": "不及格",
     "FAIL": "不及格",
-    "WITHDRAWN": "停修／撤選",
+    "WITHDRAWN": "已退選／停修",
     "NOT_TAKEN": "未修課",
     "NOT_ATTEMPTED": "未修課",
     "WAIVED": "免修／抵認",
@@ -682,19 +683,32 @@ def _imported_course_preview_markup(confirmation: CourseConfirmation | object) -
     earned_display = _preview_number(earned_total) if rows else "需要補資料"
     earned_attribute = _preview_number(earned_total) if rows else ""
     preview_state = "confirmed" if formally_released else "pending"
-    headers = ("課名", "課號", "學期", "課程學分", "實得學分", "狀態")
+    headers = ("課名", "課號", "學期", "類別", "成績", "課程學分", "實得學分", "狀態")
     header_html = "".join(
         f"<th scope='col' style='border-bottom:1px solid #CBD5E1;padding:.55rem .6rem;text-align:start;white-space:nowrap'>{_escape_html(title)}</th>"
         for title in headers
     )
     row_html: list[str] = []
-    for row in rows:
+    display_groups = grouped_course_rows(row.as_dict() for row in rows)
+    display_rows = []
+    for title, group in display_groups:
+        display_rows.append((title, None))
+        display_rows.extend((None, NormalizedCourseRow(**item)) for item in group)
+    for title, row in display_rows:
+        if row is None:
+            row_html.append(
+                f"<tr class='course-group'><th colspan='8' scope='rowgroup' "
+                f"style='padding:1rem .6rem .5rem;text-align:start'>{_escape_html(title)}</th></tr>"
+            )
+            continue
         status_key = str(row.status or "UNKNOWN").strip().upper().replace("-", "_").replace(" ", "_")
         status = _EDITOR_STATUS_LABELS.get(status_key, "需要補資料")
         cells = (
             _preview_text(row.course_name, fallback="未標示課程"),
             _preview_text(row.course_code),
             _preview_text(row.term, fallback="學期待補"),
+            _escape_html(course_type_label(row.as_dict())),
+            _preview_text(row.grade),
             _preview_number(row.credits),
             _preview_number(row.earned_credits),
             _escape_html(status),
@@ -709,7 +723,7 @@ def _imported_course_preview_markup(confirmation: CourseConfirmation | object) -
         )
     if not row_html:
         row_html.append(
-            "<tr><td colspan='6' style='padding:.7rem .6rem;text-align:start'>"
+            "<tr><td colspan='8' style='padding:.7rem .6rem;text-align:start'>"
             "目前沒有可預覽的課程列；請重新上傳或改用手動輸入。"
             "</td></tr>"
         )
@@ -739,7 +753,7 @@ def _editor_display_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, An
     """Translate normalized course rows for the editable student table."""
 
     display_rows: list[dict[str, Any]] = []
-    for row in rows:
+    for row in sorted_course_rows(rows):
         item = dict(row)
         status = str(item.get("status") or "UNKNOWN").upper().replace("-", "_")
         item["status"] = _EDITOR_STATUS_LABELS.get(status, "需要補資料")
@@ -753,6 +767,13 @@ def _editor_internal_records(records: Iterable[Mapping[str, Any]]) -> tuple[Mapp
     internal: list[Mapping[str, Any]] = []
     for record in records:
         item = dict(record)
+        # Streamlit pads sparse metadata columns with None/NaN.  These are
+        # absent optional labels, not user edits or invalid course data.
+        # Keep required fields untouched so missing grades/credits still fail.
+        for field in ("raw_name", "prefix_tag", "clean_name", "normalized_name", "inferred_category"):
+            value = item.get(field)
+            if value is None or value == "" or (isinstance(value, float) and math.isnan(value)):
+                item.pop(field, None)
         status = str(item.get("status") or "需要補資料").strip()
         item["status"] = _EDITOR_STATUS_CODES.get(status, status)
         internal.append(item)
@@ -825,8 +846,24 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
             for message in diagnostics:
                 st.write(f"• {message}")
 
-    if st.session_state.get("_transcript_markdown"):
-        st.markdown(st.session_state["_transcript_markdown"], unsafe_allow_html=True)
+    if confirmation.rows:
+        from pdf_parser import transcript_to_markdown
+
+        render_html("""<style>
+        [data-testid="stMarkdownContainer"]:has(h4) > table {
+            display: block; max-width: 100%; overflow-x: auto;
+            overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch;
+        }
+        [data-testid="stMarkdownContainer"]:has(h4) > table th,
+        [data-testid="stMarkdownContainer"]:has(h4) > table td {
+            white-space: nowrap; min-width: 3.5rem;
+        }
+        </style>""", ui=st)
+        st.markdown("### 成績一覽")
+        st.markdown(transcript_to_markdown(
+            [row.as_dict() for row in confirmation.rows],
+            collapsible=False, include_header=False,
+        ))
 
     current = confirmation
     editor_rows = _editor_display_rows(row.as_dict() for row in confirmation.rows)
@@ -842,7 +879,7 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
                 column_config=_confirmation_column_config(),
             )
             records = _as_editor_records(edited)
-            current_records = tuple(row.as_dict() for row in current.rows)
+            current_records = tuple(sorted_course_rows(row.as_dict() for row in current.rows))
             internal_records = _editor_internal_records(records) if records is not None else None
             if internal_records is not None and internal_records != current_records:
                 current = edit_confirmation(current, internal_records)
@@ -852,6 +889,7 @@ def _render_confirmation_editor(confirmation: CourseConfirmation) -> CourseConfi
     else:
         st.info("目前沒有可供確認的課程列；請重新上傳或改用手動輸入。")
 
+    st.caption("通識課程集中在最上方；其他課程依學期由早到晚排列，每學期先必修、再選修。確認成績後，下方會顯示畢業標準檢核。")
     if current.state is ConfirmationState.CONFIRMED:
         st.success("目前課程列已確認；若修改任何欄位，必須重新確認。")
     else:
@@ -1050,6 +1088,7 @@ def main(*, show_entrance=False):
     released_rows = _confirmed_rows(confirmation)
     if not released_rows:
         _clear_snapshot_caches()
+        st.info("畢業標準檢核尚未開始：請先核對成績，再按「確認目前成績列」。")
         _render_imported_course_preview(confirmation)
         _render_analysis_state_marker(active=True)
         return

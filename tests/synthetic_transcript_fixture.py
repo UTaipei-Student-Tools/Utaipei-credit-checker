@@ -8,7 +8,7 @@ from pathlib import Path
 import fitz
 
 
-def build_synthetic_transcript_pdf() -> bytes:
+def build_synthetic_transcript_pdf(*, with_review_cases=False) -> bytes:
     """Return a synthetic transcript understood by the current PDF parser."""
 
     document = fitz.open()
@@ -34,6 +34,14 @@ td { padding: 0; height: 25px; vertical-align: top; }
 <tr><td class="c0">微積分</td><td class="c1">選</td><td class="c2">3</td><td class="c3">55</td><td class="c4">3</td><td class="c5">80</td><td class="c6"></td></tr>
 <tr><td class="c0">資料結構</td><td class="c1">選</td><td class="c2">3</td><td class="c3">P</td><td class="c4"></td><td class="c5"></td><td class="c6"></td></tr>
 </table>"""
+    if with_review_cases:
+        extra = """
+<tr><td class="c0">[通選自然]環境與生活</td><td class="c1">選</td><td class="c2">2</td><td class="c3">退</td><td class="c4"></td><td class="c5"></td><td class="c6"></td></tr>
+<tr><td class="c0">[通選藝術]藝術欣賞</td><td class="c1">選</td><td class="c2"></td><td class="c3"></td><td class="c4">2</td><td class="c5">85</td><td class="c6"></td></tr>
+<tr><td class="c0">程式設計</td><td class="c1">必</td><td class="c2"></td><td class="c3"></td><td class="c4">3</td><td class="c5">82</td><td class="c6"></td></tr>
+"""
+        before, after = html.rsplit("</table>", 1)
+        html = before + extra + "</table>" + after
     try:
         page.insert_htmlbox(fitz.Rect(20, 20, 590, 780), html)
         return document.tobytes()
@@ -44,8 +52,9 @@ td { padding: 0; height: 25px; vertical-align: top; }
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
+    parser.add_argument("--review-cases", action="store_true")
     args = parser.parse_args()
-    args.output.write_bytes(build_synthetic_transcript_pdf())
+    args.output.write_bytes(build_synthetic_transcript_pdf(with_review_cases=args.review_cases))
 
 
 if __name__ == "__main__":

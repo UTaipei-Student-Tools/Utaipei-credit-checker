@@ -147,6 +147,8 @@ def test_snapshot_projection_contains_requirement_expanders_and_course_explanati
     assert "需人工確認" in unknown["manual_confirmation"]
 
     output = render_snapshot(snapshot)
+    assert output.count('id="graduation-standard-check"') == 1
+    assert output.index("畢業標準檢核") < output.index("行政資訊")
     assert '<details class="snapshot-requirement-expander"' in output
     assert 'data-requirement-id="req-core"' in output
     assert "核心課程" in output

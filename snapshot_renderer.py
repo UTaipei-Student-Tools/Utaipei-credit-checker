@@ -9,6 +9,8 @@ module is imported here.
 
 from __future__ import annotations
 
+from course_status import is_withdrawn_grade
+
 import contextvars
 import html
 import re
@@ -395,8 +397,8 @@ _PUBLIC_STATUS_LABELS = {
     "IP": "修習中",
     FAIL: "尚未完成",
     "FAILED": "尚未完成",
-    "W": "停修／未完成",
-    "WITHDRAWN": "停修／未完成",
+    "W": "已退選／停修",
+    "WITHDRAWN": "已退選／停修",
     "WAIVER": "免修／抵認",
     "WAIVED": "免修／抵認",
     "TRANSFERRED": "抵免／抵認",
@@ -1286,6 +1288,9 @@ def _attempt_view(
         or attempt.get("sem2_score")
         or attempt.get("sem1_score")
     ).strip()
+    if is_withdrawn_grade(grade):
+        display_status = "WITHDRAWN"
+        reason = "成績單已標示退選，不計入取得學分。"
     if not grade:
         st_upper = display_status.upper()
         if st_upper in {PASS, "COMPLETED"}:
@@ -2335,6 +2340,8 @@ def _unallocated_course_guidance(attempt: Mapping[str, Any]) -> tuple[str, str]:
     """Describe only legal next uses for an unmatched transcript attempt."""
 
     status = _text(attempt.get("status"), UNKNOWN).strip().upper().replace("-", "_").replace(" ", "_")
+    if is_withdrawn_grade(attempt.get("grade")) or status in {"WITHDRAWN", "W"}:
+        return "已退選，不採計學分", "成績單已標示退選，不計入取得學分。"
     identity = _text(attempt.get("identity_status"), UNKNOWN).strip().upper().replace("-", "_").replace(" ", "_")
     if status in {"IN_PROGRESS", "IP"}:
         return (
@@ -2384,6 +2391,8 @@ def _course_markup(course: Mapping[str, Any]) -> str:
 
     # Grade determination
     grade_val = _text(course.get("grade")).strip()
+    if is_withdrawn_grade(grade_val):
+        status_label = "已退選／停修"
     if not grade_val:
         st = _text(course.get("status")).upper()
         if st in {PASS, "COMPLETED"}:
@@ -3002,6 +3011,9 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         '</div>'
         '<section class="snapshot-card"><h2>計算結果</h2><ul class="snapshot-decision-list">'
         f'{calculation_markup}</ul></section>'
+        '<section id="graduation-standard-check"><h2>畢業標準檢核</h2><h3>各項畢業要求</h3>'
+        f'{_requirements_markup(view)}'
+        '</section>'
         '<section class="snapshot-card"><h2>行政資訊</h2><ul class="snapshot-decision-list">'
         f'{administrative_markup}</ul></section>'
         f'{additional_gate_markup}'
@@ -3017,9 +3029,6 @@ def render_snapshot(snapshot: DecisionSnapshot) -> str:
         '</div></section>'
         '<section class="snapshot-card"><h2>其他進度圖表（選看）</h2>'
         f'<details class="snapshot-chart-details"><summary>查看圖表</summary><div class="snapshot-chart-stack">{f11}{f1}{f7}{f5}</div></details>'
-        '</section>'
-        '<section><h2>各項畢業要求</h2>'
-        f'{_requirements_markup(view)}'
         '</section>'
         f'{unallocated_markup}'
         '<section class="snapshot-card"><h2>待辦與提醒</h2><ul class="snapshot-simple-list">'
