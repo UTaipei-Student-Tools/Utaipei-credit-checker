@@ -1,0 +1,9 @@
+# Sol核心max/IT批次後審：三個HIGH窄修正
+
+父代理五組186passed22subtests；Sol在tmp/core-max-it-review凍結副本重現下列未覆蓋反例。已指派Core唯一窄correction，public adapter暫停保留WIP。
+
+1. _maximum_subset_capacity不能用sum(amounts[observed_ids])扣externalcap，因internal也被扣。反例a需求10 internal10、b需求20 external20+internal5，cap觀察a,b最大15：合法a10+b外15+內5應PASS，現錯FAIL。搜尋state/choices需追每constraint已配置且VERIFIEDmembership、非VERIFIEDexemption的用量。
+2. missing cappedmembership不能因math或其他VERIFIEDpool而推確定不屬。18credits只有mathVERIFIED、externalcap15須UNKNOWN。若要確定非會員，新增server-owned明確NOT_MEMBER或等價completeforexactmembership負證據。unknown12/cap15仍PASS；unknown18 UNKNOWN；verifiedexternal18 FAIL；exemptionverified免cap。
+3. _non_credit_waiver_matches program/track缺失現在可過、authority任意非空可過。expectedprogram/track存在就exact且不得missing。server-owned requirement waiver_authority_ids allowlist（IT通識中心），matcher再收subject_ref exact比對。subject/version/program/track/authority缺失或wrong均不PASS，exactrecord維持PASS而zeroadditionalcredits。
+
+新counterexample回歸+原五組coretests+ruff/compile；父代理再跑。publicadapter後續負證據/PE/IT需沿用窄契約。任何同一修正失敗第二次不能自動重試掩蓋，須重估前提。

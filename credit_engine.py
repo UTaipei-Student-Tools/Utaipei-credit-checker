@@ -4,11 +4,64 @@ Graduation Credit Evaluation Engine — v2
 """
 
 import re
+from copy import deepcopy
 
-from handbook_rules import get_credit_requirements, get_rule_sets, get_rules_meta, normalize_course_name
+from curriculum_registry import (
+    MANUAL_REVIEW as RULE_MANUAL_REVIEW,
+)
+from curriculum_registry import (
+    MISSING as RULE_MISSING,
+)
+from curriculum_registry import (
+    RESOLVED as RULE_RESOLVED,
+)
+from curriculum_registry import (
+    resolve_rule_context,
+)
+from equivalency_audit import (
+    apply_equivalency_audit_to_report,
+    audit_equivalency_decisions,
+    source_attempt_id,
+    source_attempt_identity,
+)
+from handbook_rules import (
+    get_apc_target_requirements,
+    get_credit_requirements,
+    get_rule_sets,
+    get_rules_meta,
+    normalize_course_name,
+)
+from policy_audit import (
+    COURSE_IDENTITY_CONFLICTED,
+    COURSE_IDENTITY_MANUAL_APPROVED,
+    COURSE_IDENTITY_UNKNOWN,
+    COURSE_IDENTITY_VERIFIED,
+    GRADUATION_NOT_SATISFIED,
+    GRADUATION_SATISFIED,
+    UNKNOWN,
+    assess_cohort_match,
+    assess_course_identity,
+    assess_cs_manual_gate,
+    assess_double_major_eligibility,
+    get_double_structure,
+    get_primary_requirements,
+    normalize_primary_program,
+)
 
 # 匹配除錯開關：出問題時可打開以取得匹配決策輸出
 DEBUG_MATCHING = False
+
+# Shared-credit reuse is an aggregate policy allowance.  The deterministic
+# course slices below are useful for planning math, but they must never be
+# presented as department-approved course identities.
+_SHARED_REUSE_APPROVAL_SCOPE = "aggregate_allowance_only"
+_SHARED_REUSE_ALLOCATION_TYPE = "simulated"
+_SHARED_REUSE_COURSE_IDENTITY_STATUS = "not_official"
+_SHARED_REUSE_SELECTION_BASIS = "deterministic_planning_only"
+_SHARED_REUSE_OFFICIAL_IDENTITY_NOTE = (
+    "共同修課核准僅代表合計額度；列出的課名只是規劃用模擬配置，不代表系所已核准該課程身分。"
+    "正式共同修課科目身分須由系所證據確認。"
+)
 
 
 def dbg(msg):
@@ -83,31 +136,129 @@ def _course_credit_matches(course, expected_credit):
         return False
 
 
-def _course_matches_rule(course, rule_name, expected_credit=None, aliases=()):
+def _record_identity_issue(issues, course, rule_name, evidence, *, requirement_id=""):
+    """Append one deterministic identity conflict for report/export review."""
+
+    if not isinstance(issues, list) or not isinstance(evidence, dict):
+        return
+    item = {
+        "course_name": str(course.get("name") or course.get("raw_name") or ""),
+        "course_code": str(course.get("course_code") or ""),
+        "offering_department": str(course.get("offering_department") or ""),
+        "requirement_name": str(rule_name or ""),
+        "requirement_id": str(requirement_id or ""),
+        "identity_scope": evidence.get("identity_scope", ""),
+        "identity_status": evidence.get("identity_status", COURSE_IDENTITY_CONFLICTED),
+        "identity_reason": evidence.get("identity_reason", ""),
+        "identity_authority": evidence.get("identity_authority", ""),
+        "identity_evidence_reference": evidence.get("identity_evidence_reference", ""),
+        "attempt_id": str(course.get("attempt_id") or _stable_attempt_id(course)),
+    }
+    key = (
+        item["attempt_id"],
+        normalize_course_name(item["requirement_name"]),
+        item["requirement_id"],
+        item["identity_status"],
+    )
+    if not any(
+        (
+            str(existing.get("attempt_id") or ""),
+            normalize_course_name(existing.get("requirement_name") or ""),
+            str(existing.get("requirement_id") or ""),
+            str(existing.get("identity_status") or ""),
+        )
+        == key
+        for existing in issues
+        if isinstance(existing, dict)
+    ):
+        issues.append(item)
+
+
+def _dedupe_identity_issues(issues):
+    """Return stable, deterministic identity issue rows for reports/exports."""
+
+    unique = {}
+    for item in issues or []:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("attempt_id") or ""),
+            str(item.get("identity_scope") or ""),
+            str(item.get("identity_status") or ""),
+            # A single allocated UNKNOWN source is one evidence gap even if
+            # a reporting pass exposes it through duplicate target slices.
+            "" if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN else normalize_course_name(item.get("requirement_name") or ""),
+            "" if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN else str(item.get("requirement_id") or ""),
+        )
+        unique.setdefault(key, dict(item))
+    return [unique[key] for key in sorted(unique)]
+
+
+def _course_matches_rule(
+    course,
+    rule_name,
+    expected_credit=None,
+    aliases=(),
+    *,
+    scope=None,
+    identity_issues=None,
+    manual_approval=None,
+    requirement_id="",
+):
     accepted = {normalize_course_name(rule_name)}
     accepted.update(normalize_course_name(alias) for alias in aliases)
     accepted.discard("")
     course_name = normalize_course_name(course.get("name", "") or "")
     raw_name = normalize_course_name(course.get("raw_name", "") or "")
-    return (course_name in accepted or raw_name in accepted) and _course_credit_matches(course, expected_credit)
+    if not (course_name in accepted or raw_name in accepted) or not _course_credit_matches(course, expected_credit):
+        return False
+    if scope:
+        evidence = assess_course_identity(course, scope, manual_approval=manual_approval)
+        # Keep the evidence on the source row so every later report bucket,
+        # drilldown, and export can explain the provisional allocation.
+        course.update(evidence)
+        if evidence.get("identity_status") == COURSE_IDENTITY_CONFLICTED:
+            _record_identity_issue(identity_issues, course, rule_name, evidence, requirement_id=requirement_id)
+            return False
+    return True
 
 
 def _explicit_aliases(alias_sets, scope, rule_name):
     return alias_sets.get(scope, {}).get(rule_name, [])
 
 
-def _find_best_alternative(courses, options, consumed_set):
+def _find_best_alternative(courses, options, consumed_set, *, scope=None, identity_issues=None):
     candidates = []
     for option_name, expected_credit in options.items():
         for course in courses:
             if id(course) in consumed_set:
                 continue
-            if _course_matches_rule(course, option_name, expected_credit):
+            if _course_matches_rule(
+                course,
+                option_name,
+                expected_credit,
+                scope=scope,
+                identity_issues=identity_issues,
+            ):
                 rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
-                candidates.append((rank, option_name, course))
+                identity_rank = {
+                    COURSE_IDENTITY_VERIFIED: 2,
+                    COURSE_IDENTITY_MANUAL_APPROVED: 2,
+                    COURSE_IDENTITY_UNKNOWN: 1,
+                }.get(course.get("identity_status"), 0)
+                candidates.append((rank, identity_rank, option_name, course))
     if not candidates:
         return None
-    _, _, selected = max(candidates, key=lambda item: item[0])
+    _, _, _, selected = max(
+        candidates,
+        key=lambda item: (
+            item[0],
+            item[1],
+            _record_quality(item[3]),
+            normalize_course_name(item[2]),
+            _course_stable_key(item[3]),
+        ),
+    )
     consumed_set.add(id(selected))
     return selected
 
@@ -123,12 +274,15 @@ def _earned_and_in_progress(course):
 def _allocation_copy(course, completed, in_progress, note):
     """Create a reporting-only slice without mutating the parsed transcript row."""
     allocated = dict(course)
-    allocated["_origin_id"] = course.get("_origin_id", id(course))
+    attempt_id = course.get("attempt_id") or _stable_attempt_id(course)
+    allocated["attempt_id"] = attempt_id
+    allocated["_origin_id"] = course.get("_origin_id", attempt_id)
     allocated["total_credit"] = completed + in_progress
     allocated["completed_credit"] = completed
     allocated["is_completed"] = completed > 0
     allocated["is_in_progress"] = in_progress > 0
     allocated["allocation_note"] = note
+    allocated["allocation_id"] = f"{attempt_id}|{note}|{completed:.6f}|{in_progress:.6f}"
     return allocated
 
 
@@ -195,6 +349,182 @@ def _cap_course_bucket(courses, credit_limit, label):
     return recognized, overflow, recognized_completed, recognized_ip
 
 
+def _iter_primary_allocation_courses(report):
+    """Yield non-target allocated rows in a stable bucket order."""
+
+    common = report.get("common", {})
+    for course in common.get("compulsory_courses", []):
+        yield "common_compulsory", course
+    for category in sorted(common.get("categories", {}), key=str):
+        for course in common.get("categories", {}).get(category, {}).get("courses", []):
+            yield f"ge:{category}", course
+    for course in common.get("common_elective_courses", []):
+        yield "common_elective", course
+
+    major = report.get("major", {})
+    for key, bucket in (
+        ("dept_compulsory_courses", "major_common_compulsory"),
+        ("domain_compulsory_courses", "domain_compulsory"),
+        ("domain_elective_courses", "domain_elective"),
+        ("other_elective_courses", "other_elective"),
+    ):
+        for course in major.get(key, []):
+            yield bucket, course
+
+
+def _build_shared_reuse_allocations(report, allowance):
+    """Keep the legacy helper inert; aggregate allowances are not bindings.
+
+    Older integrations may still call this private compatibility helper.  It
+    intentionally returns no rows and no effective credits.  New callers must
+    use :func:`equivalency_audit.audit_equivalency_decisions` with an explicit
+    source attempt and target requirement.
+    """
+
+    try:
+        allowance_value = max(0.0, float(allowance or 0.0))
+    except (TypeError, ValueError):
+        allowance_value = 0.0
+    return {
+        "allowance": allowance_value,
+        "completed": 0.0,
+        "ip": 0.0,
+        "total": 0.0,
+        "rows": [],
+        "unallocated_allowance": allowance_value,
+        "approval_scope": "legacy_unbound",
+        "allocation_type": "not_counted",
+        "selection_basis": "legacy_compatibility_only",
+        "course_identity_status": "not_bound",
+        "official_course_identity_note": "舊版 aggregate 共同修課欄位未綁定來源與目標，不計入有效進度。",
+    }
+
+
+def _empty_shared_reuse():
+    """Return the stable shape used when sharing is not applicable/evidenced."""
+
+    return {
+        "allowance": 0.0,
+        "completed": 0.0,
+        "ip": 0.0,
+        "total": 0.0,
+        "rows": [],
+        "unallocated_allowance": 0.0,
+        "approval_scope": _SHARED_REUSE_APPROVAL_SCOPE,
+        "allocation_type": _SHARED_REUSE_ALLOCATION_TYPE,
+        "selection_basis": _SHARED_REUSE_SELECTION_BASIS,
+        "course_identity_status": _SHARED_REUSE_COURSE_IDENTITY_STATUS,
+        "official_course_identity_note": _SHARED_REUSE_OFFICIAL_IDENTITY_NOTE,
+    }
+
+
+def _course_numeric_score(course):
+    """Return the best numeric transcript score for deterministic tie-breaking."""
+
+    scores = []
+    for key in ("sem1_score", "sem2_score", "score"):
+        value = str(course.get(key, "") or "").strip()
+        try:
+            scores.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return max(scores, default=-1.0)
+
+
+def _course_status_rank(course):
+    if course.get("is_completed"):
+        return 3
+    if course.get("is_in_progress"):
+        return 2
+    if course.get("is_zero_credit"):
+        return 1
+    return 0
+
+
+def _course_stable_key(course):
+    """Stable order independent of transcript row order."""
+
+    identity = source_attempt_identity(course)
+    return (
+        normalize_course_name(course.get("name", "") or ""),
+        round(float(course.get("total_credit") or 0.0), 6),
+        -_course_status_rank(course),
+        -round(float(course.get("completed_credit") or 0.0), 6),
+        -round(_course_numeric_score(course), 6),
+        str(course.get("academic_year", "") or ""),
+        str(course.get("semester", "") or ""),
+        normalize_course_name(course.get("raw_name", "") or ""),
+        str(identity[-2]),
+        str(identity[-1]),
+    )
+
+
+def _attempt_identity(course):
+    """Compatibility wrapper around the authoritative identity contract."""
+
+    return source_attempt_identity(course)
+
+
+def _stable_attempt_id(course):
+    """Compatibility wrapper around the authoritative versioned ID contract."""
+
+    return source_attempt_id(course)
+
+
+def _stable_course_id(course):
+    """Backward-compatible alias for the stable attempt identity."""
+
+    return _attempt_identity(course)
+
+
+def _record_quality(course):
+    """Quality tuple used when the same title/credit appears repeatedly."""
+
+    return (
+        _course_status_rank(course),
+        round(float(course.get("completed_credit") or 0.0), 6),
+        round(_course_numeric_score(course), 6),
+        str(course.get("academic_year", "") or ""),
+        str(course.get("semester", "") or ""),
+        normalize_course_name(course.get("raw_name", "") or ""),
+    )
+
+
+def _canonicalize_courses(courses):
+    """Copy, sort, and collapse repeated title/credit transcript records.
+
+    A transcript can contain the same passed class more than once after PDF
+    layout reconstruction or a repeat attempt.  The evaluator must never
+    award both records.  Different credit values remain distinct so a wrong
+    credit attempt can still be shown for manual review.
+    """
+
+    grouped = {}
+    input_count = 0
+    for original in courses or []:
+        if not isinstance(original, dict):
+            continue
+        input_count += 1
+        copied = deepcopy(original)
+        name = normalize_course_name(copied.get("name", "") or copied.get("raw_name", ""))
+        copied["name"] = name
+        # Exact parser duplicates from the same offering collapse, while a
+        # repeated title/credit in another academic term remains an attempt.
+        key = _attempt_identity(copied)
+        grouped.setdefault(key, []).append(copied)
+
+    selected = []
+    duplicate_count = 0
+    for records in grouped.values():
+        chosen = max(records, key=_record_quality)
+        chosen["attempt_id"] = _stable_attempt_id(chosen)
+        chosen["_origin_id"] = chosen["attempt_id"]
+        selected.append(chosen)
+        duplicate_count += max(0, len(records) - 1)
+    selected.sort(key=_course_stable_key)
+    return selected, {"input_count": input_count, "canonical_count": len(selected), "deduplicated_count": duplicate_count}
+
+
 # 體育課名稱關鍵字（0學分但須追蹤修讀狀態）
 PE_KEYWORDS = [
     "體育",
@@ -237,7 +567,721 @@ def _is_exempt_course(c):
     return any(name in c["name"] or name in raw for name in ZERO_CREDIT_OVERRIDE_NAMES)
 
 
-def evaluate_graduation(courses, config):
+def _plan_requirements(plan, program_type="單主修", target_plan=None):
+    """Adapt a policy plan to the legacy renderer's requirement keys."""
+
+    system_total = float(plan.get("system_total", 85.0) or 0.0)
+    requirements = {
+        "total": float(plan.get("total_required", 128.0) or 0.0),
+        "common_total": float(plan.get("university_common_required", 28.0) or 0.0),
+        "common_compulsory": 10.0,
+        "ge_categories_total": 16.0,
+        "ge_per_category": 4.0,
+        "ge_common_elective": 2.0,
+        "major_total": system_total,
+        "major_common_compulsory": float(plan.get("major_common_required", plan.get("program_common_required", 0.0)) or 0.0),
+        "domain_compulsory": float(plan.get("track_required", 0.0) or 0.0),
+        "domain_elective": float(plan.get("elective_required", 0.0) or 0.0),
+        "major_other_elective": 0.0,
+        "free_elective": float(plan.get("free_required", 15.0) or 0.0),
+        "pe_semesters": 4,
+        "target_total": 0.0,
+    }
+    if target_plan:
+        requirements["target_total"] = float(target_plan.get("total_required", 40.0) or 0.0)
+    elif program_type in {"雙主修", "輔系"}:
+        requirements["target_total"] = 40.0 if program_type == "雙主修" else 20.0
+    return requirements
+
+
+def _empty_threshold_report(plan, requirements, config, target_plan=None, target_eligibility=None, warnings=None):
+    """Create a readable plan report without fabricating course identities."""
+
+    categories = {name: {"completed": 0.0, "ip": 0.0, "courses": []} for name in ("藝術與美感", "人文與文化思考", "公民素養與社會探索", "自然、生命與科技")}
+    target_req = float(requirements.get("target_total", 0.0) or 0.0)
+    return {
+        "handbook_year": str(plan.get("cohort", config.get("admission_cohort", ""))),
+        "program_type": config.get("program_type", "單主修"),
+        "target_dept": config.get("target_dept", ""),
+        "application": {
+            "application_year": config.get("application_year"),
+            "application_semester": config.get("application_semester"),
+            "application_status": config.get("application_status"),
+            "shared_evidence_state": config.get("shared_evidence_state"),
+            "cohort_mismatch_confirmed": bool(config.get("cohort_mismatch_confirmed", False)),
+            "interrupted": bool(config.get("interrupted")),
+        },
+        "rules_meta": {"version": str(plan.get("cohort", "")), "evidence_file": plan.get("source_file", "")},
+        "document_warnings": list(warnings or []),
+        "policy_warnings": list(warnings or []),
+        "citations": list(plan.get("citations", [])) + list((target_plan or {}).get("citations", [])),
+        "requirements": requirements,
+        "primary_plan": plan,
+        "target_plan": target_plan,
+        "double_major_eligibility": target_eligibility,
+        "detailed": False,
+        "summary": {
+            "total_completed": 0.0,
+            "total_ip": 0.0,
+            "total_with_ip": 0.0,
+            "major_completed": 0.0,
+            "major_ip": 0.0,
+            "target_completed": 0.0,
+            "target_ip": 0.0,
+            "free_completed": 0.0,
+            "free_ip": 0.0,
+            "common_completed": 0.0,
+            "common_ip": 0.0,
+            "graduation_ready": False,
+            "graduation_status": UNKNOWN,
+        },
+        "graduation_gates": {
+            "total": UNKNOWN,
+            "common_total": UNKNOWN,
+            "major_total": UNKNOWN,
+            "free": UNKNOWN,
+            "physical_education": UNKNOWN,
+            "target": UNKNOWN if target_req else "NOT_APPLICABLE",
+            "manual_evidence": UNKNOWN,
+        },
+        "common": {
+            "compulsory_completed": 0.0,
+            "compulsory_ip": 0.0,
+            "compulsory_missing": [],
+            "compulsory_courses": [],
+            "categories": categories,
+            "category_overflow": {name: [] for name in categories},
+            "category_completed": 0.0,
+            "category_ip": 0.0,
+            "common_elective_completed": 0.0,
+            "common_elective_ip": 0.0,
+            "common_elective_courses": [],
+        },
+        "major": {
+            "dept_compulsory_completed": 0.0,
+            "dept_compulsory_ip": 0.0,
+            "dept_compulsory_missing": [],
+            "dept_compulsory_courses": [],
+            "domain_compulsory_completed": 0.0,
+            "domain_compulsory_ip": 0.0,
+            "domain_compulsory_missing": [],
+            "domain_compulsory_courses": [],
+            "domain_elective_completed": 0.0,
+            "domain_elective_ip": 0.0,
+            "domain_elective_courses": [],
+            "other_elective_completed": 0.0,
+            "other_elective_ip": 0.0,
+            "other_elective_courses": [],
+        },
+        "target": {
+            "basic_core_completed": 0.0,
+            "basic_core_ip": 0.0,
+            "basic_core_missing": [],
+            "basic_core_courses": [],
+            "compulsory_completed": 0.0,
+            "compulsory_ip": 0.0,
+            "compulsory_missing": [],
+            "compulsory_courses": [],
+            "elective_completed": 0.0,
+            "elective_ip": 0.0,
+            "elective_courses": [],
+            "elective_missing": [],
+            "total_completed": 0.0,
+            "total_ip": 0.0,
+            "effective_total_completed": 0.0,
+            "effective_total_ip": 0.0,
+            "shared_reuse_credits": 0.0,
+            "equivalency_courses": [],
+            "equivalency_completed": 0.0,
+            "equivalency_shared_completed": 0.0,
+            "equivalency_exclusive_completed": 0.0,
+        },
+        "pe": {"courses": [], "semesters_completed": 0, "semesters_required": requirements.get("pe_semesters", 4), "semesters_ip": 0},
+        "free": {"completed": 0.0, "ip": 0.0, "courses": [], "science_college_cross_credits": 0.0, "science_college_cross_courses": []},
+        "manual_gates": {},
+        "audit": {"input_course_count": len(config.get("courses", []) or []), "canonical_course_count": 0, "deduplicated_count": 0},
+        "shared_reuse": _empty_shared_reuse(),
+        "identity_issues": [],
+        "identity_gate": {
+            "status": "NOT_APPLICABLE",
+            "state": "NOT_APPLICABLE",
+            "scoped_course_count": 0,
+            "verified_count": 0,
+            "unknown_count": 0,
+            "conflicted_count": 0,
+            "allocated_conflicted_count": 0,
+            "allocated_unknown_count": 0,
+            "rejected_conflicted_count": 0,
+            "manual_approved_count": 0,
+            "reasons": [],
+            "issues": [],
+        },
+    }
+
+
+def _target_program_config(program, track):
+    if program == "資科":
+        return "資科系"
+    if program == "物化":
+        return "物化系物理組" if track == "電子物理" else "物化系化學組"
+    return ""
+
+
+def _apc_target_plan_for_engine(handbook_year, target_dept, program):
+    """Load the cohort-scoped APC target rows used by exact allocation.
+
+    The old ``apc_rules.basic_core`` table is retained for compatibility, but
+    the 115 chemistry/physics target lists differ by track.  This helper keeps
+    that distinction at the target boundary and gives every row a stable
+    requirement ID for the equivalency audit.
+    """
+
+    if program not in {"雙主修", "輔系"} or "物化系" not in str(target_dept or ""):
+        return None
+    track = "物理組" if "物理" in str(target_dept) else "化學組"
+    try:
+        return get_apc_target_requirements(handbook_year, track, program)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _target_course_rules(target_plan):
+    if not isinstance(target_plan, dict):
+        return {}
+    return {
+        str(row.get("name")): float(row.get("credits", 0.0) or 0.0)
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("kind", "course") == "course" and row.get("name")
+    }
+
+
+def _target_requirement_rows_by_name(target_plan):
+    """Return exact target rows for identity/approval joins."""
+
+    if not isinstance(target_plan, dict):
+        return {}
+    return {
+        normalize_course_name(row.get("name")): row
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("name") and row.get("kind", "course") == "course"
+    }
+
+
+def _identity_scope_for_primary(domain):
+    """Department scope for the detailed Earth/Life primary catalogue."""
+
+    # Earth/Life tracks are two tracks of the same 地生 department.  Keep the
+    # user-facing track in the reason while matching the shared department
+    # aliases in ``assess_course_identity``.
+    return "地生系"
+
+
+def _identity_scope_for_target(target_dept):
+    """Department scope for a selected cross-department target."""
+
+    text = str(target_dept or "")
+    if "物理" in text:
+        return "物化系物理組"
+    if "化學" in text:
+        return "物化系化學組"
+    if "物化" in text:
+        return "物化系"
+    if "資科" in text or "資訊" in text:
+        return "資科系"
+    if "數學" in text:
+        return "數學系"
+    return str(target_dept or "")
+
+
+def _approved_identity_bindings(courses, target_plan, config, target_dept, program):
+    """Validate existing source→target approvals for identity overrides.
+
+    This is deliberately a read-only validation pass.  The normal equivalency
+    audit still runs after classification and remains the only path that can
+    add shared/reclassified credits.  Here we only expose a complete approved
+    binding to the exact matcher so a missing transcript identity can be shown
+    as ``MANUAL_APPROVED`` instead of silently as verified.
+    """
+
+    if not isinstance(target_plan, dict) or not target_plan.get("requirements"):
+        return {}
+    decisions = config.get("equivalency_decisions") or []
+    if not decisions:
+        return {}
+    context = dict(config.get("equivalency_context") or {})
+    context.update(
+        {
+            "admission_cohort": config.get("handbook_year") or config.get("admission_cohort"),
+            "target_program": "物化" if "物化" in str(target_dept or "") else target_dept,
+            "target_dept": target_dept,
+            "target_track": "物理組" if "物理" in str(target_dept or "") else "化學組" if "化學" in str(target_dept or "") else config.get("target_track", ""),
+            "program_type": program,
+        }
+    )
+    try:
+        audit = audit_equivalency_decisions(
+            courses,
+            target_plan,
+            decisions,
+            context=context,
+            include_candidates=False,
+        )
+    except (TypeError, ValueError, KeyError):
+        return {}
+    bindings = {}
+    for mapping in audit.get("approved_mappings", []) if isinstance(audit, dict) else []:
+        if not isinstance(mapping, dict) or mapping.get("counts") is not True:
+            continue
+        source_id = str(mapping.get("source_attempt_id") or "").strip()
+        target_id = str(mapping.get("target_requirement_id") or "").strip()
+        if source_id and target_id and mapping.get("authority") and mapping.get("evidence_reference"):
+            bindings[(source_id, target_id)] = mapping
+    return bindings
+
+
+def _annotate_manual_equivalency_identity(report, target_scope):
+    """Mark applied equivalency rows as manual identity evidence."""
+
+    if not isinstance(report, dict):
+        return
+    equivalency = report.get("equivalency", {})
+    mappings = equivalency.get("applied_mappings", []) if isinstance(equivalency, dict) else []
+    by_key = {
+        (
+            str(item.get("source_attempt_id") or "").strip(),
+            str(item.get("target_requirement_id") or "").strip(),
+        ): item
+        for item in mappings
+        if isinstance(item, dict)
+    }
+    if not by_key:
+        return
+    target = report.get("target", {})
+    if not isinstance(target, dict):
+        return
+    for key in ("basic_core_courses", "compulsory_courses", "elective_courses", "equivalency_courses"):
+        for course in target.get(key, []) or []:
+            if not isinstance(course, dict):
+                continue
+            source_id = str(course.get("attempt_id") or course.get("source_attempt_id") or "").strip()
+            target_id = str(course.get("target_requirement_id") or "").strip()
+            mapping = by_key.get((source_id, target_id))
+            if not mapping:
+                continue
+            course.update(
+                {
+                    "identity_status": COURSE_IDENTITY_MANUAL_APPROVED,
+                    "identity_scope": target_scope,
+                    "identity_reason": "已由完整的來源修課→目標門檻核准綁定覆蓋成績單身分欄位。",
+                    "identity_authority": str(mapping.get("authority") or ""),
+                    "identity_evidence_reference": str(mapping.get("evidence_reference") or ""),
+                    "identity_source_attempt_id": source_id,
+                    "identity_target_requirement_id": target_id,
+                    # Keep the existing names too; equivalency exports already
+                    # consume these fields and users recognize them there.
+                    "authority": str(mapping.get("authority") or course.get("authority") or ""),
+                    "evidence_reference": str(mapping.get("evidence_reference") or course.get("evidence_reference") or ""),
+                }
+            )
+
+
+def _build_identity_gate(report):
+    """Summarize scoped identity evidence without touching credit totals."""
+
+    records = []
+    seen_records = set()
+    for section, keys in (
+        ("major", ("dept_compulsory_courses", "domain_compulsory_courses", "domain_elective_courses", "other_elective_courses")),
+        ("target", ("basic_core_courses", "compulsory_courses", "elective_courses", "equivalency_courses")),
+    ):
+        data = report.get(section, {}) if isinstance(report.get(section, {}), dict) else {}
+        for key in keys:
+            for course in data.get(key, []) or []:
+                if isinstance(course, dict) and course.get("identity_scope"):
+                    record_key = (
+                        str(course.get("attempt_id") or course.get("_origin_id") or ""),
+                        str(course.get("identity_scope") or ""),
+                    )
+                    if record_key in seen_records:
+                        continue
+                    seen_records.add(record_key)
+                    records.append(course)
+    unknown = [item for item in records if item.get("identity_status") == COURSE_IDENTITY_UNKNOWN]
+    manual = [item for item in records if item.get("identity_status") == COURSE_IDENTITY_MANUAL_APPROVED]
+    allocated_conflicts = [
+        item for item in records if item.get("identity_status") == COURSE_IDENTITY_CONFLICTED
+    ]
+    issues = _dedupe_identity_issues(report.get("identity_issues", []))
+    for item in unknown:
+        issues.append(
+            {
+                "course_name": str(item.get("name") or item.get("raw_name") or ""),
+                "course_code": str(item.get("course_code") or ""),
+                "offering_department": str(item.get("offering_department") or ""),
+                "requirement_name": str(
+                    item.get("target_requirement_name") or item.get("name") or ""
+                ),
+                "requirement_id": str(item.get("target_requirement_id") or ""),
+                "identity_scope": str(item.get("identity_scope") or ""),
+                "identity_status": COURSE_IDENTITY_UNKNOWN,
+                "identity_reason": str(item.get("identity_reason") or ""),
+                "identity_authority": str(item.get("identity_authority") or ""),
+                "identity_evidence_reference": str(item.get("identity_evidence_reference") or ""),
+                "attempt_id": str(item.get("attempt_id") or item.get("_origin_id") or ""),
+            }
+        )
+    issues = _dedupe_identity_issues(issues)
+    report["identity_issues"] = issues
+    conflicts = []
+    seen_conflicts = set()
+    for item in [*issues, *records]:
+        if item.get("identity_status") != COURSE_IDENTITY_CONFLICTED:
+            continue
+        conflict_key = (
+            str(item.get("attempt_id") or item.get("_origin_id") or item.get("course_name") or ""),
+            str(item.get("requirement_id") or item.get("target_requirement_id") or ""),
+            str(item.get("identity_scope") or ""),
+        )
+        if conflict_key in seen_conflicts:
+            continue
+        seen_conflicts.add(conflict_key)
+        conflicts.append(item)
+    # UNKNOWN allocated evidence is the most conservative state: it must not
+    # be hidden by a rejected conflict from another transcript row.  Rejected
+    # conflicts remain visible/countable below, but do not block when a
+    # different allocated row is VERIFIED or MANUAL_APPROVED.
+    if unknown:
+        status = COURSE_IDENTITY_UNKNOWN
+    elif allocated_conflicts:
+        status = COURSE_IDENTITY_CONFLICTED
+    elif manual:
+        status = COURSE_IDENTITY_MANUAL_APPROVED
+    elif records:
+        status = COURSE_IDENTITY_VERIFIED
+    else:
+        status = "NOT_APPLICABLE"
+    reasons = []
+    if unknown:
+        reasons.append(f"{len(unknown)} 門系所課程缺少課號／開課系所，只能作暫時配置；需系所確認。")
+    if conflicts:
+        reasons.append(f"{len(conflicts)} 門課程的開課系所與要求範圍衝突，未計入該系所門檻。")
+    if manual:
+        reasons.append(f"{len(manual)} 門課程使用完整人工核准綁定。")
+    if status == COURSE_IDENTITY_VERIFIED:
+        reasons.append("所有已配置的系所課程都有可核對的課號與開課系所。")
+    return {
+        "status": status,
+        "state": status,
+        "scoped_course_count": len(records),
+        "verified_count": sum(item.get("identity_status") == COURSE_IDENTITY_VERIFIED for item in records),
+        "unknown_count": len(unknown),
+        "conflicted_count": len(conflicts),
+        "allocated_conflicted_count": len(allocated_conflicts),
+        "allocated_unknown_count": len(unknown),
+        "rejected_conflicted_count": max(0, len(conflicts) - len(allocated_conflicts)),
+        "manual_approved_count": len(manual),
+        "reasons": list(dict.fromkeys(reasons)),
+        "issues": issues,
+    }
+
+
+def _annotate_target_requirements(report, target_plan):
+    """Attach stable IDs to exact target rows and missing rows."""
+
+    if not isinstance(target_plan, dict):
+        return
+    by_name = {
+        normalize_course_name(row.get("name")): row
+        for row in target_plan.get("requirements", [])
+        if isinstance(row, dict) and row.get("name")
+    }
+    target = report.get("target", {})
+    for key in ("basic_core_courses", "compulsory_courses", "elective_courses"):
+        for course in target.get(key, []):
+            if not isinstance(course, dict):
+                continue
+            item = by_name.get(normalize_course_name(course.get("name") or course.get("raw_name")))
+            if item:
+                course["target_requirement_id"] = item.get("id", "")
+                course["target_requirement_name"] = item.get("name", "")
+    for key in ("basic_core_missing", "compulsory_missing", "elective_missing"):
+        for missing in target.get(key, []):
+            if not isinstance(missing, dict):
+                continue
+            item = by_name.get(normalize_course_name(missing.get("name")))
+            if item:
+                missing["target_requirement_id"] = item.get("id", "")
+                missing["target_requirement_name"] = item.get("name", "")
+
+
+def _rule_resolution_request(config, *, fallback_cohort=None, fallback_primary=None, fallback_program_type=None):
+    """Translate legacy evaluator config into the public resolution seam."""
+
+    config = config if isinstance(config, dict) else {}
+    target_dept = config.get("target_program") or config.get("target_dept") or config.get("secondary_program")
+    target_track = config.get("target_track") or config.get("secondary_track")
+    request = {
+        "admission_cohort": config.get("admission_cohort") or config.get("handbook_year") or fallback_cohort,
+        "primary_program": config.get("primary_program") or config.get("program_name") or fallback_primary or config.get("domain"),
+        "primary_track": config.get("primary_track") or config.get("track"),
+        "program_type": config.get("program_type") or fallback_program_type or config.get("program", "單主修"),
+        "target_program": target_dept,
+        "target_track": target_track,
+        "target_curriculum_version": config.get("target_curriculum_version") or config.get("target_curriculum_id") or config.get("target_version"),
+        "target_version_evidence_reference": config.get("target_version_evidence_reference") or config.get("target_curriculum_evidence_reference") or config.get("version_evidence_reference"),
+        "scoped_applicability_assertion": config.get("scoped_applicability_assertion") or config.get("target_applicability_assertion") or config.get("version_applicability_assertion"),
+        "application_term": config.get("application_term"),
+        "application_year": config.get("application_year"),
+        "application_semester": config.get("application_semester"),
+    }
+    return {key: value for key, value in request.items() if value not in (None, "")}
+
+
+def _apply_rule_resolution_gate(report, resolution):
+    """Attach one resolution snapshot and make unresolved rules non-PASS."""
+
+    if not isinstance(report, dict):
+        return report
+    resolution = resolution if isinstance(resolution, dict) else {}
+    report["rule_resolution"] = resolution
+    # ``resolution`` is a short compatibility alias used by integrations
+    # that adopted the domain term before the longer key was introduced.
+    report["resolution"] = resolution
+    details = resolution.get("blockers", [])
+    report["rule_blockers"] = list(details) if isinstance(details, list) else []
+    report["blockers"] = list(details) if isinstance(details, list) else []
+    resolution_can_pass = resolution.get("can_pass") is True
+    if resolution_can_pass and not details:
+        return report
+    report["rule_resolution_blocked"] = True
+    report["policy_warnings"] = list(report.get("policy_warnings", []))
+    warning_items = details or [
+        {
+            "code": resolution.get("status", RULE_MANUAL_REVIEW),
+            "dimension": "rule_resolution",
+            "reason": "規則解析未明確允許通過，已安全阻擋畢業判定。",
+        }
+    ]
+    for item in warning_items:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code", RULE_MANUAL_REVIEW)
+        dimension = item.get("dimension", "rule")
+        reason = item.get("reason", "規則解析未完成。")
+        report["policy_warnings"].append(f"規則解析[{code}] {dimension}：{reason}")
+    report["policy_warnings"] = list(dict.fromkeys(str(item) for item in report["policy_warnings"] if item))
+    gates = report.get("graduation_gates")
+    if isinstance(gates, dict):
+        gates["rule_resolution"] = False
+        gates["curriculum_resolution"] = False
+        gates["target_curriculum_version"] = (
+            resolution.get("dimensions", {}).get("target_curriculum_version", {}).get("status")
+            if isinstance(resolution.get("dimensions"), dict)
+            else RULE_MANUAL_REVIEW
+        )
+    summary = report.get("summary")
+    if isinstance(summary, dict):
+        # Keep a definite academic failure visible even when the independent
+        # rule-resolution gate is unresolved.  Only a prior SATISFIED or
+        # UNKNOWN verdict is downgraded to UNKNOWN; unresolved policy evidence
+        # must never erase a known unmet graduation requirement.
+        prior_status = summary.get("graduation_status")
+        if prior_status in {GRADUATION_SATISFIED, UNKNOWN}:
+            summary["graduation_status"] = UNKNOWN
+        summary["graduation_ready"] = False
+    return report
+
+
+def evaluate_cohort_plan(courses, config, *, evidence_resolver=None):
+    """Evaluate a selected cohort/primary track with conservative fallbacks."""
+
+    from policy_audit import assess_double_major_eligibility
+
+    config = config or {}
+    cohort = config.get("admission_cohort") or config.get("handbook_year") or "114"
+    primary_value = config.get("primary_program") or config.get("program_name") or config.get("domain", "地生")
+    program, track = normalize_primary_program(primary_value, cohort)
+    track = config.get("primary_track") or config.get("track") or track
+    plan = get_primary_requirements(cohort, primary_value, track)
+    program_type = config.get("program_type", "單主修")
+    resolution = resolve_rule_context(
+        _rule_resolution_request(
+            config,
+            fallback_cohort=cohort,
+            fallback_primary=primary_value,
+            fallback_program_type=program_type,
+        ),
+        evidence_resolver=evidence_resolver,
+    )
+    parser_diagnostics = config.get("parser_diagnostics") or {}
+    detected_cohort = parser_diagnostics.get("detected_admission_cohort") or config.get("detected_admission_cohort")
+    cohort_match = assess_cohort_match(
+        cohort,
+        detected_cohort,
+        confirmed=bool(config.get("cohort_mismatch_confirmed", False)),
+    )
+
+    target_plan = None
+    target_eligibility = None
+    target_program = config.get("target_program") or config.get("target_dept")
+    target_resolution = (resolution.get("dimensions") or {}).get("target_curriculum_version", {})
+    target_curriculum = resolution.get("target_curriculum") or {}
+    target_version_cohort = str(target_curriculum.get("version") or cohort)
+    target_version_resolved = target_resolution.get("status") == RULE_RESOLVED
+    if program_type == "雙主修":
+        if not target_program:
+            target_eligibility = assess_double_major_eligibility(program_type=program_type, admission_cohort=cohort)
+        else:
+            target_program, target_track = normalize_primary_program(target_program, cohort)
+            # A target version is independent from the admission cohort.  If
+            # it was not resolved, retain a diagnostic candidate only so the
+            # legacy report can still show readable aggregate rows; it is
+            # never allowed to act as an authoritative target curriculum.
+            target_plan = get_double_structure(
+                target_version_cohort if target_version_resolved else cohort,
+                target_program,
+                target_track or config.get("target_track"),
+            )
+            if not target_version_resolved:
+                target_plan.update(
+                    {
+                        "candidate_only": True,
+                        "curriculum_id": None,
+                        "curriculum_version": None,
+                        "target_curriculum_version": None,
+                        "registry_status": target_resolution.get("status", RULE_MISSING),
+                        "registry_blockers": list(resolution.get("blockers", [])),
+                    }
+                )
+            if target_program == "物化":
+                target_plan["target_requirements"] = _apc_target_plan_for_engine(
+                    target_version_cohort if target_version_resolved else cohort,
+                    "物化系物理組" if target_track == "電子物理" else "物化系化學組",
+                    program_type,
+                )
+            target_eligibility = assess_double_major_eligibility(
+                program_type=program_type,
+                admission_cohort=cohort,
+                application_year=config.get("application_year"),
+                application_semester=config.get("application_semester"),
+                application_status=config.get("application_status"),
+                secondary_credits=config.get("secondary_credits"),
+                shared_credits=config.get("shared_credits"),
+                shared_course_credits=config.get("shared_course_credits"),
+                shared_reuse_credits=config.get("shared_reuse_credits"),
+                shared_approved=config.get("shared_approved"),
+                shared_evidence_state=config.get("shared_evidence_state"),
+                department_approved=config.get("department_approved"),
+                interrupted=bool(config.get("interrupted")),
+                leave_history=config.get("leave_history"),
+            )
+
+    # Preserve the established detailed Earth evaluator where its exact
+    # course tables are available and the target can be safely mapped.
+    target_old = _target_program_config(*(normalize_primary_program(target_program, cohort) if target_program else ("", None))) if target_program else ""
+    can_detail = program == "地生" and str(cohort) in {"112", "113", "114"} and (not target_program or target_old)
+    if can_detail:
+        legacy = dict(config)
+        legacy.pop("primary_program", None)
+        legacy.pop("primary_track", None)
+        legacy.pop("admission_cohort", None)
+        # The detailed legacy evaluator is an implementation adapter, not a
+        # second rule-resolution boundary.  Remove cohort-aware resolution
+        # keys so it cannot recurse back into evaluate_cohort_plan; the outer
+        # report applies the already-resolved snapshot below.
+        for resolution_key in (
+            "target_curriculum_version",
+            "target_curriculum_id",
+            "target_version",
+            "target_version_evidence_reference",
+            "target_curriculum_evidence_reference",
+            "version_evidence_reference",
+            "scoped_applicability_assertion",
+            "target_applicability_assertion",
+            "version_applicability_assertion",
+        ):
+            legacy.pop(resolution_key, None)
+        legacy["domain"] = track or "地球環境"
+        legacy["handbook_year"] = str(cohort)
+        legacy["program"] = program_type
+        if target_old:
+            legacy["target_dept"] = target_old
+        if target_plan and target_plan.get("target_requirements"):
+            legacy["target_requirements"] = target_plan["target_requirements"]
+        legacy["equivalency_decisions"] = config.get("equivalency_decisions", [])
+        legacy["equivalency_context"] = config.get("equivalency_context", {})
+        report = evaluate_graduation(courses, legacy, evidence_resolver=evidence_resolver)
+        report["primary_plan"] = plan
+        report["target_plan"] = target_plan
+        report["cohort_match"] = cohort_match
+        report["evidence_states"] = plan.get("evidence_states", plan.get("evidence", {}))
+        # The legacy evaluator has now classified the actual transcript.  Use
+        # that target total when applying the independent double-major rule;
+        # do not retain the pre-transcript UNKNOWN produced above.
+        if target_old and program_type == "雙主修":
+            bound_shared = float(
+                (report.get("equivalency", {}) or {}).get("approved_shared_reuse_credits", 0.0) or 0.0
+            )
+            target_eligibility = assess_double_major_eligibility(
+                program_type=program_type,
+                admission_cohort=cohort,
+                application_year=config.get("application_year"),
+                application_semester=config.get("application_semester"),
+                application_status=config.get("application_status"),
+                secondary_credits=report.get("target", {}).get(
+                    "effective_total_completed", report.get("summary", {}).get("target_completed", 0.0)
+                ),
+                shared_credits=bound_shared,
+                shared_approved=True,
+                shared_evidence_state="approved" if bound_shared > 1e-6 else "confirmed_zero",
+                equivalency_bound=bound_shared > 1e-6,
+                department_approved=config.get("department_approved"),
+                interrupted=bool(config.get("interrupted")),
+                leave_history=config.get("leave_history"),
+            )
+        report["double_major_eligibility"] = target_eligibility
+        report["citations"] = list(plan.get("citations", [])) + list((target_plan or {}).get("citations", []))
+        if cohort_match.get("status") == UNKNOWN:
+            report["policy_warnings"] = list(
+                dict.fromkeys(report.get("policy_warnings", []) + cohort_match.get("reasons", []))
+            )
+            report["summary"]["graduation_status"] = UNKNOWN
+            report["summary"]["graduation_ready"] = False
+        if target_eligibility and target_eligibility.get("status") != "SATISFIED":
+            report["policy_warnings"] = list(dict.fromkeys(report.get("policy_warnings", []) + target_eligibility.get("reasons", [])))
+            report["summary"]["graduation_status"] = UNKNOWN
+            report["summary"]["graduation_ready"] = False
+        _apply_rule_resolution_gate(report, resolution)
+        return report
+
+    requirements = _plan_requirements(plan, program_type, target_plan)
+    warnings = list(plan.get("warnings", []))
+    if target_plan:
+        warnings.extend(target_plan.get("warnings", []))
+    if target_eligibility and target_eligibility.get("status") != "SATISFIED":
+        warnings.extend(target_eligibility.get("reasons", []))
+    report = _empty_threshold_report(plan, requirements, {**config, "courses": courses}, target_plan, target_eligibility, warnings)
+    report["cohort_match"] = cohort_match
+    report["evidence_states"] = plan.get("evidence_states", plan.get("evidence", {}))
+    if cohort_match.get("status") == UNKNOWN:
+        report["policy_warnings"] = list(dict.fromkeys(report["policy_warnings"] + cohort_match.get("reasons", [])))
+    if program == "資科":
+        report["manual_gates"]["cs"] = assess_cs_manual_gate(
+            config.get("cs_project_evidence"),
+            config.get("cs_certification_a"),
+            config.get("cs_certification_b"),
+            config.get("cs_alternative_course"),
+        )
+        if report["manual_gates"]["cs"]["status"] != "COMPLETED":
+            report["policy_warnings"].extend(report["manual_gates"]["cs"].get("warnings", []))
+    # A threshold-only plan is useful without a transcript, but it cannot
+    # produce a definitive graduation decision or course-level gaps.
+    report["summary"]["graduation_status"] = UNKNOWN
+    _apply_rule_resolution_gate(report, resolution)
+    return report
+
+
+def evaluate_graduation(courses, config, *, evidence_resolver=None):
     """
     Evaluate courses against one explicitly selected Science College handbook.
 
@@ -250,6 +1294,21 @@ def evaluate_graduation(courses, config):
             "handbook_year": "112", "113", or "114"
         }
     """
+    config = config or {}
+    if any(
+        key in config
+        for key in (
+            "primary_program",
+            "admission_cohort",
+            "primary_track",
+            "target_curriculum_version",
+            "target_curriculum_id",
+            "target_version_evidence_reference",
+            "scoped_applicability_assertion",
+        )
+    ):
+        return evaluate_cohort_plan(courses, config, evidence_resolver=evidence_resolver)
+
     domain = config.get("domain", "地球環境")
     program = config.get("program", "單主修")
     target_dept = config.get("target_dept", "物化系化學組")
@@ -260,6 +1319,7 @@ def evaluate_graduation(courses, config):
     apc_rules = rule_sets["apc_rules"]
     cs_rules = rule_sets["cs_rules"]
     alias_sets = rule_sets.get("course_aliases", {})
+    courses, canonical_meta = _canonicalize_courses(courses)
     rule_names_set = _collect_rule_names(rule_sets)
     major_compulsory_set = _collect_major_compulsory(earth_life_major)
 
@@ -269,12 +1329,29 @@ def evaluate_graduation(courses, config):
         raise ValueError(f"不支援的修課身分：{program}")
 
     requirements = get_credit_requirements(program, target_dept, rule_sets["academic_year"])
+    target_requirements = config.get("target_requirements")
+    if not isinstance(target_requirements, dict):
+        target_requirements = _apc_target_plan_for_engine(rule_sets["academic_year"], target_dept, program)
 
     report = {
         "handbook_year": rule_sets["academic_year"],
+        "program_type": program,
+        "target_dept": target_dept,
+        "application": {
+            "application_year": config.get("application_year"),
+            "application_semester": config.get("application_semester"),
+            "application_status": config.get("application_status"),
+            "shared_evidence_state": config.get("shared_evidence_state"),
+            "cohort_mismatch_confirmed": bool(config.get("cohort_mismatch_confirmed", False)),
+            "interrupted": bool(config.get("interrupted")),
+        },
         "rules_meta": get_rules_meta(rule_sets["academic_year"]),
         "document_warnings": rule_sets.get("document_warnings", []),
+        "policy_warnings": [],
+        "citations": [],
         "requirements": requirements,
+        "target_requirements": target_requirements,
+        "detailed": True,
         "summary": {
             "total_completed": 0.0,
             "total_ip": 0.0,
@@ -338,6 +1415,13 @@ def evaluate_graduation(courses, config):
             "elective_missing": [],
             "total_completed": 0.0,
             "total_ip": 0.0,
+            "effective_total_completed": 0.0,
+            "effective_total_ip": 0.0,
+            "shared_reuse_credits": 0.0,
+            "equivalency_courses": [],
+            "equivalency_completed": 0.0,
+            "equivalency_shared_completed": 0.0,
+            "equivalency_exclusive_completed": 0.0,
         },
         "pe": {
             # 體育（每學期 0學分必修，共需修 4 學期）
@@ -353,7 +1437,50 @@ def evaluate_graduation(courses, config):
             "science_college_cross_credits": 0.0,
             "science_college_cross_courses": [],
         },
+        "audit": canonical_meta,
+        "manual_gates": {},
+        "shared_reuse": _empty_shared_reuse(),
+        # Department-scoped rows carry their own evidence; this aggregate is
+        # populated again after equivalency mappings are applied.
+        "identity_issues": [],
+        "identity_gate": {
+            "status": "NOT_APPLICABLE",
+            "state": "NOT_APPLICABLE",
+            "scoped_course_count": 0,
+            "verified_count": 0,
+            "unknown_count": 0,
+            "conflicted_count": 0,
+            "allocated_conflicted_count": 0,
+            "allocated_unknown_count": 0,
+            "rejected_conflicted_count": 0,
+            "manual_approved_count": 0,
+            "reasons": [],
+            "issues": [],
+        },
     }
+
+    primary_identity_scope = _identity_scope_for_primary(domain)
+    target_identity_scope = (
+        _identity_scope_for_target(target_dept) if program in {"雙主修", "輔系"} else ""
+    )
+    target_requirement_rows = _target_requirement_rows_by_name(target_requirements)
+    target_quota_id = ""
+    if isinstance(target_requirements, dict):
+        target_quota_id = next(
+            (
+                str(row.get("id") or "")
+                for row in target_requirements.get("requirements", [])
+                if isinstance(row, dict) and row.get("kind") == "quota" and row.get("id")
+            ),
+            "",
+        )
+    identity_bindings = _approved_identity_bindings(
+        courses,
+        target_requirements,
+        {**config, "handbook_year": rule_sets["academic_year"]},
+        target_dept,
+        program,
+    )
 
     consumed = set()
 
@@ -400,7 +1527,14 @@ def evaluate_graduation(courses, config):
 
     # ── PHASE 0.5: 地生系與專業領域必修（主修必修最高優先）────────
     for name, req_cred in earth_life_major["common_compulsory"].items():
-        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+        matched_c = find_and_consume_course(
+            courses,
+            name,
+            consumed,
+            req_cred,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["dept_compulsory_courses"].append(matched_c)
@@ -413,7 +1547,13 @@ def evaluate_graduation(courses, config):
 
     for group in earth_life_major.get("common_alternatives", []):
         required = float(group.get("required_credits", 0))
-        matched_c = _find_best_alternative(courses, group.get("options", {}), consumed)
+        matched_c = _find_best_alternative(
+            courses,
+            group.get("options", {}),
+            consumed,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["dept_compulsory_courses"].append(matched_c)
@@ -430,7 +1570,14 @@ def evaluate_graduation(courses, config):
 
     domain_rules = earth_life_major["domains"][domain]
     for name, req_cred in domain_rules.items():
-        matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+        matched_c = find_and_consume_course(
+            courses,
+            name,
+            consumed,
+            req_cred,
+            scope=primary_identity_scope,
+            identity_issues=report["identity_issues"],
+        )
         if matched_c:
             comp_c, ip_c = get_course_credits(matched_c)
             report["major"]["domain_compulsory_courses"].append(matched_c)
@@ -447,10 +1594,20 @@ def evaluate_graduation(courses, config):
             div = "化學組" if "化學組" in target_dept else "物理組"
             program_key = "double_major" if program == "雙主修" else "minor"
             program_rules = apc_rules[program_key]
-            basic_core_rules = apc_rules["basic_core"]
+            basic_core_rules = _target_course_rules(target_requirements) or apc_rules["basic_core"]
 
             for name, req_cred in basic_core_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["basic_core_courses"].append(matched_c)
@@ -461,11 +1618,28 @@ def evaluate_graduation(courses, config):
                 else:
                     report["target"]["basic_core_missing"].append({"name": name, "credit": req_cred})
 
-            other_req = float(program_rules["other_req"])
-            other_required_pool = dict(apc_rules.get("shared_other_required", {}))
-            other_required_pool.update(apc_rules["divisions"][div]["compulsory"])
+            other_req = float(
+                (target_requirements or {}).get("other_required", program_rules.get("other_req", 0.0))
+            )
+            other_required_pool = dict(
+                (target_requirements or {}).get(
+                    "other_required_catalog",
+                    dict(apc_rules.get("shared_other_required", {}))
+                    | dict(apc_rules["divisions"][div]["compulsory"]),
+                )
+            )
             for name, req_cred in other_required_pool.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=(target_row.get("id", "") if isinstance(target_row, dict) else "") or target_quota_id,
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
@@ -503,7 +1677,17 @@ def evaluate_graduation(courses, config):
             comp_rules = rules["compulsory"]
 
             for name, req_cred in comp_rules.items():
-                matched_c = find_and_consume_course(courses, name, consumed, req_cred)
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
+                matched_c = find_and_consume_course(
+                    courses,
+                    name,
+                    consumed,
+                    req_cred,
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
+                )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
                     report["target"]["compulsory_courses"].append(matched_c)
@@ -515,12 +1699,17 @@ def evaluate_graduation(courses, config):
                     report["target"]["compulsory_missing"].append({"name": name, "credit": req_cred})
 
             for name, req_cred in cs_rules.get("department_courses", {}).items():
+                target_row = target_requirement_rows.get(normalize_course_name(name), {})
                 matched_c = find_and_consume_course(
                     courses,
                     name,
                     consumed,
                     req_cred,
                     _explicit_aliases(alias_sets, "cs", name),
+                    scope=target_identity_scope,
+                    identity_issues=report["identity_issues"],
+                    requirement_id=target_row.get("id", "") if isinstance(target_row, dict) else "",
+                    manual_approvals=identity_bindings,
                 )
                 if matched_c:
                     comp_c, ip_c = get_course_credits(matched_c)
@@ -615,15 +1804,7 @@ def evaluate_graduation(courses, config):
                             break
 
                 if is_match:
-                    comp_c, ip_c = get_course_credits(c)
-                    # 若此類別已達最低要求，將後續課程登記為 overflow（超額）以便檢視
-                    if report["common"]["categories"][cat_name]["completed"] >= per_category_req:
-                        report["common"]["category_overflow"][cat_name].append(c)
                     report["common"]["categories"][cat_name]["courses"].append(c)
-                    report["common"]["categories"][cat_name]["completed"] += comp_c
-                    report["common"]["categories"][cat_name]["ip"] += ip_c
-                    report["common"]["category_completed"] += comp_c
-                    report["common"]["category_ip"] += ip_c
                     consumed.add(c_idx)
 
     # ── PHASE 4: 通識共同選修（剩餘的通識課）─────────────────────────────────
@@ -658,15 +1839,7 @@ def evaluate_graduation(courses, config):
                     cond3 = label in cat_name.replace("與", "")
                     dbg(f"PHASE4: compare label('{label}') vs cat('{cat_name}') -> {cond1},{cond2},{cond3}")
                     if cond1 or cond2 or cond3:
-                        comp_c, ip_c = get_course_credits(c)
-                        # 若該分類已滿，視為 overflow
-                        if report["common"]["categories"][cat_name]["completed"] >= per_category_req:
-                            report["common"]["category_overflow"][cat_name].append(c)
                         report["common"]["categories"][cat_name]["courses"].append(c)
-                        report["common"]["categories"][cat_name]["completed"] += comp_c
-                        report["common"]["categories"][cat_name]["ip"] += ip_c
-                        report["common"]["category_completed"] += comp_c
-                        report["common"]["category_ip"] += ip_c
                         consumed.add(c_idx)
                         assigned = True
                         break
@@ -674,47 +1847,38 @@ def evaluate_graduation(courses, config):
             if assigned:
                 continue
             if "通選" in raw_norm or "通識" in raw_norm or "共同選修" in raw_norm:
-                comp_c, ip_c = get_course_credits(c)
-                ge_common_req = requirements["ge_common_elective"]
-                # 溢出處理：如果通識共同選修已滿，溢出到自由選修
-                if (
-                    report["common"]["common_elective_completed"] + report["common"]["common_elective_ip"]
-                    >= ge_common_req
-                ):
-                    report["free"]["courses"].append(c)
-                    report["free"]["completed"] += comp_c
-                    report["free"]["ip"] += ip_c
-                else:
-                    report["common"]["common_elective_courses"].append(c)
-                    report["common"]["common_elective_completed"] += comp_c
-                    report["common"]["common_elective_ip"] += ip_c
+                report.setdefault("_common_elective_candidates", []).append(c)
                 consumed.add(c_idx)
 
-    # ── PHASE X: 將通識分類中的超額課程重新歸類為自由選修（避免被計入各分類總和）
-    overflow = report["common"].get("category_overflow", {})
-    for cat_name, items in overflow.items():
-        for c in list(items):
-            # use get_course_credits to compute comp/ip credits
-            comp_c, ip_c = get_course_credits(c)
-            # subtract from category totals (避免負值)
-            cat = report["common"]["categories"].get(cat_name)
-            if cat:
-                cat["completed"] = max(0.0, cat.get("completed", 0.0) - comp_c)
-                cat["ip"] = max(0.0, cat.get("ip", 0.0) - ip_c)
-                # remove from courses list if present
-                try:
-                    cat["courses"] = [cc for cc in cat.get("courses", []) if id(cc) != id(c)]
-                except Exception:
-                    pass
-            # subtract from aggregate category counters
-            report["common"]["category_completed"] = max(0.0, report["common"].get("category_completed", 0.0) - comp_c)
-            report["common"]["category_ip"] = max(0.0, report["common"].get("category_ip", 0.0) - ip_c)
-            # add into free electives
-            report["free"]["courses"].append(c)
-            report["free"]["completed"] += comp_c
-            report["free"]["ip"] += ip_c
-    # 清空 overflow 結構（已轉移）以避免重複處理
-    report["common"]["category_overflow"] = {k: [] for k in report["common"].get("category_overflow", {})}
+    # ── PHASE X: 通識分類／共同選修逐類精確封頂，超額保留至自由選修
+    def add_free_course(item):
+        comp_c, ip_c = get_course_credits(item)
+        report["free"]["courses"].append(item)
+        report["free"]["completed"] += comp_c
+        report["free"]["ip"] += ip_c
+
+    for cat_name, category in report["common"]["categories"].items():
+        recognized, overflow_items, completed, ip = _cap_course_bucket(
+            category["courses"], per_category_req, f"通識分類 {cat_name}"
+        )
+        category["courses"] = recognized
+        category["completed"] = completed
+        category["ip"] = ip
+        report["common"]["category_overflow"][cat_name] = overflow_items
+        report["common"]["category_completed"] += completed
+        report["common"]["category_ip"] += ip
+        for overflow_item in overflow_items:
+            add_free_course(overflow_item)
+
+    common_candidates = report.pop("_common_elective_candidates", [])
+    recognized, overflow_items, completed, ip = _cap_course_bucket(
+        common_candidates, requirements["ge_common_elective"], "通識共同選修"
+    )
+    report["common"]["common_elective_courses"] = recognized
+    report["common"]["common_elective_completed"] = completed
+    report["common"]["common_elective_ip"] = ip
+    for overflow_item in overflow_items:
+        add_free_course(overflow_item)
 
     # (原 PHASE 5, 6 已移至 PHASE 0.5)
 
@@ -724,7 +1888,13 @@ def evaluate_graduation(courses, config):
         c_idx = id(c)
         if c_idx not in consumed:
             for rule_name, rule_credit in domain_elective_rules.items():
-                if _course_matches_rule(c, rule_name, rule_credit):
+                if _course_matches_rule(
+                    c,
+                    rule_name,
+                    rule_credit,
+                    scope=primary_identity_scope,
+                    identity_issues=report["identity_issues"],
+                ):
                     comp_c, ip_c = get_course_credits(c)
                     report["major"]["domain_elective_courses"].append(c)
                     report["major"]["domain_elective_completed"] += comp_c
@@ -747,6 +1917,8 @@ def evaluate_graduation(courses, config):
                     rule_name,
                     rule_credit,
                     _explicit_aliases(alias_sets, "earth_life_common_electives", rule_name),
+                    scope=primary_identity_scope,
+                    identity_issues=report["identity_issues"],
                 ):
                     comp_c, ip_c = get_course_credits(c)
                     report["major"]["other_elective_courses"].append(c)
@@ -755,77 +1927,42 @@ def evaluate_graduation(courses, config):
                     consumed.add(c_idx)
                     break
 
+    # 精確封頂專業選修；跨出第一個子門檻的部分仍可填入下一個系內
+    # 選修池，但每一池都以切片方式封頂，避免出現超過目標學分的假進度。
+    domain_recognized, overflow_to_other, domain_completed, domain_ip = _cap_course_bucket(
+        report["major"]["domain_elective_courses"], requirements["domain_elective"], "專業選修"
+    )
+    report["major"]["domain_elective_courses"] = domain_recognized
+    report["major"]["domain_elective_completed"] = domain_completed
+    report["major"]["domain_elective_ip"] = domain_ip
+    report["major"]["other_elective_courses"].extend(overflow_to_other)
+
+    other_recognized, overflow_to_free, other_completed, other_ip = _cap_course_bucket(
+        report["major"]["other_elective_courses"], requirements["major_other_elective"], "其他本系課程"
+    )
+    report["major"]["other_elective_courses"] = other_recognized
+    report["major"]["other_elective_completed"] = other_completed
+    report["major"]["other_elective_ip"] = other_ip
+    for c in overflow_to_free:
+        add_free_course(c)
+
     # ── PHASE 9: 自由選修（剩餘所有有學分的課）──────────────────────────────
     for c in courses:
         c_idx = id(c)
-        if c_idx not in consumed:
-            if c["total_credit"] > 0:
-                comp_c, ip_c = get_course_credits(c)
-                report["free"]["courses"].append(c)
-                report["free"]["completed"] += comp_c
-                report["free"]["ip"] += ip_c
+        if c_idx not in consumed and c["total_credit"] > 0:
+            add_free_course(c)
 
-                # 理學院院內跨系選修判定
-                cross_keywords = ["物理", "化學", "資訊", "數學", "計算機", "離散數學", "微積分"]
-                if any(kw in c["name"] for kw in cross_keywords):
-                    if (
-                        normalize_course_name(c["name"]) not in major_compulsory_set
-                        and normalize_course_name(c["name"]) not in _normalized_names(domain_elective_rules)
-                    ):
-                        report["free"]["science_college_cross_courses"].append(c)
-                        report["free"]["science_college_cross_credits"] += comp_c
-                consumed.add(c_idx)
-
-    # ── PHASE 9.5: 超額選修學分溢流至自由選修（避免主修/輔系超額學分未計入自由選修而影響畢業判定） ──────────────────────
-    # 1. 專業選修超額 (超過 20 學分的部分) -> 溢流到 其他本系選修
-    domain_req = requirements["domain_elective"]
-    accumulated = 0.0
-    new_domain_courses = []
-    overflow_to_other = []
-    for c in report["major"]["domain_elective_courses"]:
-        comp_c = c["completed_credit"]
-        if accumulated >= domain_req:
-            overflow_to_other.append(c)
-        else:
-            new_domain_courses.append(c)
-            accumulated += comp_c
-    report["major"]["domain_elective_courses"] = new_domain_courses
-    report["major"]["domain_elective_completed"] = sum(c["completed_credit"] for c in new_domain_courses)
-    report["major"]["domain_elective_ip"] = sum(
-        c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_domain_courses
-    )
-
-    # 將超出的專業選修併入其他本系選修
-    for c in overflow_to_other:
-        report["major"]["other_elective_courses"].append(c)
-        comp_c, ip_c = get_course_credits(c)
-        report["major"]["other_elective_completed"] += comp_c
-        report["major"]["other_elective_ip"] += ip_c
-
-    # 2. 其他本系選修超額 (超過 27 學分的部分) -> 溢流到 自由選修
-    other_req = requirements["major_other_elective"]
-    accumulated = 0.0
-    new_other_courses = []
-    overflow_to_free = []
-    for c in report["major"]["other_elective_courses"]:
-        comp_c = c["completed_credit"]
-        if accumulated >= other_req:
-            overflow_to_free.append(c)
-        else:
-            new_other_courses.append(c)
-            accumulated += comp_c
-    report["major"]["other_elective_courses"] = new_other_courses
-    report["major"]["other_elective_completed"] = sum(c["completed_credit"] for c in new_other_courses)
-    report["major"]["other_elective_ip"] = sum(
-        c["total_credit"] - c["completed_credit"] if c["is_in_progress"] else 0.0 for c in new_other_courses
-    )
-
-    # 將超出的其他選修併入自由選修
-    for c in overflow_to_free:
-        report["free"]["courses"].append(c)
-        comp_c, ip_c = get_course_credits(c)
-        report["free"]["completed"] += comp_c
-        report["free"]["ip"] += ip_c
+            # 理學院院內跨系選修判定
+            cross_keywords = ["物理", "化學", "資訊", "數學", "計算機", "離散數學", "微積分"]
+            if any(kw in c["name"] for kw in cross_keywords):
+                if (
+                    normalize_course_name(c["name"]) not in major_compulsory_set
+                    and normalize_course_name(c["name"]) not in _normalized_names(domain_elective_rules)
+                ):
+                    report["free"]["science_college_cross_courses"].append(c)
+                    comp_c, _ = get_course_credits(c)
+                    report["free"]["science_college_cross_credits"] += comp_c
+            consumed.add(c_idx)
 
     # 3. 跨系各子門檻已於 PHASE 1 精確封頂；在此只重新匯總。
     report["target"]["total_completed"] = (
@@ -838,6 +1975,7 @@ def evaluate_graduation(courses, config):
         + report["target"].get("basic_core_ip", 0.0)
         + report["target"]["elective_ip"]
     )
+    _annotate_target_requirements(report, target_requirements)
 
     # ── PHASE 10: 匯總計算 ───────────────────────────────────────────────
     report["summary"]["common_completed"] = (
@@ -884,10 +2022,42 @@ def evaluate_graduation(courses, config):
     # 額外計算：將已取得 + 正在修習的學分一起顯示（以便學生查看含修讀中學分的總和）
     report["summary"]["total_with_ip"] = report["summary"]["total_completed"] + report["summary"]["total_ip"]
 
-    # 畢業審查
+    # Credit conservation is an audit invariant: every completed or current
+    # credit in the canonical transcript must appear in exactly one report
+    # bucket (course attempts with zero earned credit do not contribute).
+    source_earned = sum(sum(_earned_and_in_progress(course)) for course in courses)
+    allocated_earned = report["summary"]["total_completed"] + report["summary"]["total_ip"]
+    conservation_delta = allocated_earned - source_earned
+    report["audit"]["source_earned_and_ip"] = source_earned
+    report["audit"]["allocated_earned_and_ip"] = allocated_earned
+    report["audit"]["shared_reuse_completed"] = report.get("shared_reuse", {}).get("completed", 0.0)
+    report["audit"]["shared_reuse_ip"] = report.get("shared_reuse", {}).get("ip", 0.0)
+    report["audit"]["shared_reuse_total"] = report.get("shared_reuse", {}).get("total", 0.0)
+    report["audit"]["credit_conservation"] = abs(conservation_delta) <= 1e-6
+    if not report["audit"]["credit_conservation"]:
+        report["policy_warnings"].append(
+            f"分類後學分未守恆（來源 {source_earned:g}、配置 {allocated_earned:g}）；請人工複核。"
+        )
+
+    # 畢業審查：每一個子門檻都必須通過，不能只用總學分作為捷徑。
     has_enough = report["summary"]["total_completed"] >= requirements["total"]
     has_common = report["summary"]["common_completed"] >= requirements["common_total"]
-    has_major = report["summary"]["major_completed"] >= requirements["major_total"]
+    has_ge_categories = all(
+        category.get("completed", 0.0) >= requirements["ge_per_category"]
+        for category in report["common"]["categories"].values()
+    )
+    has_ge_common_elective = report["common"]["common_elective_completed"] >= requirements["ge_common_elective"]
+    has_major_common = report["major"]["dept_compulsory_completed"] >= requirements["major_common_compulsory"]
+    has_domain_required = report["major"]["domain_compulsory_completed"] >= requirements["domain_compulsory"]
+    has_domain_elective = report["major"]["domain_elective_completed"] >= requirements["domain_elective"]
+    has_other_elective = report["major"]["other_elective_completed"] >= requirements["major_other_elective"]
+    has_major = (
+        report["summary"]["major_completed"] >= requirements["major_total"]
+        and has_major_common
+        and has_domain_required
+        and has_domain_elective
+        and has_other_elective
+    )
     has_free = report["summary"]["free_completed"] >= requirements["free_elective"]
     has_pe = report["pe"]["semesters_completed"] >= requirements["pe_semesters"]
 
@@ -897,23 +2067,268 @@ def evaluate_graduation(courses, config):
         and len(report["major"]["domain_compulsory_missing"]) == 0
     )
 
-    target_satisfied = True
-    if requirements["target_total"] > 0:
-        target_satisfied = (
-            report["target"]["total_completed"] >= requirements["target_total"]
+    # Shared-course reuse is a reporting-only allowance.  Keep the ordinary
+    # target totals untouched so the source/allocated conservation invariant
+    # remains meaningful.
+    report["target"]["effective_total_completed"] = report["target"].get("total_completed", 0.0)
+    report["target"]["effective_total_ip"] = report["target"].get("total_ip", 0.0)
+    report["target"]["shared_reuse_credits"] = 0.0
+    report["shared_reuse"] = _empty_shared_reuse()
+
+    def target_gate_satisfied():
+        if requirements["target_total"] <= 0:
+            return True
+        target_basic_req = 0.0
+        target_compulsory_req = 0.0
+        if "物化系" in target_dept:
+            if target_requirements:
+                target_basic_req = float(target_requirements.get("base_required", 0.0) or 0.0)
+                target_compulsory_req = float(target_requirements.get("other_required", 0.0) or 0.0)
+            else:
+                target_basic_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("basic_req", 0.0))
+                target_compulsory_req = float(apc_rules.get("double_major" if program == "雙主修" else "minor", {}).get("other_req", 0.0))
+        elif "資科系" in target_dept:
+            target_compulsory_req = float(
+                cs_rules.get("double_major" if program == "雙主修" else "minor", {}).get("compulsory_req", 0.0)
+            )
+        return (
+            report["target"].get("effective_total_completed", report["target"].get("total_completed", 0.0))
+            >= requirements["target_total"]
             and len(report["target"]["basic_core_missing"]) == 0
             and len(report["target"]["compulsory_missing"]) == 0
             and len(report["target"].get("elective_missing", [])) == 0
+            and report["target"].get("basic_core_completed", 0.0) >= target_basic_req
+            and report["target"].get("compulsory_completed", 0.0) + report["target"].get("elective_completed", 0.0) >= target_compulsory_req
         )
 
-    report["summary"]["graduation_ready"] = (
-        has_enough and has_common and has_major and has_free and has_pe and no_missing and target_satisfied
+    # Course-level equivalency is a second pass over the exact transcript
+    # allocations.  Suggestions remain UNKNOWN; only an approved source
+    # attempt -> target requirement row can affect effective target progress.
+    equivalency_audit = {
+        "status": "NOT_APPLICABLE",
+        "state": "NOT_APPLICABLE",
+        "decisions": [],
+        "approved_mappings": [],
+        "candidates": [],
+        "manual_gate": {"status": "NOT_APPLICABLE", "state": "NOT_APPLICABLE", "validation_codes": []},
+        "warnings": [],
+        "validation_codes": [],
+        "legacy_unbound": False,
+        "approved_shared_reuse_credits": 0.0,
+        "approved_exclusive_credits": 0.0,
+    }
+    if target_requirements and "物化系" in target_dept:
+        equivalency_context = dict(config.get("equivalency_context") or {})
+        equivalency_context.update(
+            {
+                "admission_cohort": rule_sets["academic_year"],
+                "target_program": "物化",
+                "target_dept": target_dept,
+                "target_track": target_requirements.get("track", ""),
+                "program_type": program,
+                # Preserve legacy inputs only for a compatibility warning;
+                # audit_equivalency_decisions never treats them as bindings.
+                "shared_credits": config.get("shared_credits"),
+                "shared_course_credits": config.get("shared_course_credits"),
+                "shared_reuse_credits": config.get("shared_reuse_credits"),
+                "shared_reuse": config.get("shared_reuse"),
+                "shared_approved": config.get("shared_approved"),
+                "shared_evidence_state": config.get("shared_evidence_state"),
+            }
+        )
+        equivalency_audit = audit_equivalency_decisions(
+            courses,
+            target_requirements,
+            config.get("equivalency_decisions") or [],
+            context=equivalency_context,
+            report=report,
+            include_candidates=True,
+        )
+        report = apply_equivalency_audit_to_report(report, equivalency_audit, mutate=True)
+
+    # A complete approved source-attempt → target-requirement mapping is the
+    # only non-transcript override for a department-scoped identity.  Mark the
+    # applied slices before computing the final identity gate so exports and
+    # drilldowns carry the same evidence decision.
+    _annotate_manual_equivalency_identity(report, target_identity_scope)
+    report["identity_gate"] = _build_identity_gate(report)
+
+    target_satisfied = target_gate_satisfied()
+
+    # Relevant policy contradictions / missing manual evidence are explicit
+    # blockers for a definitive result.  Unrelated department warnings do not
+    # contaminate an otherwise scoped Earth report.
+    relevant_warnings = []
+    for warning in report.get("document_warnings", []):
+        text = str(warning)
+        if "資科" in text and "資科" not in target_dept:
+            continue
+        if "物化" in text and "物化" not in target_dept:
+            continue
+        if any(term in text for term in ("矛盾", "衝突", "未附具體條件", "尚未完整")):
+            relevant_warnings.append(text)
+    report["policy_warnings"].extend(relevant_warnings)
+
+    if "資科系" in target_dept:
+        report["manual_gates"]["cs"] = assess_cs_manual_gate(
+            config.get("cs_project_evidence"),
+            config.get("cs_certification_a"),
+            config.get("cs_certification_b"),
+            config.get("cs_alternative_course"),
+        )
+        if report["manual_gates"]["cs"]["status"] != "COMPLETED":
+            report["policy_warnings"].extend(report["manual_gates"]["cs"].get("warnings", []))
+
+    if program == "雙主修":
+        secondary_base = (
+            config.get("secondary_credits")
+            if config.get("secondary_credits") is not None
+            else report["target"].get("effective_total_completed", report["summary"]["target_completed"])
+        )
+        bound_shared = float(equivalency_audit.get("approved_shared_reuse_credits", 0.0) or 0.0)
+        # Legacy aggregate fields are deliberately not forwarded as an
+        # allowance.  An explicit zero keeps the independent timing/40-credit
+        # policy check useful while the equivalency gate reports any unresolved
+        # source-to-target evidence.
+        eligibility_kwargs = {
+            "program_type": program,
+            "admission_cohort": config.get("handbook_year"),
+            "application_year": config.get("application_year"),
+            "application_semester": config.get("application_semester"),
+            "application_status": config.get("application_status"),
+            "secondary_credits": secondary_base,
+            "shared_credits": bound_shared,
+            "shared_approved": True,
+            "shared_evidence_state": "approved" if bound_shared > 1e-6 else "confirmed_zero",
+            "department_approved": config.get("department_approved"),
+            "interrupted": bool(config.get("interrupted")),
+            "leave_history": config.get("leave_history"),
+            "equivalency_bound": bound_shared > 1e-6,
+        }
+        eligibility = assess_double_major_eligibility(
+            **eligibility_kwargs,
+        )
+        report["double_major_eligibility"] = eligibility
+        if eligibility.get("status") != "SATISFIED":
+            report["policy_warnings"].extend(eligibility.get("reasons", []))
+
+    # Re-evaluate the target sub-bucket gate after any approved, separately
+    # reported shared reuse has been applied.
+    target_satisfied = target_gate_satisfied()
+
+    report["policy_warnings"] = list(dict.fromkeys(str(item) for item in report["policy_warnings"] if item))
+    parser_diagnostics = config.get("parser_diagnostics") or {}
+    cohort_match = assess_cohort_match(
+        report["handbook_year"],
+        parser_diagnostics.get("detected_admission_cohort") or config.get("detected_admission_cohort"),
+        confirmed=bool(config.get("cohort_mismatch_confirmed", False)),
     )
+    report["cohort_match"] = cohort_match
+    if cohort_match.get("status") == UNKNOWN:
+        report["policy_warnings"] = list(
+            dict.fromkeys(report["policy_warnings"] + cohort_match.get("reasons", []))
+        )
+    # Parser course-code/department omissions are evidence gaps, not a global
+    # fatal parse error.  They become a graduation blocker only when the
+    # affected row was actually allocated to a department-scoped requirement;
+    # common/general/free-only allocations therefore remain usable.
+    if parser_diagnostics:
+        parser_fatal = parser_diagnostics.get("fatal")
+        if parser_fatal is None:
+            parser_fatal = bool(parser_diagnostics.get("fatal_warnings"))
+            if not parser_fatal and not (
+                parser_diagnostics.get("course_code_missing")
+                or parser_diagnostics.get("offering_department_missing")
+            ):
+                parser_fatal = parser_diagnostics.get("complete") is False
+    else:
+        parser_fatal = False
+    identity_gate = report.get("identity_gate", {})
+    if not isinstance(identity_gate, dict):
+        identity_gate = {"status": "NOT_APPLICABLE"}
+    allocated_unknown = bool(
+        identity_gate.get("allocated_unknown_count", identity_gate.get("unknown_count", 0))
+    )
+    allocated_conflicted = bool(identity_gate.get("allocated_conflicted_count", 0))
+    identity_ok = not allocated_unknown and not allocated_conflicted
+    unknown_blocker = bool(parser_fatal)
+    unknown_blocker = unknown_blocker or cohort_match.get("status") == UNKNOWN
+    unknown_blocker = unknown_blocker or bool(report["policy_warnings"])
+    unknown_blocker = unknown_blocker or allocated_unknown
+    all_gates = has_enough and has_common and has_ge_categories and has_ge_common_elective and has_major and has_free and has_pe and no_missing and target_satisfied and identity_ok
+    report["graduation_gates"] = {
+        "total": has_enough,
+        "common_total": has_common,
+        "ge_categories": has_ge_categories,
+        "ge_common_elective": has_ge_common_elective,
+        "major_total": has_major,
+        "major_common": has_major_common,
+        "domain_required": has_domain_required,
+        "domain_elective": has_domain_elective,
+        "other_elective": has_other_elective,
+        "free": has_free,
+        "physical_education": has_pe,
+        "required_courses": no_missing,
+        "target": target_satisfied,
+        "target_effective_total": report["target"].get("effective_total_completed", report["target"].get("total_completed", 0.0)) >= requirements["target_total"] if requirements["target_total"] else True,
+        "course_identity": identity_ok,
+        "identity": identity_ok,
+        "course_identity_status": identity_gate.get("status", "NOT_APPLICABLE"),
+        "identity_status": identity_gate.get("status", "NOT_APPLICABLE"),
+        "credit_conservation": report["audit"]["credit_conservation"],
+    }
+    if unknown_blocker:
+        graduation_status = UNKNOWN
+    elif all_gates:
+        graduation_status = GRADUATION_SATISFIED
+    else:
+        graduation_status = GRADUATION_NOT_SATISFIED
+    report["summary"]["graduation_status"] = graduation_status
+    report["summary"]["graduation_ready"] = graduation_status == GRADUATION_SATISFIED
+
+    # Add the selected primary and double-major source references to exports.
+    try:
+        primary_plan = get_primary_requirements(report["handbook_year"], "地生", domain)
+        report["citations"] = list(primary_plan.get("citations", []))
+        report["evidence_states"] = primary_plan.get("evidence_states", primary_plan.get("evidence", {}))
+        if target_dept:
+            target_name = "資科" if "資科" in target_dept else "物化" if "物化" in target_dept else "地生"
+            target_track = "電子物理" if "物理" in target_dept else "應用化學" if "化學" in target_dept else None
+            report["citations"].extend(get_double_structure(report["handbook_year"], target_name, target_track).get("citations", []))
+    except (ValueError, KeyError):
+        report["citations"] = []
+
+    # Legacy callers may still provide only ``handbook_year``.  It remains a
+    # primary-handbook selector, but it must never silently select a
+    # double-major target curriculum.  Apply the same public resolution gate
+    # here as the cohort-aware adapter so both entry points have one verdict
+    # contract.
+    resolution = resolve_rule_context(
+        _rule_resolution_request(
+            config,
+            fallback_cohort=report.get("handbook_year") or handbook_year or "114",
+            fallback_primary=domain,
+            fallback_program_type=program,
+        ),
+        evidence_resolver=evidence_resolver,
+    )
+    _apply_rule_resolution_gate(report, resolution)
 
     return report
 
 
-def find_and_consume_course(courses, rule_name, consumed_set, expected_credit=None, aliases=()):
+def find_and_consume_course(
+    courses,
+    rule_name,
+    consumed_set,
+    expected_credit=None,
+    aliases=(),
+    *,
+    scope=None,
+    identity_issues=None,
+    requirement_id="",
+    manual_approvals=None,
+):
     """Consume one exact scoped identity, preferring completed attempts.
 
     Substring matching, edit-distance matching and global aliases are forbidden.
@@ -921,16 +2336,43 @@ def find_and_consume_course(courses, rule_name, consumed_set, expected_credit=No
     combined laboratory courses separate from their theory/lab components.
     """
     candidates = []
-    for position, course in enumerate(courses):
+    for course in courses:
         c_idx = id(course)
         if c_idx in consumed_set:
             continue
-        if _course_matches_rule(course, rule_name, expected_credit, aliases):
+        manual_approval = None
+        if scope and manual_approvals and requirement_id:
+            manual_approval = manual_approvals.get(
+                (str(course.get("attempt_id") or source_attempt_id(course)), str(requirement_id))
+            )
+        if _course_matches_rule(
+            course,
+            rule_name,
+            expected_credit,
+            aliases,
+            scope=scope,
+            identity_issues=identity_issues,
+            manual_approval=manual_approval,
+            requirement_id=requirement_id,
+        ):
             rank = 2 if course.get("is_completed") else 1 if course.get("is_in_progress") else 0
-            candidates.append((rank, -position, course))
+            identity_rank = {
+                COURSE_IDENTITY_VERIFIED: 2,
+                COURSE_IDENTITY_MANUAL_APPROVED: 2,
+                COURSE_IDENTITY_UNKNOWN: 1,
+            }.get(course.get("identity_status"), 0)
+            candidates.append((rank, identity_rank, course))
     if not candidates:
         return None
-    _, _, selected = max(candidates, key=lambda item: (item[0], item[1]))
+    _, _, selected = max(
+        candidates,
+        key=lambda item: (
+            item[0],
+            item[1],
+            _record_quality(item[2]),
+            tuple(reversed(_course_stable_key(item[2]))),
+        ),
+    )
     consumed_set.add(id(selected))
     dbg(
         "find_and_consume: exact scoped match "
